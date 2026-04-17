@@ -1,0 +1,258 @@
+// Three-tier epoch loop.
+//
+//  Fast   (FAST_MS  ≈ 1 s): advance prices, safety barrier check per pair
+//  Medium (MEDIUM_MS ≈ 6 s): run auctions, settle pools, update NPCs, contracts
+//  Slow   (every SLOW_EVERY medium ticks): analytics, insurance pool, regime, correlation
+
+import { useEffect, useRef, useCallback } from "react";
+import { FAST_MS, MEDIUM_MS, SLOW_EVERY, GRACE_MS } from "../constants/system.js";
+import { priceStep } from "../lib/priceModels.js";
+import { calcRealizedSigma } from "../lib/math.js";
+import { detectRegime } from "../lib/regime.js";
+import { updateNpcRegime } from "../lib/npcs.js";
+import { runAuction } from "../lib/auction.js";
+import { settleDominantPool, calcRatioBeta } from "../lib/pool.js";
+import { settleImbalanceContracts, settleEntropyContracts } from "../lib/contracts.js";
+import { settleStrips } from "../lib/strips.js";
+import { settleInsurancePool } from "../lib/insurance.js";
+import { updateYieldModel } from "../lib/yieldModel.js";
+import { calcCrossMarketCorrelations } from "../lib/correlation.js";
+import { pushPrice } from "../state/pairState.js";
+import { getEffectiveCap } from "../lib/esma.js";
+import { ACTIVE_PAIRS } from "../constants/assets.js";
+
+export function useEpochLoop({
+  pairStates: _pairStates, // reserved for future read-only access
+  setPairStates,    // React setter
+  player,           // { id, leverage, margin, side, strategy, minYield, tip_tiers, ... }
+  setPlayer,        // React setter
+  setLogs,          // (fn) => void
+  addToast,         // (msg, type) => void
+  running,          // boolean
+}) {
+  const mediumCountRef = useRef(0);
+  const lastPlayerEditRef = useRef(0);
+
+  // Signal that the player config was just changed.
+  const onPlayerEdit = useCallback(() => {
+    lastPlayerEditRef.current = Date.now();
+  }, []);
+
+  // -------------------------------------------------------------------------
+  // Fast tick: advance price + barrier check only
+  // -------------------------------------------------------------------------
+  const fastTick = useCallback(() => {
+    setPairStates((prev) => {
+      const next = { ...prev };
+      ACTIVE_PAIRS.forEach((pk) => {
+        const ps = prev[pk];
+        if (!ps) return;
+        const prices = ps.prices;
+        const latestPrice = prices[prices.length - 1];
+        const newPrice = priceStep(ps.pair, latestPrice, ps.realizedSigma);
+        const updated = pushPrice(ps, newPrice);
+        const newSigma = calcRealizedSigma(updated.prices, 12);
+        next[pk] = { ...updated, realizedSigma: newSigma };
+      });
+      return next;
+    });
+  }, [setPairStates]);
+
+  // -------------------------------------------------------------------------
+  // Medium tick: auction + settlement
+  // -------------------------------------------------------------------------
+  const mediumTick = useCallback(() => {
+    const now = Date.now();
+    const gracePeriod = now - lastPlayerEditRef.current < GRACE_MS;
+    mediumCountRef.current += 1;
+    const doSlow = mediumCountRef.current % SLOW_EVERY === 0;
+
+    setPairStates((prev) => {
+      const logs = [];
+      const next = { ...prev };
+
+      // Collect all price histories for cross-market correlation (slow only).
+      const priceHistories = {};
+      ACTIVE_PAIRS.forEach((pk) => {
+        if (prev[pk]) priceHistories[pk] = prev[pk].prices;
+      });
+      const corrMap = doSlow ? calcCrossMarketCorrelations(priceHistories) : {};
+
+      // --- Collect all auction results for insurance pool (slow only) ---
+      const allPairAuctions = {};
+
+      ACTIVE_PAIRS.forEach((pk) => {
+        const ps = prev[pk];
+        if (!ps) return;
+
+        const { prices, realizedSigma, npcs, regime, yieldModel,
+                smileParams, metaParams, prevSmoothFills, alpha,
+                imbalanceContracts, entropyContracts, strips,
+                insurancePool, epochIndex } = ps;
+
+        const priceOld = prices[prices.length - 2] ?? prices[prices.length - 1];
+        const priceNew = prices[prices.length - 1];
+
+        // Regime detection on slow tick only.
+        const updatedRegime = doSlow ? detectRegime(ps.returnHistory) : (regime ?? { key: "CALM" });
+
+        // Update NPCs with regime awareness.
+        const updatedNpcs = npcs.map((npc) =>
+          updateNpcRegime(npc, prices.slice(-20), updatedRegime, null, yieldModel)
+        );
+
+        // Build participants: NPCs + player (if not in grace period).
+        const { effectiveCap: cap } = getEffectiveCap(pk, realizedSigma);
+        const participants = [...updatedNpcs];
+        if (!gracePeriod && player && player.activePair === pk) {
+          participants.push({
+            ...player,
+            max_lev: Math.min(player.leverage ?? 1, cap),
+          });
+        }
+
+        // Run auction.
+        const auctionResult = runAuction(
+          participants,
+          alpha,
+          logs,
+          cap,
+          smileParams,
+          realizedSigma,
+          prevSmoothFills,
+          metaParams
+        );
+        allPairAuctions[pk] = auctionResult;
+
+        // Settle dominant pool.
+        const longMargin = auctionResult.matched
+          .filter((m) => m.longId)
+          .reduce((s, m) => s + m.margin, 0);
+        const shortMargin = auctionResult.matched
+          .filter((m) => m.shortId)
+          .reduce((s, m) => s + m.margin, 0);
+        const newAlpha = calcRatioBeta(longMargin, shortMargin);
+
+        // Build user list for pool settlement (NPC + player positions).
+        const poolUsers = updatedNpcs.map((npc) => ({
+          id: npc.id,
+          margin: npc.base_margin,
+          leverage: Math.min(npc.max_lev, cap),
+          side: npc.strategy?.includes("SHORT") ? "SHORT" : "LONG",
+          active: true,
+        }));
+        if (!gracePeriod && player?.activePair === pk) {
+          poolUsers.push({
+            id: player.id ?? "You",
+            margin: player.margin ?? 5000,
+            leverage: Math.min(player.leverage ?? 1, cap),
+            side: player.side ?? "LONG",
+            active: true,
+          });
+        }
+
+        const { users: settledUsers, stabilityFeeCollected, logs: poolLogs } =
+          settleDominantPool(poolUsers, priceOld, priceNew, realizedSigma, corrMap);
+        poolLogs.forEach((l) => logs.push(l));
+
+        // Update player margin if this is their active pair.
+        if (!gracePeriod && player?.activePair === pk) {
+          const playerSettled = settledUsers.find((u) => u.id === (player.id ?? "You"));
+          if (playerSettled) {
+            setPlayer((prev) => ({
+              ...prev,
+              margin: playerSettled.margin,
+              pnl: playerSettled.pnl ?? 0,
+              liquidated: playerSettled.liquidated,
+            }));
+            if (playerSettled.liquidated) {
+              addToast(`Liquidated on ${pk}!`, "error");
+            }
+          }
+        }
+
+        // Settle contracts.
+        const { settled: imbalSettled, logs: imbalLogs } =
+          settleImbalanceContracts(imbalanceContracts, longMargin, shortMargin);
+        imbalLogs.forEach((l) => logs.push(l));
+
+        const avgEntMult =
+          auctionResult.normWeights?.reduce((s, w) => s + w, 0) /
+          Math.max(1, auctionResult.normWeights?.length ?? 1);
+        const { settled: entSettled, logs: entLogs } =
+          settleEntropyContracts(entropyContracts, auctionResult.normWeights, avgEntMult ?? 1);
+        entLogs.forEach((l) => logs.push(l));
+
+        // Settle strips.
+        const currentYield = auctionResult.matched.length > 0
+          ? auctionResult.matched.reduce((s, m) => s + m.longTip, 0) / auctionResult.matched.length
+          : 0;
+        const playerMarginForStrips = player?.activePair === pk ? (player.margin ?? 5000) : 0;
+        const { settled: stripsSettled, totalPremiumCollected, logs: stripsLogs } =
+          settleStrips(strips, currentYield, realizedSigma, ps.returnHistory, playerMarginForStrips);
+        stripsLogs.forEach((l) => logs.push(l));
+
+        // Update insurance pool pending premiums.
+        let nextPool = {
+          ...insurancePool,
+          pendingPremiums: insurancePool.pendingPremiums + totalPremiumCollected + stabilityFeeCollected,
+          pendingStabilityFee: 0,
+        };
+
+        // Slow: settle insurance pool + yield model + correlations.
+        let slowLogs = [];
+        if (doSlow) {
+          const { pool: settledPool, log } = settleInsurancePool(nextPool, allPairAuctions, epochIndex);
+          nextPool = settledPool;
+          slowLogs = log;
+        }
+
+        const updatedYieldModel = updateYieldModel(yieldModel, currentYield);
+
+        next[pk] = {
+          ...ps,
+          npcs: updatedNpcs,
+          regime: updatedRegime,
+          auctionResult,
+          smileParams: auctionResult.smileParams,
+          metaParams: auctionResult.metaParams,
+          prevSmoothFills: auctionResult.smoothFills,
+          alpha: newAlpha,
+          imbalanceContracts: imbalSettled.filter((c) => !c.expired),
+          entropyContracts: entSettled.filter((c) => !c.expired),
+          strips: stripsSettled,
+          insurancePool: nextPool,
+          yieldModel: updatedYieldModel,
+          epochIndex: epochIndex + 1,
+          correlationMap: doSlow ? corrMap : ps.correlationMap,
+          currentYield,
+        };
+
+        if (slowLogs.length > 0) slowLogs.forEach((l) => logs.push(l));
+      });
+
+      if (logs.length > 0) {
+        setLogs((prev) => [...prev.slice(-300), ...logs]);
+      }
+
+      return next;
+    });
+  }, [setPairStates, player, setPlayer, setLogs, addToast]);
+
+  // -------------------------------------------------------------------------
+  // Interval management
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    if (!running) return;
+
+    const fastId = setInterval(fastTick, FAST_MS);
+    const medId = setInterval(mediumTick, MEDIUM_MS);
+
+    return () => {
+      clearInterval(fastId);
+      clearInterval(medId);
+    };
+  }, [running, fastTick, mediumTick]);
+
+  return { onPlayerEdit };
+}

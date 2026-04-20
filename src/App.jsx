@@ -3,11 +3,14 @@ import { ACTIVE_PAIRS } from "./constants/assets.js";
 import { initPairState } from "./state/pairState.js";
 import { useEpochLoop } from "./hooks/useEpochLoop.js";
 import { useToast } from "./hooks/useToast.js";
+import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts.js";
+import { usePersistentState } from "./hooks/usePersistentState.js";
 import { assessCreditQualification, calcPairCreditEligibility } from "./lib/credit.js";
 import { calcSystemSolvencyBuffer, propagateShock, applyShockToPositions } from "./lib/stress.js";
 import { calcYieldRouterSuggestions } from "./lib/yieldRouter.js";
 import { getEffectiveCap } from "./lib/esma.js";
 import { initStrip } from "./lib/strips.js";
+import { createOffer, matchBorrowRequest, cancelOffer } from "./lib/lending.js";
 import { cx } from "./lib/math.js";
 import { POOL_LOCKUP_EPOCHS } from "./constants/system.js";
 
@@ -26,6 +29,9 @@ import { StripDesk } from "./components/StripDesk.jsx";
 import { PoolDesk } from "./components/PoolDesk.jsx";
 import { TradeHistory } from "./components/TradeHistory.jsx";
 import { SpeedControl } from "./components/SpeedControl.jsx";
+import { CorrelationHeatmap } from "./components/CorrelationHeatmap.jsx";
+import { RegimeTimeline } from "./components/RegimeTimeline.jsx";
+import { LendingDesk } from "./components/LendingDesk.jsx";
 
 const INITIAL_PAIR_STATES = Object.fromEntries(
   ACTIVE_PAIRS.map((pk) => [pk, initPairState(pk)])
@@ -44,19 +50,22 @@ const INITIAL_PLAYER = {
   liquidated: false,
 };
 
-const TABS = ["Chart", "Auction", "Derivatives", "Credit", "Stress", "History", "Log"];
+const TABS = ["Chart", "Auction", "Derivatives", "Lending", "Credit", "Stress", "Markets", "History", "Log"];
 
 export default function App() {
   const [pairStates, setPairStates] = useState(INITIAL_PAIR_STATES);
-  const [player, setPlayer] = useState(INITIAL_PLAYER);
+  const [player, setPlayer, clearPlayer] = usePersistentState("tt.player", INITIAL_PLAYER);
   const [logs, setLogs] = useState([]);
   const [running, setRunning] = useState(false);
-  const [speed, setSpeed] = useState(1);
+  const [speed, setSpeed] = usePersistentState("tt.speed", 1);
   const [activeTab, setActiveTab] = useState("Chart");
   const [shockResults, setShockResults] = useState(null);
-  const [openPositions, setOpenPositions] = useState([]);
-  const [equityHistory, setEquityHistory] = useState([INITIAL_PLAYER.margin]);
-  const [tradeLog, setTradeLog] = useState([]);
+  const [openPositions, setOpenPositions, clearPositions] = usePersistentState("tt.positions", []);
+  const [equityHistory, setEquityHistory, clearEquity] = usePersistentState(
+    "tt.equity",
+    [INITIAL_PLAYER.margin]
+  );
+  const [tradeLog, setTradeLog, clearTrades] = usePersistentState("tt.trades", []);
 
   const { toasts, addToast } = useToast();
 
@@ -79,14 +88,14 @@ export default function App() {
       setEquityHistory((prev) => [...prev.slice(-299), player.margin]);
       lastMarginRef.current = player.margin;
     }
-  }, [player.margin, running]);
+  }, [player.margin, running, setEquityHistory]);
 
   const handlePlayerUpdate = useCallback(
     (patch) => {
       setPlayer((prev) => ({ ...prev, ...patch }));
       onPlayerEdit();
     },
-    [onPlayerEdit]
+    [onPlayerEdit, setPlayer]
   );
 
   const activePair = player.activePair ?? ACTIVE_PAIRS[0];
@@ -334,6 +343,82 @@ export default function App() {
     addToast(`Opened ${activePair} ${player.side} x${player.leverage.toFixed(1)}`, "info");
   }
 
+  // --- Lending handlers ---
+  function handlePostLendingOffer({ amount, rate, duration }) {
+    if (amount > player.margin) return;
+    const offer = createOffer(player.id, amount, rate, duration);
+    setPairStates((prev) => {
+      const ps = prev[activePair];
+      if (!ps) return prev;
+      return {
+        ...prev,
+        [activePair]: {
+          ...ps,
+          lendingOffers: [...ps.lendingOffers, { ...offer, createdEpoch: ps.epochIndex }],
+        },
+      };
+    });
+    setPlayer((p) => ({ ...p, margin: p.margin - amount }));
+    addToast(`Posted offer: $${amount} @ ${(rate * 100).toFixed(3)}%`, "info");
+  }
+
+  function handleCancelLendingOffer(offerId) {
+    setPairStates((prev) => {
+      const ps = prev[activePair];
+      if (!ps) return prev;
+      const offer = ps.lendingOffers.find((o) => o.id === offerId);
+      if (!offer || offer.lenderId !== player.id) return prev;
+      const refund = offer.remaining;
+      if (refund > 0) setPlayer((p) => ({ ...p, margin: p.margin + refund }));
+      return {
+        ...prev,
+        [activePair]: {
+          ...ps,
+          lendingOffers: cancelOffer(ps.lendingOffers, offerId),
+        },
+      };
+    });
+    addToast(`Offer ${offerId} cancelled`, "info");
+  }
+
+  function handleBorrow({ amount, maxRate }) {
+    setPairStates((prev) => {
+      const ps = prev[activePair];
+      if (!ps) return prev;
+      const { borrows, updatedOffers, unfilled } = matchBorrowRequest(
+        ps.lendingOffers,
+        player.id,
+        amount,
+        maxRate
+      );
+      if (borrows.length === 0) {
+        addToast("No offers matched — try raising max rate", "warning");
+        return prev;
+      }
+      const filled = amount - unfilled;
+      addToast(`Borrowed $${filled.toFixed(0)} across ${borrows.length} offers`, "info");
+      return {
+        ...prev,
+        [activePair]: {
+          ...ps,
+          lendingOffers: updatedOffers,
+          lendingBorrows: [...ps.lendingBorrows, ...borrows],
+        },
+      };
+    });
+  }
+
+  function handleResetSession() {
+    clearPlayer();
+    clearPositions();
+    clearEquity();
+    clearTrades();
+    setPairStates(INITIAL_PAIR_STATES);
+    setLogs([]);
+    setShockResults(null);
+    addToast("Session reset", "info");
+  }
+
   function applyRouterSuggestion(s) {
     if (s.action === "OPEN_LONG" || s.action === "OPEN_SHORT") {
       setPlayer((p) => ({
@@ -346,6 +431,22 @@ export default function App() {
       addToast(`Router: switch to ${s.pairKey} ${s.action}`, "info");
     }
   }
+
+  useKeyboardShortcuts({
+    Space: () => setRunning((r) => !r),
+    "1": () => setActiveTab("Chart"),
+    "2": () => setActiveTab("Auction"),
+    "3": () => setActiveTab("Derivatives"),
+    "4": () => setActiveTab("Lending"),
+    "5": () => setActiveTab("Credit"),
+    "6": () => setActiveTab("Stress"),
+    "7": () => setActiveTab("Markets"),
+    "8": () => setActiveTab("History"),
+    "9": () => setActiveTab("Log"),
+    "+": () => setSpeed((s) => Math.min(5, s * 2)),
+    "-": () => setSpeed((s) => Math.max(0.5, s / 2)),
+    r: () => handleResetSession(),
+  });
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100 flex flex-col">
@@ -366,8 +467,18 @@ export default function App() {
           >
             {running ? "PAUSE" : "START"}
           </button>
+          <button
+            onClick={handleResetSession}
+            className="text-xs font-mono px-2 py-1 rounded border border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-500 transition-colors"
+            title="Reset session (R)"
+          >
+            reset
+          </button>
           <span className="text-[10px] font-mono text-gray-600">
             σ={((activePS?.realizedSigma ?? 0.02) * 100).toFixed(2)}%
+          </span>
+          <span className="text-[9px] font-mono text-gray-700 hidden lg:inline">
+            space=run · 1-9=tab · +/-=speed · r=reset
           </span>
         </div>
       </header>
@@ -515,6 +626,19 @@ export default function App() {
               </>
             )}
 
+            {activeTab === "Lending" && (
+              <LendingDesk
+                playerId={player.id}
+                playerMargin={player.margin}
+                offers={activePS?.lendingOffers ?? []}
+                borrows={activePS?.lendingBorrows ?? []}
+                yieldBuffer={activePS?.yieldBuffer ?? 0}
+                onPostOffer={handlePostLendingOffer}
+                onCancelOffer={handleCancelLendingOffer}
+                onBorrow={handleBorrow}
+              />
+            )}
+
             {activeTab === "Credit" && (
               <>
                 <CreditDesk assessment={creditAssessment} />
@@ -533,6 +657,20 @@ export default function App() {
                 shockResults={shockResults}
                 onRunShock={handleRunShock}
               />
+            )}
+
+            {activeTab === "Markets" && (
+              <>
+                <RegimeTimeline
+                  history={activePS?.regimeHistory ?? []}
+                  currentRegime={activePS?.regime}
+                  currentEpoch={activePS?.epochIndex ?? 0}
+                />
+                <CorrelationHeatmap
+                  corrMap={activePS?.correlationMap ?? {}}
+                  pairs={ACTIVE_PAIRS}
+                />
+              </>
             )}
 
             {activeTab === "History" && <TradeHistory trades={tradeLog} />}

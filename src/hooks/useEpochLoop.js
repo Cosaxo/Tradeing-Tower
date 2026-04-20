@@ -15,8 +15,9 @@ import { settleDominantPool, calcRatioBeta } from "../lib/pool.js";
 import { settleImbalanceContracts, settleEntropyContracts } from "../lib/contracts.js";
 import { settleStrips } from "../lib/strips.js";
 import { settleInsurancePool } from "../lib/insurance.js";
-import { updateYieldModel } from "../lib/yieldModel.js";
+import { updateYieldModel, calcYieldBufferContribution } from "../lib/yieldModel.js";
 import { calcCrossMarketCorrelations } from "../lib/correlation.js";
+import { settleLending } from "../lib/lending.js";
 import { pushPrice } from "../state/pairState.js";
 import { getEffectiveCap } from "../lib/esma.js";
 import { ACTIVE_PAIRS } from "../constants/assets.js";
@@ -89,13 +90,23 @@ export function useEpochLoop({
         const { prices, realizedSigma, npcs, regime, yieldModel,
                 smileParams, metaParams, prevSmoothFills, alpha,
                 imbalanceContracts, entropyContracts, strips,
-                insurancePool, epochIndex } = ps;
+                insurancePool, epochIndex, yieldBuffer = 0,
+                yieldBufferEpochs = 0, regimeHistory = [],
+                lendingOffers = [], lendingBorrows = [] } = ps;
 
         const priceOld = prices[prices.length - 2] ?? prices[prices.length - 1];
         const priceNew = prices[prices.length - 1];
 
         // Regime detection on slow tick only.
         const updatedRegime = doSlow ? detectRegime(ps.returnHistory) : (regime ?? { key: "CALM" });
+        const prevRegimeKey = regime?.key;
+        const regimeShifted = doSlow && updatedRegime.key !== prevRegimeKey;
+        const newRegimeHistory = regimeShifted
+          ? [...regimeHistory.slice(-99), { epoch: epochIndex, ...updatedRegime }]
+          : regimeHistory;
+        if (regimeShifted) {
+          logs.push(`[REGIME] ${pk}: ${prevRegimeKey ?? "-"} → ${updatedRegime.key}`);
+        }
 
         // Update NPCs with regime awareness.
         const updatedNpcs = npcs.map((npc) =>
@@ -210,10 +221,21 @@ export function useEpochLoop({
 
         const updatedYieldModel = updateYieldModel(yieldModel, currentYield);
 
+        // Yield buffer: skim excess yield into a reserve that subsidises future crash payouts.
+        const bufferContrib = calcYieldBufferContribution(currentYield, yieldBufferEpochs, yieldBuffer);
+        const newYieldBuffer = yieldBuffer + bufferContrib;
+
+        // Settle lending market.
+        const { borrows: settledBorrows, offers: settledOffers, totalRent, logs: lendLogs } =
+          settleLending(lendingBorrows, lendingOffers);
+        lendLogs.forEach((l) => logs.push(l));
+        void totalRent; // payouts flow back through the pool in future iterations
+
         next[pk] = {
           ...ps,
           npcs: updatedNpcs,
           regime: updatedRegime,
+          regimeHistory: newRegimeHistory,
           auctionResult,
           smileParams: auctionResult.smileParams,
           metaParams: auctionResult.metaParams,
@@ -224,6 +246,10 @@ export function useEpochLoop({
           strips: stripsSettled,
           insurancePool: nextPool,
           yieldModel: updatedYieldModel,
+          yieldBuffer: newYieldBuffer,
+          yieldBufferEpochs: yieldBufferEpochs + 1,
+          lendingBorrows: settledBorrows,
+          lendingOffers: settledOffers,
           epochIndex: epochIndex + 1,
           correlationMap: doSlow ? corrMap : ps.correlationMap,
           currentYield,

@@ -48,9 +48,20 @@ export function initPairState(pairKey) {
     // Insurance pool.
     insurancePool: initInsurancePool(),
 
+    // Yield buffer — accumulated excess-yield contributions.
+    yieldBuffer: 0,
+    yieldBufferEpochs: 0,
+
     // Slow-epoch analytics.
     epochIndex: 0,
     correlationMap: {},
+
+    // Regime timeline — rolling tuples of { epoch, key, label, color }.
+    regimeHistory: [],
+
+    // Lending market.
+    lendingOffers: [], // { id, lenderId, amount, rate, duration }
+    lendingBorrows: [], // { id, borrowerId, lenderId, amount, rate, remaining }
 
     // Contracts.
     imbalanceContracts: [],

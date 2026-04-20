@@ -1,5 +1,6 @@
 // Player position configuration and live P&L readout.
 import { PRESETS } from "../constants/presets.js";
+import { TipTierEditor } from "./TipTierEditor.jsx";
 
 const SIDES = ["LONG", "SHORT"];
 const STRATEGIES = ["FIXED_LONG", "FIXED_SHORT", "YIELD_CHASER"];
@@ -107,6 +108,13 @@ export function PlayerPanel({ player, onUpdate, activePair, cap, creditScore, cr
 
       {/* Min yield */}
       {field("minYield", player.minYield ?? 0, 0, 1, 0.05)}
+
+      {/* Tip tier editor */}
+      <TipTierEditor
+        tipTiers={player.tip_tiers ?? []}
+        cap={cap ?? 2}
+        onChange={(tiers) => onUpdate({ tip_tiers: tiers })}
+      />
 
       {player.liquidated && (
         <div className="text-center text-xs font-mono text-red-400 animate-pulse border border-red-800 rounded py-1">

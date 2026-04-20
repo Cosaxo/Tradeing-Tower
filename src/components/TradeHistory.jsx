@@ -1,4 +1,29 @@
-// Ledger of closed trades with P&L.
+// Ledger of closed trades with P&L. Supports CSV export.
+function toCsv(trades) {
+  const header = ["pairKey", "side", "leverage", "margin", "openPrice", "closedPrice", "pnl"];
+  const rows = trades.map((t) =>
+    header.map((k) => {
+      const v = t[k] ?? "";
+      return typeof v === "string" && v.includes(",") ? `"${v}"` : v;
+    }).join(",")
+  );
+  return [header.join(","), ...rows].join("\n");
+}
+
+function downloadCsv(trades) {
+  try {
+    const blob = new Blob([toCsv(trades)], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `trading-tower-trades-${Date.now()}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch {
+    /* ignore — file download unavailable */
+  }
+}
+
 export function TradeHistory({ trades = [] }) {
   if (trades.length === 0) {
     return (
@@ -15,9 +40,17 @@ export function TradeHistory({ trades = [] }) {
     <div className="flex flex-col gap-1 p-3 rounded border border-gray-700 bg-gray-900">
       <div className="flex items-center justify-between mb-1">
         <span className="text-xs font-mono text-gray-300">Trade History</span>
-        <span className="text-[10px] font-mono text-gray-500">
-          {trades.length} trades · {wins}W/{trades.length - wins}L
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] font-mono text-gray-500">
+            {trades.length} trades · {wins}W/{trades.length - wins}L
+          </span>
+          <button
+            onClick={() => downloadCsv(trades)}
+            className="text-[9px] font-mono px-1.5 py-0.5 rounded border border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-500 transition-colors"
+          >
+            export CSV
+          </button>
+        </div>
       </div>
 
       <div className="text-[10px] font-mono flex justify-between pb-1 border-b border-gray-800">

@@ -4,7 +4,13 @@ import { useMemo } from "react";
 const CHART_H = 120;
 const PADDING = { left: 40, right: 8, top: 8, bottom: 16 };
 
-export function PriceChart({ prices = [], regime = null, width = 400, pair = null }) {
+const EVENT_COLOR = {
+  liquidation: "#f87171",
+  regime: "#60a5fa",
+  softClose: "#fbbf24",
+};
+
+export function PriceChart({ prices = [], regime = null, width = 400, pair = null, events = [], currentEpoch = 0 }) {
   const chartW = width - PADDING.left - PADDING.right;
   const chartH = CHART_H - PADDING.top - PADDING.bottom;
 
@@ -101,6 +107,34 @@ export function PriceChart({ prices = [], regime = null, width = 400, pair = nul
             strokeLinecap="round"
           />
         )}
+        {/* Event annotations */}
+        {events.length > 0 && prices.length > 1 && (() => {
+          // Map event.epoch → x position in chart.
+          const firstEpoch = Math.max(0, currentEpoch - prices.length + 1);
+          return events
+            .filter((e) => e.epoch >= firstEpoch && e.epoch <= currentEpoch)
+            .map((e, i) => {
+              const relIdx = e.epoch - firstEpoch;
+              const x =
+                PADDING.left + (relIdx / (prices.length - 1)) * chartW;
+              const color = EVENT_COLOR[e.type] ?? "#9ca3af";
+              return (
+                <g key={`${e.epoch}-${e.type}-${i}`}>
+                  <line
+                    x1={x}
+                    x2={x}
+                    y1={PADDING.top}
+                    y2={CHART_H - PADDING.bottom}
+                    stroke={color}
+                    strokeWidth={0.75}
+                    strokeDasharray="2,2"
+                    opacity={0.7}
+                  />
+                  <circle cx={x} cy={PADDING.top + 2} r={2} fill={color} />
+                </g>
+              );
+            });
+        })()}
       </svg>
     </div>
   );

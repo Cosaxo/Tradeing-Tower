@@ -18,6 +18,7 @@ import { settleInsurancePool } from "../lib/insurance.js";
 import { updateYieldModel, calcYieldBufferContribution } from "../lib/yieldModel.js";
 import { calcCrossMarketCorrelations } from "../lib/correlation.js";
 import { settleLending } from "../lib/lending.js";
+import { generateNpcOrders } from "../lib/npcMarkets.js";
 import { pushPrice } from "../state/pairState.js";
 import { getEffectiveCap } from "../lib/esma.js";
 import { ACTIVE_PAIRS } from "../constants/assets.js";
@@ -183,26 +184,58 @@ export function useEpochLoop({
           }
         }
 
-        // Settle contracts.
-        const { settled: imbalSettled, logs: imbalLogs } =
-          settleImbalanceContracts(imbalanceContracts, longMargin, shortMargin);
-        imbalLogs.forEach((l) => logs.push(l));
-
-        const avgEntMult =
+        // NPC market participation: produce offers + contract purchases + strip buys.
+        const avgEntMultPre =
           auctionResult.normWeights?.reduce((s, w) => s + w, 0) /
           Math.max(1, auctionResult.normWeights?.length ?? 1);
-        const { settled: entSettled, logs: entLogs } =
-          settleEntropyContracts(entropyContracts, auctionResult.normWeights, avgEntMult ?? 1);
-        entLogs.forEach((l) => logs.push(l));
+        const npcOrders = generateNpcOrders({
+          npcs: updatedNpcs,
+          existingOffers: lendingOffers,
+          longMargin,
+          shortMargin,
+          regime: updatedRegime,
+          normWeights: auctionResult.normWeights ?? [],
+          avgEntropyMult: avgEntMultPre ?? 1,
+          realizedSigma,
+          returnHistory: ps.returnHistory,
+          epochIndex,
+        });
 
-        // Settle strips.
+        // Settle contracts (including the fresh NPC buys).
+        const imbalanceContractsWithNpcs = [
+          ...imbalanceContracts,
+          ...npcOrders.imbalanceBuys,
+        ];
+        const entropyContractsWithNpcs = [
+          ...entropyContracts,
+          ...npcOrders.entropyBuys,
+        ];
+        const { settled: imbalSettled, logs: imbalLogs } =
+          settleImbalanceContracts(imbalanceContractsWithNpcs, longMargin, shortMargin);
+        imbalLogs.forEach((l) => logs.push(l));
+        if (npcOrders.imbalanceBuys.length > 0) {
+          logs.push(`[NPC-IMB] ${npcOrders.imbalanceBuys.length} new buyers`);
+        }
+
+        const { settled: entSettled, logs: entLogs } =
+          settleEntropyContracts(entropyContractsWithNpcs, auctionResult.normWeights, avgEntMultPre ?? 1);
+        entLogs.forEach((l) => logs.push(l));
+        if (npcOrders.entropyBuys.length > 0) {
+          logs.push(`[NPC-ENT] ${npcOrders.entropyBuys.length} new buyers`);
+        }
+
+        // Settle strips (including fresh NPC strip buys).
         const currentYield = auctionResult.matched.length > 0
           ? auctionResult.matched.reduce((s, m) => s + m.longTip, 0) / auctionResult.matched.length
           : 0;
         const playerMarginForStrips = player?.activePair === pk ? (player.margin ?? 5000) : 0;
+        const stripsWithNpcs = [...strips, ...npcOrders.stripBuys];
         const { settled: stripsSettled, totalPremiumCollected, logs: stripsLogs } =
-          settleStrips(strips, currentYield, realizedSigma, ps.returnHistory, playerMarginForStrips);
+          settleStrips(stripsWithNpcs, currentYield, realizedSigma, ps.returnHistory, playerMarginForStrips);
         stripsLogs.forEach((l) => logs.push(l));
+        if (npcOrders.stripBuys.length > 0) {
+          logs.push(`[NPC-STRIP] ${npcOrders.stripBuys.length} new strips`);
+        }
 
         // Update insurance pool pending premiums.
         let nextPool = {
@@ -221,21 +254,53 @@ export function useEpochLoop({
 
         const updatedYieldModel = updateYieldModel(yieldModel, currentYield);
 
-        // Yield buffer: skim excess yield into a reserve that subsidises future crash payouts.
+        // Yield buffer: skim excess into reserve, draw from reserve on pool shortfall.
         const bufferContrib = calcYieldBufferContribution(currentYield, yieldBufferEpochs, yieldBuffer);
-        const newYieldBuffer = yieldBuffer + bufferContrib;
+        let newYieldBuffer = yieldBuffer + bufferContrib;
 
-        // Settle lending market.
+        // If pool had unmet claims this epoch, draw from buffer to subsidise.
+        const unmet = nextPool.pendingClaims ?? 0;
+        if (unmet > 0 && newYieldBuffer > 0) {
+          const draw = Math.min(unmet, newYieldBuffer);
+          newYieldBuffer -= draw;
+          nextPool = {
+            ...nextPool,
+            pendingClaims: Math.max(0, unmet - draw),
+          };
+          logs.push(
+            `[BUFFER DRAW] ${pk}: drew $${draw.toFixed(2)} to cover pool shortfall (${unmet.toFixed(2)} unmet)`
+          );
+        }
+
+        // Settle lending market (NPC offers added before settlement).
+        const offersWithNpcs = [...lendingOffers, ...npcOrders.offers];
         const { borrows: settledBorrows, offers: settledOffers, totalRent, logs: lendLogs } =
-          settleLending(lendingBorrows, lendingOffers);
+          settleLending(lendingBorrows, offersWithNpcs);
         lendLogs.forEach((l) => logs.push(l));
-        void totalRent; // payouts flow back through the pool in future iterations
+        void totalRent;
+        if (npcOrders.offers.length > 0) {
+          logs.push(`[NPC-LEND] ${npcOrders.offers.length} new lending offers`);
+        }
+
+        // Event log for annotations.
+        const newEvents = [...(ps.events ?? [])];
+        if (regimeShifted) {
+          newEvents.push({ epoch: epochIndex, type: "regime", meta: updatedRegime });
+        }
+        if (auctionResult.softClose) {
+          newEvents.push({ epoch: epochIndex, type: "softClose" });
+        }
+        const liqThisEpoch = settledUsers.filter((u) => u.liquidated).length;
+        if (liqThisEpoch > 0) {
+          newEvents.push({ epoch: epochIndex, type: "liquidation", meta: { count: liqThisEpoch } });
+        }
 
         next[pk] = {
           ...ps,
           npcs: updatedNpcs,
           regime: updatedRegime,
           regimeHistory: newRegimeHistory,
+          events: newEvents.slice(-80),
           auctionResult,
           smileParams: auctionResult.smileParams,
           metaParams: auctionResult.metaParams,

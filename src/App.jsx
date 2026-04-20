@@ -454,6 +454,11 @@ export default function App() {
       <header className="border-b border-gray-800 px-4 py-2 flex items-center gap-4 flex-wrap">
         <span className="font-syne text-lg text-indigo-400 tracking-tight">Trading Tower</span>
         <span className="text-[10px] font-mono text-gray-600">LAP v2 · ESMA compliant</span>
+        {openPositions.length > 0 && (
+          <span className="text-[10px] font-mono text-emerald-400 px-2 py-0.5 rounded border border-emerald-900 bg-emerald-950">
+            {openPositions.length} open
+          </span>
+        )}
         <div className="ml-auto flex items-center gap-3">
           <SpeedControl speed={speed} onSpeed={setSpeed} />
           <button
@@ -520,6 +525,8 @@ export default function App() {
                   regime={activePS?.regime}
                   width={600}
                   pair={activePS?.pair}
+                  events={activePS?.events ?? []}
+                  currentEpoch={activePS?.epochIndex ?? 0}
                 />
                 <MetricsPanel equityHistory={equityHistory} />
                 <LeverageCurve

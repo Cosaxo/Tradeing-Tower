@@ -1,5 +1,6 @@
 // Insurance pool deposit/withdraw desk.
 import { useState } from "react";
+import { HelpHint } from "./Tooltip.jsx";
 
 export function PoolDesk({ pool, playerId = "You", playerMargin, onDeposit, onWithdraw }) {
   const [amount, setAmount] = useState(500);
@@ -14,7 +15,10 @@ export function PoolDesk({ pool, playerId = "You", playerMargin, onDeposit, onWi
 
   return (
     <div className="flex flex-col gap-2 p-3 rounded border border-gray-700 bg-gray-900">
-      <span className="text-xs font-mono text-gray-300">Insurance Pool</span>
+      <span className="text-xs font-mono text-gray-300 flex items-center">
+        Insurance Pool
+        <HelpHint text="Counter-cyclical yield: the KL divergence between actual and ideal auction fills drives a 1×–3× multiplier. Stressed markets pay depositors more, keeping capital locked during crises." />
+      </span>
 
       <div className="grid grid-cols-3 gap-2 text-center">
         <div>

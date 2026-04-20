@@ -59,6 +59,9 @@ export function initPairState(pairKey) {
     // Regime timeline — rolling tuples of { epoch, key, label, color }.
     regimeHistory: [],
 
+    // Event ticks (for chart annotations): { epoch, type, meta }.
+    events: [],
+
     // Lending market.
     lendingOffers: [], // { id, lenderId, amount, rate, duration }
     lendingBorrows: [], // { id, borrowerId, lenderId, amount, rate, remaining }

@@ -1,6 +1,7 @@
 // SVG visualization of the geodesic leverage distribution.
 // Renders long (green) and short (red) ideal/actual curves side-by-side.
 import { useMemo } from "react";
+import { HelpHint } from "./Tooltip.jsx";
 
 const W = 280;
 const H = 90;
@@ -47,7 +48,10 @@ export function LeverageCurve({ longCurve = [], shortCurve = [], cap = 2 }) {
   return (
     <div className="rounded bg-gray-900 border border-gray-700 p-2">
       <div className="flex items-center gap-3 mb-1 px-1 text-xs font-mono text-gray-400">
-        <span>Geodesic Distribution</span>
+        <span className="flex items-center">
+          Geodesic Distribution
+          <HelpHint text="Bimodal log-normal in log-leverage space: one mode for conservative traders (low lev), one for speculators (high lev). Meta-parameters adapt each epoch via KL-gradient descent so ideal (faint) tracks actual (solid)." />
+        </span>
         <span className="ml-auto text-gray-600">cap {cap.toFixed(1)}×</span>
       </div>
       <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`}>

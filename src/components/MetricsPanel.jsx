@@ -9,6 +9,7 @@ import {
   calcReturns,
 } from "../lib/math.js";
 import { Sparkline } from "./Sparkline.jsx";
+import { HelpHint } from "./Tooltip.jsx";
 
 export function MetricsPanel({ equityHistory = [] }) {
   const metrics = useMemo(() => {
@@ -37,7 +38,10 @@ export function MetricsPanel({ equityHistory = [] }) {
   return (
     <div className="flex flex-col gap-2 p-3 rounded border border-gray-700 bg-gray-900">
       <div className="flex items-center justify-between">
-        <span className="text-xs font-mono text-gray-300">Performance</span>
+        <span className="text-xs font-mono text-gray-300 flex items-center">
+          Performance
+          <HelpHint text="Sortino = mean return / downside deviation. Calmar = return / max drawdown. MaxDD = largest peak-to-trough equity loss. Higher Sortino + Calmar + win rate feeds into the Credit Desk." />
+        </span>
         <span className="text-[10px] font-mono text-gray-500">
           {equityHistory.length} epochs
         </span>

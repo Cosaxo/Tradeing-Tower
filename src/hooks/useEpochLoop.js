@@ -29,6 +29,7 @@ export function useEpochLoop({
   setLogs,          // (fn) => void
   addToast,         // (msg, type) => void
   running,          // boolean
+  speed = 1,        // multiplier: 0.5x, 1x, 2x, 5x
 }) {
   const mediumCountRef = useRef(0);
   const lastPlayerEditRef = useRef(0);
@@ -244,15 +245,16 @@ export function useEpochLoop({
   // -------------------------------------------------------------------------
   useEffect(() => {
     if (!running) return;
+    const mult = speed > 0 ? speed : 1;
 
-    const fastId = setInterval(fastTick, FAST_MS);
-    const medId = setInterval(mediumTick, MEDIUM_MS);
+    const fastId = setInterval(fastTick, FAST_MS / mult);
+    const medId = setInterval(mediumTick, MEDIUM_MS / mult);
 
     return () => {
       clearInterval(fastId);
       clearInterval(medId);
     };
-  }, [running, fastTick, mediumTick]);
+  }, [running, fastTick, mediumTick, speed]);
 
   return { onPlayerEdit };
 }

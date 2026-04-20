@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { ACTIVE_PAIRS } from "./constants/assets.js";
 import { initPairState } from "./state/pairState.js";
 import { useEpochLoop } from "./hooks/useEpochLoop.js";
@@ -7,7 +7,9 @@ import { assessCreditQualification, calcPairCreditEligibility } from "./lib/cred
 import { calcSystemSolvencyBuffer, propagateShock, applyShockToPositions } from "./lib/stress.js";
 import { calcYieldRouterSuggestions } from "./lib/yieldRouter.js";
 import { getEffectiveCap } from "./lib/esma.js";
+import { initStrip } from "./lib/strips.js";
 import { cx } from "./lib/math.js";
+import { POOL_LOCKUP_EPOCHS } from "./constants/system.js";
 
 import { InstrumentSelector } from "./components/InstrumentSelector.jsx";
 import { PriceChart } from "./components/PriceChart.jsx";
@@ -17,8 +19,14 @@ import { PortfolioStructurer } from "./components/PortfolioStructurer.jsx";
 import { CreditDesk } from "./components/CreditDesk.jsx";
 import { StressPanel } from "./components/StressPanel.jsx";
 import { LogicView } from "./components/LogicView.jsx";
+import { MetricsPanel } from "./components/MetricsPanel.jsx";
+import { NpcPanel } from "./components/NpcPanel.jsx";
+import { ContractDesk } from "./components/ContractDesk.jsx";
+import { StripDesk } from "./components/StripDesk.jsx";
+import { PoolDesk } from "./components/PoolDesk.jsx";
+import { TradeHistory } from "./components/TradeHistory.jsx";
+import { SpeedControl } from "./components/SpeedControl.jsx";
 
-// Initialise all pair states at module load — deterministic.
 const INITIAL_PAIR_STATES = Object.fromEntries(
   ACTIVE_PAIRS.map((pk) => [pk, initPairState(pk)])
 );
@@ -36,16 +44,19 @@ const INITIAL_PLAYER = {
   liquidated: false,
 };
 
-const TABS = ["Chart", "Auction", "Credit", "Stress", "Log"];
+const TABS = ["Chart", "Auction", "Derivatives", "Credit", "Stress", "History", "Log"];
 
 export default function App() {
   const [pairStates, setPairStates] = useState(INITIAL_PAIR_STATES);
   const [player, setPlayer] = useState(INITIAL_PLAYER);
   const [logs, setLogs] = useState([]);
   const [running, setRunning] = useState(false);
+  const [speed, setSpeed] = useState(1);
   const [activeTab, setActiveTab] = useState("Chart");
   const [shockResults, setShockResults] = useState(null);
   const [openPositions, setOpenPositions] = useState([]);
+  const [equityHistory, setEquityHistory] = useState([INITIAL_PLAYER.margin]);
+  const [tradeLog, setTradeLog] = useState([]);
 
   const { toasts, addToast } = useToast();
 
@@ -57,7 +68,18 @@ export default function App() {
     setLogs,
     addToast,
     running,
+    speed,
   });
+
+  // Track equity history (one sample per medium epoch — the hook updates player.margin).
+  const lastMarginRef = useRef(player.margin);
+  useEffect(() => {
+    if (!running) return;
+    if (player.margin !== lastMarginRef.current) {
+      setEquityHistory((prev) => [...prev.slice(-299), player.margin]);
+      lastMarginRef.current = player.margin;
+    }
+  }, [player.margin, running]);
 
   const handlePlayerUpdate = useCallback(
     (patch) => {
@@ -71,16 +93,36 @@ export default function App() {
   const activePS = pairStates[activePair];
   const { effectiveCap: cap } = getEffectiveCap(activePair, activePS?.realizedSigma ?? 0.02);
 
-  // Credit assessment (slow — computed from state, no intervals needed here).
+  // Derived auction-side statistics.
+  const longMargin = useMemo(
+    () =>
+      (activePS?.auctionResult?.matched ?? [])
+        .filter((m) => m.longId)
+        .reduce((s, m) => s + m.margin, 0),
+    [activePS]
+  );
+  const shortMargin = useMemo(
+    () =>
+      (activePS?.auctionResult?.matched ?? [])
+        .filter((m) => m.shortId)
+        .reduce((s, m) => s + m.margin, 0),
+    [activePS]
+  );
+
+  const normWeights = activePS?.auctionResult?.normWeights ?? [];
+  const avgEntropyMult =
+    normWeights.length > 0
+      ? normWeights.reduce((s, w) => s + w, 0) / normWeights.length
+      : 1;
+
+  // Credit assessment driven by actual equity history.
   const creditAssessment = useMemo(() => {
     const corrMap = activePS?.correlationMap ?? {};
-    return assessCreditQualification(
-      Object.values(pairStates).flatMap((ps) => ps?.prices?.map((p) => ({ users: [{ id: "You", margin: p }] })) ?? []),
-      openPositions,
-      corrMap,
-      activePair
-    );
-  }, [pairStates, openPositions, activePair, activePS]);
+    const history = equityHistory.map((e) => ({
+      users: [{ id: "You", margin: e }],
+    }));
+    return assessCreditQualification(history, openPositions, corrMap, activePair);
+  }, [equityHistory, openPositions, activePair, activePS]);
 
   const creditEligibility = useMemo(() => {
     const corrMap = activePS?.correlationMap ?? {};
@@ -133,13 +175,186 @@ export default function App() {
     addToast(`Shock: ${result.liquidated} liq, $${result.systemLoss?.toFixed(0)} loss`, "warning");
   }
 
+  // --- Contract / strip / pool handlers ---
+  function handleBuyImbalance({ size, direction, strikeImbalance, premium }) {
+    const id = `IMB-${Date.now()}`;
+    const cost = size * premium;
+    if (cost > player.margin) return;
+    setPairStates((prev) => {
+      const ps = prev[activePair];
+      if (!ps) return prev;
+      return {
+        ...prev,
+        [activePair]: {
+          ...ps,
+          imbalanceContracts: [
+            ...ps.imbalanceContracts,
+            { id, size, direction, strikeImbalance, premium },
+          ],
+        },
+      };
+    });
+    setPlayer((p) => ({ ...p, margin: p.margin - cost }));
+    addToast(`Bought imbalance ${direction} for $${cost.toFixed(2)}`, "info");
+  }
+
+  function handleBuyEntropy({ size, lockedMult, premium }) {
+    const id = `ENT-${Date.now()}`;
+    const cost = size * premium;
+    if (cost > player.margin) return;
+    setPairStates((prev) => {
+      const ps = prev[activePair];
+      if (!ps) return prev;
+      return {
+        ...prev,
+        [activePair]: {
+          ...ps,
+          entropyContracts: [
+            ...ps.entropyContracts,
+            { id, size, lockedMult, premium },
+          ],
+        },
+      };
+    });
+    setPlayer((p) => ({ ...p, margin: p.margin - cost }));
+    addToast(`Locked entropy at ${lockedMult.toFixed(1)}× for $${cost.toFixed(2)}`, "info");
+  }
+
+  function handleBuyStrip(params) {
+    const strip = initStrip({
+      id: `STRIP-${Date.now()}`,
+      ...params,
+      yieldModel: activePS?.yieldModel,
+    });
+    const cost = strip.margin * strip.premium;
+    if (cost > player.margin) return;
+    setPairStates((prev) => {
+      const ps = prev[activePair];
+      if (!ps) return prev;
+      return { ...prev, [activePair]: { ...ps, strips: [...ps.strips, strip] } };
+    });
+    setPlayer((p) => ({ ...p, margin: p.margin - cost }));
+    addToast(`Strip issued — cover ${(strip.protectedFraction * 100).toFixed(0)}% for ${strip.epochs} epochs`, "info");
+  }
+
+  function handleDeposit(amount) {
+    if (amount > player.margin) return;
+    setPairStates((prev) => {
+      const ps = prev[activePair];
+      if (!ps) return prev;
+      const pool = ps.insurancePool;
+      const existing = pool.deposits[player.id] ?? { amount: 0, depositEpoch: ps.epochIndex, lockupRemaining: 0 };
+      return {
+        ...prev,
+        [activePair]: {
+          ...ps,
+          insurancePool: {
+            ...pool,
+            deposits: {
+              ...pool.deposits,
+              [player.id]: {
+                amount: existing.amount + amount,
+                depositEpoch: ps.epochIndex,
+                lockupRemaining: POOL_LOCKUP_EPOCHS,
+              },
+            },
+            totalDeposits: pool.totalDeposits + amount,
+          },
+        },
+      };
+    });
+    setPlayer((p) => ({ ...p, margin: p.margin - amount }));
+    addToast(`Deposited $${amount} into insurance pool`, "info");
+  }
+
+  function handleWithdraw(amount) {
+    setPairStates((prev) => {
+      const ps = prev[activePair];
+      if (!ps) return prev;
+      const pool = ps.insurancePool;
+      const existing = pool.deposits[player.id];
+      if (!existing || existing.lockupRemaining > 0 || existing.amount <= 0) return prev;
+      const take = Math.min(amount, existing.amount);
+      const newDeposits = { ...pool.deposits };
+      if (existing.amount - take <= 0.01) delete newDeposits[player.id];
+      else newDeposits[player.id] = { ...existing, amount: existing.amount - take };
+      return {
+        ...prev,
+        [activePair]: {
+          ...ps,
+          insurancePool: {
+            ...pool,
+            deposits: newDeposits,
+            totalDeposits: Math.max(0, pool.totalDeposits - take),
+          },
+        },
+      };
+    });
+    setPlayer((p) => ({ ...p, margin: p.margin + amount }));
+    addToast(`Withdrew $${amount} from insurance pool`, "info");
+  }
+
+  function handleClosePosition(i) {
+    const pos = openPositions[i];
+    if (!pos) return;
+    const ps = pairStates[pos.pairKey];
+    const priceNow = ps?.prices?.slice(-1)[0] ?? 1;
+    const priceThen = pos.openPrice ?? priceNow;
+    const logRet = Math.log(priceNow / priceThen);
+    const direction = pos.side === "LONG" ? 1 : -1;
+    const pnl = pos.margin * pos.leverage * (Math.exp(direction * logRet) - 1);
+
+    setOpenPositions((prev) => prev.filter((_, idx) => idx !== i));
+    setTradeLog((prev) => [...prev, { ...pos, pnl, closedPrice: priceNow }]);
+    setPlayer((p) => ({ ...p, margin: p.margin + pos.margin + pnl }));
+    addToast(
+      `Closed ${pos.pairKey} ${pos.side}: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`,
+      pnl >= 0 ? "info" : "warning"
+    );
+  }
+
+  function handleOpenPosition() {
+    const priceNow = activePS?.prices?.slice(-1)[0] ?? 1;
+    const size = Math.min(1000, player.margin * 0.2);
+    if (size < 100) {
+      addToast("Insufficient margin to open position", "warning");
+      return;
+    }
+    setOpenPositions((prev) => [
+      ...prev,
+      {
+        pairKey: activePair,
+        side: player.side,
+        leverage: player.leverage,
+        margin: size,
+        openPrice: priceNow,
+      },
+    ]);
+    setPlayer((p) => ({ ...p, margin: p.margin - size }));
+    addToast(`Opened ${activePair} ${player.side} x${player.leverage.toFixed(1)}`, "info");
+  }
+
+  function applyRouterSuggestion(s) {
+    if (s.action === "OPEN_LONG" || s.action === "OPEN_SHORT") {
+      setPlayer((p) => ({
+        ...p,
+        activePair: s.pairKey,
+        side: s.action === "OPEN_LONG" ? "LONG" : "SHORT",
+        strategy: s.action === "OPEN_LONG" ? "FIXED_LONG" : "FIXED_SHORT",
+      }));
+      onPlayerEdit();
+      addToast(`Router: switch to ${s.pairKey} ${s.action}`, "info");
+    }
+  }
+
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100 flex flex-col">
       {/* Header */}
-      <header className="border-b border-gray-800 px-4 py-2 flex items-center gap-4">
+      <header className="border-b border-gray-800 px-4 py-2 flex items-center gap-4 flex-wrap">
         <span className="font-syne text-lg text-indigo-400 tracking-tight">Trading Tower</span>
         <span className="text-[10px] font-mono text-gray-600">LAP v2 · ESMA compliant</span>
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex items-center gap-3">
+          <SpeedControl speed={speed} onSpeed={setSpeed} />
           <button
             onClick={() => setRunning((r) => !r)}
             className={cx(
@@ -169,8 +384,7 @@ export default function App() {
 
         {/* Center: main view */}
         <main className="flex-1 flex flex-col overflow-hidden">
-          {/* Tab bar */}
-          <div className="flex gap-1 px-3 py-1 border-b border-gray-800">
+          <div className="flex gap-1 px-3 py-1 border-b border-gray-800 flex-wrap">
             {TABS.map((t) => (
               <button
                 key={t}
@@ -196,6 +410,7 @@ export default function App() {
                   width={600}
                   pair={activePS?.pair}
                 />
+                <MetricsPanel equityHistory={equityHistory} />
                 <LeverageCurve
                   longCurve={activePS?.auctionResult?.longCurve ?? []}
                   shortCurve={activePS?.auctionResult?.shortCurve ?? []}
@@ -203,14 +418,22 @@ export default function App() {
                 />
                 {routerSuggestions.length > 0 && (
                   <div className="rounded border border-gray-800 bg-gray-900 p-2">
-                    <div className="text-[10px] font-mono text-gray-500 mb-1">Yield Router Suggestions</div>
+                    <div className="text-[10px] font-mono text-gray-500 mb-1">
+                      Yield Router Suggestions (click to apply)
+                    </div>
                     <div className="flex flex-col gap-1">
-                      {routerSuggestions.slice(0, 3).map((s, i) => (
-                        <div key={i} className="flex items-center justify-between text-[10px] font-mono">
+                      {routerSuggestions.slice(0, 4).map((s, i) => (
+                        <button
+                          key={i}
+                          onClick={() => applyRouterSuggestion(s)}
+                          className="flex items-center justify-between text-[10px] font-mono rounded px-2 py-1 hover:bg-indigo-950 border border-transparent hover:border-indigo-700 transition-colors text-left"
+                        >
                           <span className="text-gray-300">{s.pairKey}</span>
                           <span className="text-indigo-400">{s.action}</span>
-                          <span className="text-gray-500 truncate max-w-48">{s.reason}</span>
-                        </div>
+                          <span className="text-gray-500 truncate max-w-48">
+                            {s.reason}
+                          </span>
+                        </button>
                       ))}
                     </div>
                   </div>
@@ -225,7 +448,10 @@ export default function App() {
                     <div className="text-[10px] text-gray-500 mb-1">Auction Stats</div>
                     <div>Matches: {activePS?.auctionResult?.totalMatched ?? 0}</div>
                     <div>Avg Lev: {(activePS?.auctionResult?.avgLev ?? 0).toFixed(2)}×</div>
-                    <div>Imbalance: {((activePS?.auctionResult?.imbalanceRatio ?? 0) * 100).toFixed(1)}%</div>
+                    <div>
+                      Imbalance:{" "}
+                      {((activePS?.auctionResult?.imbalanceRatio ?? 0) * 100).toFixed(1)}%
+                    </div>
                     <div>Soft Close: {activePS?.auctionResult?.softClose ? "YES" : "no"}</div>
                     <div>Alpha: {(activePS?.alpha ?? 0.5).toFixed(3)}</div>
                   </div>
@@ -242,6 +468,7 @@ export default function App() {
                   shortCurve={activePS?.auctionResult?.shortCurve ?? []}
                   cap={cap}
                 />
+                <NpcPanel npcs={activePS?.npcs ?? []} />
                 <div className="rounded border border-gray-800 bg-gray-900 p-2">
                   <div className="text-[10px] text-gray-500 mb-1">Recent Matches</div>
                   {(activePS?.auctionResult?.matched ?? []).slice(0, 8).map((m, i) => (
@@ -257,21 +484,45 @@ export default function App() {
               </div>
             )}
 
+            {activeTab === "Derivatives" && (
+              <>
+                <ContractDesk
+                  longMargin={longMargin}
+                  shortMargin={shortMargin}
+                  normWeights={normWeights}
+                  avgEntropyMult={avgEntropyMult}
+                  playerMargin={player.margin}
+                  onBuyImbalance={handleBuyImbalance}
+                  onBuyEntropy={handleBuyEntropy}
+                  openImbalance={activePS?.imbalanceContracts ?? []}
+                  openEntropy={activePS?.entropyContracts ?? []}
+                />
+                <StripDesk
+                  playerMargin={player.margin}
+                  leverage={player.leverage}
+                  realizedSigma={activePS?.realizedSigma ?? 0.02}
+                  returnHistory={activePS?.returnHistory ?? []}
+                  onBuyStrip={handleBuyStrip}
+                  openStrips={activePS?.strips ?? []}
+                />
+                <PoolDesk
+                  pool={activePS?.insurancePool}
+                  playerId={player.id}
+                  playerMargin={player.margin}
+                  onDeposit={handleDeposit}
+                  onWithdraw={handleWithdraw}
+                />
+              </>
+            )}
+
             {activeTab === "Credit" && (
               <>
                 <CreditDesk assessment={creditAssessment} />
                 <PortfolioStructurer
                   openPositions={openPositions}
                   creditEligibility={creditEligibility}
-                  onOpen={() =>
-                    setOpenPositions((prev) => [
-                      ...prev,
-                      { pairKey: activePair, side: player.side, leverage: player.leverage, margin: player.margin },
-                    ])
-                  }
-                  onClose={(i) =>
-                    setOpenPositions((prev) => prev.filter((_, idx) => idx !== i))
-                  }
+                  onOpen={handleOpenPosition}
+                  onClose={handleClosePosition}
                 />
               </>
             )}
@@ -284,8 +535,13 @@ export default function App() {
               />
             )}
 
+            {activeTab === "History" && <TradeHistory trades={tradeLog} />}
+
             {activeTab === "Log" && (
-              <div className="rounded border border-gray-800 bg-gray-900 flex-1" style={{ minHeight: "400px" }}>
+              <div
+                className="rounded border border-gray-800 bg-gray-900 flex-1"
+                style={{ minHeight: "400px" }}
+              >
                 <LogicView logs={logs} />
               </div>
             )}

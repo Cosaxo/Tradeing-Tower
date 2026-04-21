@@ -32,6 +32,8 @@ import { SpeedControl } from "./components/SpeedControl.jsx";
 import { CorrelationHeatmap } from "./components/CorrelationHeatmap.jsx";
 import { RegimeTimeline } from "./components/RegimeTimeline.jsx";
 import { LendingDesk } from "./components/LendingDesk.jsx";
+import { NotificationHistory } from "./components/NotificationHistory.jsx";
+import { Tutorial } from "./components/Tutorial.jsx";
 
 const INITIAL_PAIR_STATES = Object.fromEntries(
   ACTIVE_PAIRS.map((pk) => [pk, initPairState(pk)])
@@ -59,15 +61,21 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [speed, setSpeed] = usePersistentState("tt.speed", 1);
   const [activeTab, setActiveTab] = useState("Chart");
+  const [mobileNav, setMobileNav] = useState(null); // 'left' | 'right' | null
   const [shockResults, setShockResults] = useState(null);
   const [openPositions, setOpenPositions, clearPositions] = usePersistentState("tt.positions", []);
+  const [initialPositions, setInitialPositions, clearInitialPositions] = usePersistentState(
+    "tt.initialPositions",
+    []
+  );
   const [equityHistory, setEquityHistory, clearEquity] = usePersistentState(
     "tt.equity",
     [INITIAL_PLAYER.margin]
   );
   const [tradeLog, setTradeLog, clearTrades] = usePersistentState("tt.trades", []);
 
-  const { toasts, addToast } = useToast();
+  const { toasts, history, addToast, clearHistory } = useToast();
+  const [showTutorial, setShowTutorial] = useState(false);
 
   const { onPlayerEdit } = useEpochLoop({
     pairStates,
@@ -130,8 +138,14 @@ export default function App() {
     const history = equityHistory.map((e) => ({
       users: [{ id: "You", margin: e }],
     }));
-    return assessCreditQualification(history, openPositions, corrMap, activePair);
-  }, [equityHistory, openPositions, activePair, activePS]);
+    return assessCreditQualification(
+      history,
+      openPositions,
+      corrMap,
+      activePair,
+      initialPositions
+    );
+  }, [equityHistory, openPositions, initialPositions, activePair, activePS]);
 
   const creditEligibility = useMemo(() => {
     const corrMap = activePS?.correlationMap ?? {};
@@ -147,6 +161,17 @@ export default function App() {
     () => calcSystemSolvencyBuffer(pairStates, activePS?.insurancePool?.totalDeposits ?? 0),
     [pairStates, activePS]
   );
+
+  // Circuit breaker: halt the loop when system solvency collapses.
+  const breakerRef = useRef(false);
+  useEffect(() => {
+    if (running && solvency.solvencyBuffer < 0.05 && !breakerRef.current) {
+      breakerRef.current = true;
+      setRunning(false);
+      addToast("Circuit breaker tripped — solvency < 5%", "error");
+    }
+    if (solvency.solvencyBuffer >= 0.1) breakerRef.current = false;
+  }, [running, solvency, addToast]);
 
   const routerSuggestions = useMemo(() => {
     const states = Object.fromEntries(
@@ -329,16 +354,16 @@ export default function App() {
       addToast("Insufficient margin to open position", "warning");
       return;
     }
-    setOpenPositions((prev) => [
-      ...prev,
-      {
-        pairKey: activePair,
-        side: player.side,
-        leverage: player.leverage,
-        margin: size,
-        openPrice: priceNow,
-      },
-    ]);
+    const newPos = {
+      pairKey: activePair,
+      side: player.side,
+      leverage: player.leverage,
+      margin: size,
+      openPrice: priceNow,
+    };
+    setOpenPositions((prev) => [...prev, newPos]);
+    // Snapshot as baseline for drift penalty on the first-ever open.
+    setInitialPositions((prev) => (prev.length === 0 ? [newPos] : [...prev, newPos]));
     setPlayer((p) => ({ ...p, margin: p.margin - size }));
     addToast(`Opened ${activePair} ${player.side} x${player.leverage.toFixed(1)}`, "info");
   }
@@ -411,6 +436,7 @@ export default function App() {
   function handleResetSession() {
     clearPlayer();
     clearPositions();
+    clearInitialPositions();
     clearEquity();
     clearTrades();
     setPairStates(INITIAL_PAIR_STATES);
@@ -452,6 +478,13 @@ export default function App() {
     <div className="min-h-screen bg-gray-950 text-gray-100 flex flex-col">
       {/* Header */}
       <header className="border-b border-gray-800 px-4 py-2 flex items-center gap-4 flex-wrap">
+        <button
+          onClick={() => setMobileNav("left")}
+          className="md:hidden text-xs font-mono px-2 py-1 rounded border border-gray-700 text-gray-300"
+          aria-label="Instruments"
+        >
+          ☰
+        </button>
         <span className="font-syne text-lg text-indigo-400 tracking-tight">Trading Tower</span>
         <span className="text-[10px] font-mono text-gray-600">LAP v2 · ESMA compliant</span>
         {openPositions.length > 0 && (
@@ -472,6 +505,14 @@ export default function App() {
           >
             {running ? "PAUSE" : "START"}
           </button>
+          <NotificationHistory history={history} onClear={clearHistory} />
+          <button
+            onClick={() => setMobileNav("right")}
+            className="md:hidden text-xs font-mono px-2 py-1 rounded border border-indigo-700 text-indigo-300"
+            aria-label="Your Position"
+          >
+            pos
+          </button>
           <button
             onClick={handleResetSession}
             className="text-xs font-mono px-2 py-1 rounded border border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-500 transition-colors"
@@ -489,7 +530,7 @@ export default function App() {
       </header>
 
       <div className="flex flex-1 overflow-hidden">
-        {/* Left: instrument list */}
+        {/* Left: instrument list (desktop) */}
         <aside className="w-48 border-r border-gray-800 p-2 overflow-y-auto hidden md:block">
           <InstrumentSelector
             activePair={activePair}
@@ -497,6 +538,37 @@ export default function App() {
             pairStates={pairStates}
           />
         </aside>
+
+        {/* Mobile drawer: instrument list */}
+        {mobileNav === "left" && (
+          <div
+            className="fixed inset-0 z-40 bg-black/60 md:hidden"
+            onClick={() => setMobileNav(null)}
+          >
+            <aside
+              className="absolute left-0 top-0 h-full w-60 bg-gray-950 border-r border-gray-800 p-2 overflow-y-auto"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-mono text-gray-300">Instruments</span>
+                <button
+                  onClick={() => setMobileNav(null)}
+                  className="text-xs font-mono text-gray-500"
+                >
+                  ×
+                </button>
+              </div>
+              <InstrumentSelector
+                activePair={activePair}
+                onSelect={(pk) => {
+                  handlePlayerUpdate({ activePair: pk });
+                  setMobileNav(null);
+                }}
+                pairStates={pairStates}
+              />
+            </aside>
+          </div>
+        )}
 
         {/* Center: main view */}
         <main className="flex-1 flex flex-col overflow-hidden">
@@ -693,8 +765,8 @@ export default function App() {
           </div>
         </main>
 
-        {/* Right: player panel */}
-        <aside className="w-56 border-l border-gray-800 p-2 flex flex-col gap-2 overflow-y-auto">
+        {/* Right: player panel (desktop) */}
+        <aside className="w-56 border-l border-gray-800 p-2 flex flex-col gap-2 overflow-y-auto hidden md:flex">
           <PlayerPanel
             player={player}
             onUpdate={handlePlayerUpdate}
@@ -704,6 +776,37 @@ export default function App() {
             creditExtension={creditAssessment.leverageExtension}
           />
         </aside>
+
+        {/* Mobile drawer: player panel */}
+        {mobileNav === "right" && (
+          <div
+            className="fixed inset-0 z-40 bg-black/60 md:hidden"
+            onClick={() => setMobileNav(null)}
+          >
+            <aside
+              className="absolute right-0 top-0 h-full w-72 bg-gray-950 border-l border-gray-800 p-2 overflow-y-auto flex flex-col gap-2"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs font-mono text-gray-300">Position</span>
+                <button
+                  onClick={() => setMobileNav(null)}
+                  className="text-xs font-mono text-gray-500"
+                >
+                  ×
+                </button>
+              </div>
+              <PlayerPanel
+                player={player}
+                onUpdate={handlePlayerUpdate}
+                activePair={activePair}
+                cap={cap}
+                creditScore={creditAssessment.creditScore}
+                creditExtension={creditAssessment.leverageExtension}
+              />
+            </aside>
+          </div>
+        )}
       </div>
 
       {/* Toasts */}
@@ -724,6 +827,18 @@ export default function App() {
           </div>
         ))}
       </div>
+
+      {/* Tutorial overlay (first run + manually reopened) */}
+      <Tutorial force={showTutorial} onClose={() => setShowTutorial(false)} />
+
+      {/* Re-open tutorial button (bottom-left) */}
+      <button
+        onClick={() => setShowTutorial(true)}
+        className="fixed bottom-4 left-4 z-40 text-[10px] font-mono px-2 py-1 rounded-full border border-gray-700 bg-gray-900 text-gray-400 hover:text-gray-200 hover:border-indigo-500 transition-colors"
+        aria-label="Open tutorial"
+      >
+        ? tutorial
+      </button>
     </div>
   );
 }

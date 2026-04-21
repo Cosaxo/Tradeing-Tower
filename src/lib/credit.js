@@ -71,8 +71,9 @@ export function scorePortfolioComposition(openPositions, corrMap) {
 
 // Assess credit qualification for the player.
 // history: full epoch history array.
+// initialPositions: optional baseline for drift penalty.
 // Returns { creditScore [0-1], leverageExtension, qualified, breakdown }.
-export function assessCreditQualification(history, openPositions, corrMap, pairKey) {
+export function assessCreditQualification(history, openPositions, corrMap, pairKey, initialPositions) {
   if (!history || history.length < 10) {
     return { creditScore: 0, leverageExtension: 0, qualified: false, breakdown: {} };
   }
@@ -90,7 +91,15 @@ export function assessCreditQualification(history, openPositions, corrMap, pairK
   const ddScore = scoreMetric(maxDD, CREDIT_THRESHOLDS.maxDD, false);
   const compScore = scorePortfolioComposition(openPositions, corrMap);
 
-  const creditScore = sorScore * 0.3 + calScore * 0.2 + wrScore * 0.2 + ddScore * 0.15 + compScore * 0.15;
+  // Drift penalty: clamp config drift to [0, 1] (1 leverage unit per position).
+  const drift = initialPositions
+    ? Math.min(1, calcConfigurationDrift(openPositions, initialPositions))
+    : 0;
+  const driftPenalty = 1 - drift * 0.25; // at most 25% haircut
+
+  const raw =
+    sorScore * 0.3 + calScore * 0.2 + wrScore * 0.2 + ddScore * 0.15 + compScore * 0.15;
+  const creditScore = raw * driftPenalty;
 
   // Extension: up to 2× the ESMA cap for top performers.
   const { effectiveCap } = getEffectiveCap(pairKey ?? "EUR_USD", 0.01);
@@ -101,7 +110,14 @@ export function assessCreditQualification(history, openPositions, corrMap, pairK
     creditScore: parseFloat(creditScore.toFixed(4)),
     leverageExtension: parseFloat(leverageExtension.toFixed(2)),
     qualified,
-    breakdown: { sor: sorScore, cal: calScore, wr: wrScore, dd: ddScore, comp: compScore },
+    breakdown: {
+      sor: sorScore,
+      cal: calScore,
+      wr: wrScore,
+      dd: ddScore,
+      comp: compScore,
+      drift,
+    },
   };
 }
 

@@ -9,7 +9,7 @@ import { FAST_MS, MEDIUM_MS, SLOW_EVERY, GRACE_MS } from "../constants/system.js
 import { priceStep } from "../lib/priceModels.js";
 import { calcRealizedSigma } from "../lib/math.js";
 import { detectRegime } from "../lib/regime.js";
-import { updateNpcRegime } from "../lib/npcs.js";
+import { updateNpcRegime, applyNpcSettlement, tickNpcRestock, isNpcActive } from "../lib/npcs.js";
 import { runAuction } from "../lib/auction.js";
 import { settleDominantPool, calcRatioBeta } from "../lib/pool.js";
 import { settleImbalanceContracts, settleEntropyContracts } from "../lib/contracts.js";
@@ -109,14 +109,25 @@ export function useEpochLoop({
           logs.push(`[REGIME] ${pk}: ${prevRegimeKey ?? "-"} → ${updatedRegime.key}`);
         }
 
-        // Update NPCs with regime awareness.
-        const updatedNpcs = npcs.map((npc) =>
+        // Update NPCs with regime awareness, then tick restock cooldowns.
+        const regimeUpdatedNpcs = npcs.map((npc) =>
           updateNpcRegime(npc, prices.slice(-20), updatedRegime, null, yieldModel)
         );
+        const restockedNpcs = tickNpcRestock(regimeUpdatedNpcs);
+        const justRestocked = restockedNpcs.filter(
+          (n, i) => (regimeUpdatedNpcs[i].restockRemaining ?? 0) === 1 && (n.restockRemaining ?? 0) === 0
+        );
+        justRestocked.forEach((n) => logs.push(`[NPC] ${n.id} restocked to $${n.base_margin}`));
 
-        // Build participants: NPCs + player (if not in grace period).
+        // Only NPCs with margin + not in cooldown participate in the auction.
+        const activeNpcs = restockedNpcs.filter(isNpcActive);
+
+        // Build participants: active NPCs + player (if not in grace period).
         const { effectiveCap: cap } = getEffectiveCap(pk, realizedSigma);
-        const participants = [...updatedNpcs];
+        const participants = activeNpcs.map((n) => ({
+          ...n,
+          base_margin: n.current_margin ?? n.base_margin,
+        }));
         if (!gracePeriod && player && player.activePair === pk) {
           participants.push({
             ...player,
@@ -146,10 +157,10 @@ export function useEpochLoop({
           .reduce((s, m) => s + m.margin, 0);
         const newAlpha = calcRatioBeta(longMargin, shortMargin);
 
-        // Build user list for pool settlement (NPC + player positions).
-        const poolUsers = updatedNpcs.map((npc) => ({
+        // Build user list for pool settlement (active NPC + player positions).
+        const poolUsers = activeNpcs.map((npc) => ({
           id: npc.id,
-          margin: npc.base_margin,
+          margin: npc.current_margin ?? npc.base_margin,
           leverage: Math.min(npc.max_lev, cap),
           side: npc.strategy?.includes("SHORT") ? "SHORT" : "LONG",
           active: true,
@@ -167,6 +178,15 @@ export function useEpochLoop({
         const { users: settledUsers, stabilityFeeCollected, logs: poolLogs } =
           settleDominantPool(poolUsers, priceOld, priceNew, realizedSigma, corrMap);
         poolLogs.forEach((l) => logs.push(l));
+
+        // Write NPC settlement margins back — track liquidations + schedule restock.
+        const updatedNpcs = applyNpcSettlement(restockedNpcs, settledUsers);
+        const deadThisEpoch = updatedNpcs.filter(
+          (n, i) => (restockedNpcs[i].current_margin ?? restockedNpcs[i].base_margin) > 0 && n.current_margin === 0
+        );
+        deadThisEpoch.forEach((n) =>
+          logs.push(`[NPC] ${n.id} liquidated — restock in ${n.restockRemaining} epochs`)
+        );
 
         // Update player margin if this is their active pair.
         if (!gracePeriod && player?.activePair === pk) {
@@ -189,7 +209,7 @@ export function useEpochLoop({
           auctionResult.normWeights?.reduce((s, w) => s + w, 0) /
           Math.max(1, auctionResult.normWeights?.length ?? 1);
         const npcOrders = generateNpcOrders({
-          npcs: updatedNpcs,
+          npcs: updatedNpcs.filter(isNpcActive),
           existingOffers: lendingOffers,
           longMargin,
           shortMargin,

@@ -4,10 +4,13 @@ let toastId = 0;
 
 export function useToast() {
   const [toasts, setToasts] = useState([]);
+  const [history, setHistory] = useState([]);
 
   const addToast = useCallback((message, type = "info", duration = 3500) => {
     const id = ++toastId;
-    setToasts((prev) => [...prev.slice(-4), { id, message, type }]);
+    const entry = { id, message, type, at: Date.now() };
+    setToasts((prev) => [...prev.slice(-4), entry]);
+    setHistory((prev) => [...prev.slice(-99), entry]);
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
     }, duration);
@@ -17,5 +20,7 @@ export function useToast() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  return { toasts, addToast, removeToast };
+  const clearHistory = useCallback(() => setHistory([]), []);
+
+  return { toasts, history, addToast, removeToast, clearHistory };
 }

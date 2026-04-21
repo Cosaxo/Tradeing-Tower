@@ -11,6 +11,7 @@ export function CreditDesk({ assessment }) {
     { label: "Win Rate", key: "wr" },
     { label: "Max DD", key: "dd" },
     { label: "Composition", key: "comp" },
+    { label: "Drift", key: "drift", invert: true },
   ];
 
   return (
@@ -40,10 +41,13 @@ export function CreditDesk({ assessment }) {
         </div>
       </div>
 
-      <div className="grid grid-cols-5 gap-1">
-        {metrics.map(({ label, key }) => {
+      <div className="grid grid-cols-6 gap-1">
+        {metrics.map(({ label, key, invert }) => {
           const val = breakdown?.[key] ?? 0;
-          const barColor = val > 0.7 ? "#34d399" : val > 0.4 ? "#fbbf24" : "#f87171";
+          // For drift, low is good so invert the barColor logic.
+          const good = invert ? val < 0.3 : val > 0.7;
+          const mid = invert ? val < 0.6 : val > 0.4;
+          const barColor = good ? "#34d399" : mid ? "#fbbf24" : "#f87171";
           return (
             <div key={key} className="flex flex-col items-center gap-0.5">
               <div className="text-[9px] text-gray-500 font-mono">{label}</div>

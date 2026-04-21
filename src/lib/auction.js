@@ -5,7 +5,7 @@
 // preferences. Meta-parameters adapt each epoch via KL-gradient descent so the
 // distribution self-calibrates to the actual order flow.
 
-import { ENTROPY_BETA, ENTROPY_EPS, ADAPTIVE_LR, SOFT_CLOSE_PCT } from "../constants/system.js";
+import { ENTROPY_BETA, ENTROPY_EPS, ADAPTIVE_LR, SOFT_CLOSE_PCT, SUB_UNIT_STEPS } from "../constants/system.js";
 import { timeWeightedYieldMult } from "./math.js";
 
 export { timeWeightedYieldMult };
@@ -239,7 +239,10 @@ function matchBids(longBids, shortBids, cap, smileParams, realizedSigma, metaPar
   const matched = [];
   const logs = [];
 
-  // Sort by max_lev descending (highest offers first).
+  // Sub-unit cascade: try full match first, then fall back to fractional
+  // leverage steps so thin books still clear when bid/ask leverage differ.
+  const steps = [1, ...SUB_UNIT_STEPS];
+
   const sortedLong = [...longBids].sort((a, b) => (b.max_lev ?? 1) - (a.max_lev ?? 1));
   const sortedShort = [...shortBids].sort((a, b) => (b.max_lev ?? 1) - (a.max_lev ?? 1));
 
@@ -248,13 +251,26 @@ function matchBids(longBids, shortBids, cap, smileParams, realizedSigma, metaPar
     if (si >= sortedShort.length) break;
     const sb = sortedShort[si];
 
-    const filledLev = Math.min(lb.max_lev ?? 1, sb.max_lev ?? 1);
-    const margin = Math.min(lb.base_margin ?? 1000, sb.base_margin ?? 1000);
+    // Start from the smaller of the two max-leverage offers, then cascade
+    // down the sub-unit ladder until we find a fillable step >= 0.5.
+    const baseLev = Math.min(lb.max_lev ?? 1, sb.max_lev ?? 1);
+    let filledLev = 0;
+    let stepFraction = 1;
+    for (const s of steps) {
+      const candidate = baseLev * s;
+      if (candidate >= 0.5) {
+        filledLev = candidate;
+        stepFraction = s;
+        break;
+      }
+    }
 
     if (filledLev < 0.5) {
       si++;
       continue;
     }
+
+    const margin = Math.min(lb.base_margin ?? 1000, sb.base_margin ?? 1000) * stepFraction;
 
     const entMultL = getEntropyMultForUser(filledLev, normWeights, bucketLevs);
     const entMultS = getEntropyMultForUser(filledLev, normWeights, bucketLevs);
@@ -266,12 +282,13 @@ function matchBids(longBids, shortBids, cap, smileParams, realizedSigma, metaPar
       longId: lb.id,
       shortId: sb.id,
       leverage: parseFloat(filledLev.toFixed(3)),
-      margin,
+      margin: parseFloat(margin.toFixed(2)),
+      fillFraction: stepFraction,
       longTip: parseFloat(tipL.toFixed(4)),
       shortTip: parseFloat(tipS.toFixed(4)),
     });
     logs.push(
-      `[MATCH] ${lb.id} LONG x${filledLev.toFixed(2)} ↔ ${sb.id} SHORT | margin=$${margin} tipL=${(tipL * 100).toFixed(2)}%`
+      `[MATCH] ${lb.id} LONG x${filledLev.toFixed(2)} ↔ ${sb.id} SHORT | margin=$${margin.toFixed(0)} fill=${(stepFraction * 100).toFixed(0)}% tipL=${(tipL * 100).toFixed(2)}%`
     );
     si++;
   }

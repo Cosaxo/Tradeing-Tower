@@ -4,6 +4,54 @@
 import { getEffectiveCap } from "./esma.js";
 import { REGIMES } from "./regime.js";
 
+const RESTOCK_COOLDOWN = 8; // epochs an NPC sits out after liquidation
+
+// Apply settlement results back to NPC state. Drops margin, tracks liquidation,
+// and schedules restock after `RESTOCK_COOLDOWN` epochs.
+export function applyNpcSettlement(npcs, settledUsers) {
+  return npcs.map((npc) => {
+    const settled = settledUsers.find((u) => u.id === npc.id);
+    if (!settled) return npc;
+
+    const currentMargin = npc.current_margin ?? npc.base_margin;
+    const delta = (settled.margin ?? 0) - currentMargin;
+    const newMargin = Math.max(0, currentMargin + delta);
+
+    if (settled.liquidated || newMargin <= 0.01) {
+      return {
+        ...npc,
+        current_margin: 0,
+        restockRemaining: RESTOCK_COOLDOWN,
+        liquidationCount: (npc.liquidationCount ?? 0) + 1,
+      };
+    }
+    return { ...npc, current_margin: newMargin };
+  });
+}
+
+// Tick down restock cooldowns; refill dead NPCs back to their base.
+export function tickNpcRestock(npcs) {
+  return npcs.map((npc) => {
+    if ((npc.restockRemaining ?? 0) > 0) {
+      const next = npc.restockRemaining - 1;
+      if (next === 0) {
+        return {
+          ...npc,
+          current_margin: npc.base_margin,
+          restockRemaining: 0,
+        };
+      }
+      return { ...npc, restockRemaining: next };
+    }
+    return npc;
+  });
+}
+
+// Is this NPC currently active (has margin + not in cooldown)?
+export function isNpcActive(npc) {
+  return (npc.current_margin ?? npc.base_margin) > 0 && (npc.restockRemaining ?? 0) === 0;
+}
+
 export function buildNpcs(pairKey, realizedSigma) {
   const { effectiveCap: cap } = getEffectiveCap(pairKey, realizedSigma);
   const s = (v) => parseFloat(Math.min(cap, Math.max(0.25, v * (cap / 20))).toFixed(2));

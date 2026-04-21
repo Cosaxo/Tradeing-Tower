@@ -7,6 +7,9 @@
 let offerIdCounter = 0;
 let borrowIdCounter = 0;
 
+// Fraction of borrowed amount a borrower must post as collateral.
+export const COLLATERAL_RATIO = 0.1;
+
 export function createOffer(lenderId, amount, rate, duration) {
   return {
     id: `OFFER-${++offerIdCounter}`,
@@ -18,6 +21,11 @@ export function createOffer(lenderId, amount, rate, duration) {
     active: true,
     createdEpoch: null,
   };
+}
+
+// Required collateral for a given borrow size.
+export function requiredCollateral(amount) {
+  return amount * COLLATERAL_RATIO;
 }
 
 // Match a borrower request against the cheapest available offers.
@@ -46,12 +54,20 @@ export function matchBorrowRequest(offers, borrowerId, desiredAmount, maxRate) {
       amount: take,
       rate: cand.rate,
       remaining: cand.duration,
+      collateral: take * COLLATERAL_RATIO,
       active: true,
     });
     needed -= take;
   }
 
-  return { borrows, updatedOffers, unfilled: Math.max(0, needed) };
+  const totalFilled = desiredAmount - Math.max(0, needed);
+  const totalCollateral = totalFilled * COLLATERAL_RATIO;
+  return {
+    borrows,
+    updatedOffers,
+    unfilled: Math.max(0, needed),
+    totalCollateral,
+  };
 }
 
 // Settle one medium epoch of rental income across active borrows.

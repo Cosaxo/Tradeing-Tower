@@ -34,6 +34,7 @@ import { RegimeTimeline } from "./components/RegimeTimeline.jsx";
 import { LendingDesk } from "./components/LendingDesk.jsx";
 import { NotificationHistory } from "./components/NotificationHistory.jsx";
 import { Tutorial } from "./components/Tutorial.jsx";
+import { FeeFlow } from "./components/FeeFlow.jsx";
 
 const INITIAL_PAIR_STATES = Object.fromEntries(
   ACTIVE_PAIRS.map((pk) => [pk, initPairState(pk)])
@@ -745,6 +746,7 @@ export default function App() {
                   currentRegime={activePS?.regime}
                   currentEpoch={activePS?.epochIndex ?? 0}
                 />
+                <FeeFlow ledger={activePS?.feeLedger} />
                 <CorrelationHeatmap
                   corrMap={activePS?.correlationMap ?? {}}
                   pairs={ACTIVE_PAIRS}

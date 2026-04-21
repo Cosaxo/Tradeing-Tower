@@ -123,7 +123,18 @@ export function settleInsurancePool(pool, allPairAuctions, epochIndex) {
   next.pendingStabilityFee = 0;
   next.pendingClaims = Math.max(0, unmetClaims);
 
-  return { pool: next, log };
+  return {
+    pool: next,
+    log,
+    flow: {
+      rawRevenue,
+      adjustedRevenue,
+      claimsPaid,
+      unmetClaims,
+      netDistrib,
+      yieldMultiplier: next.yieldMultiplier,
+    },
+  };
 }
 
 export { ACTIVE_PAIRS }; // re-export for tests

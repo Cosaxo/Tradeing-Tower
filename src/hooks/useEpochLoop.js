@@ -93,7 +93,8 @@ export function useEpochLoop({
                 imbalanceContracts, entropyContracts, strips,
                 insurancePool, epochIndex, yieldBuffer = 0,
                 yieldBufferEpochs = 0, regimeHistory = [],
-                lendingOffers = [], lendingBorrows = [] } = ps;
+                lendingOffers = [], lendingBorrows = [],
+                feeLedger = {} } = ps;
 
         const priceOld = prices[prices.length - 2] ?? prices[prices.length - 1];
         const priceNew = prices[prices.length - 1];
@@ -266,10 +267,14 @@ export function useEpochLoop({
 
         // Slow: settle insurance pool + yield model + correlations.
         let slowLogs = [];
+        let poolFlow = null;
         if (doSlow) {
-          const { pool: settledPool, log } = settleInsurancePool(nextPool, allPairAuctions, epochIndex);
+          const { pool: settledPool, log, flow } = settleInsurancePool(
+            nextPool, allPairAuctions, epochIndex
+          );
           nextPool = settledPool;
           slowLogs = log;
+          poolFlow = flow;
         }
 
         const updatedYieldModel = updateYieldModel(yieldModel, currentYield);
@@ -280,17 +285,58 @@ export function useEpochLoop({
 
         // If pool had unmet claims this epoch, draw from buffer to subsidise.
         const unmet = nextPool.pendingClaims ?? 0;
+        let bufferDraw = 0;
         if (unmet > 0 && newYieldBuffer > 0) {
-          const draw = Math.min(unmet, newYieldBuffer);
-          newYieldBuffer -= draw;
+          bufferDraw = Math.min(unmet, newYieldBuffer);
+          newYieldBuffer -= bufferDraw;
           nextPool = {
             ...nextPool,
-            pendingClaims: Math.max(0, unmet - draw),
+            pendingClaims: Math.max(0, unmet - bufferDraw),
           };
           logs.push(
-            `[BUFFER DRAW] ${pk}: drew $${draw.toFixed(2)} to cover pool shortfall (${unmet.toFixed(2)} unmet)`
+            `[BUFFER DRAW] ${pk}: drew $${bufferDraw.toFixed(2)} to cover pool shortfall (${unmet.toFixed(2)} unmet)`
           );
         }
+
+        // Contract premiums collected by the player (imbalance + entropy) flow back via
+        // pool too; for the ledger we approximate the inbound total as the settled
+        // contracts' premiums over their size (since those were paid up-front).
+        const contractPremium =
+          npcOrders.imbalanceBuys.reduce((s, b) => s + b.size * b.premium, 0) +
+          npcOrders.entropyBuys.reduce((s, b) => s + b.size * b.premium, 0);
+
+        // Lending rental income this epoch (re-derive since settleLending's totalRent
+        // is already consumed above).
+        const rentalIncome = lendingBorrows
+          .filter((b) => b.active)
+          .reduce((s, b) => s + b.amount * b.rate, 0);
+
+        // Fee ledger: tally the epoch's flows.
+        const epochFlow = {
+          stabilityFee: stabilityFeeCollected,
+          stripPremium: totalPremiumCollected,
+          contractPremium,
+          rentalIncome,
+          routedToBuffer: bufferContrib,
+          routedToPool:
+            stabilityFeeCollected + totalPremiumCollected + contractPremium,
+          routedToDepositors: poolFlow?.netDistrib ?? 0,
+          claimsPaid: poolFlow?.claimsPaid ?? 0,
+          bufferDraws: bufferDraw,
+        };
+        const newFeeLedger = {
+          stabilityFee: (feeLedger.stabilityFee ?? 0) + epochFlow.stabilityFee,
+          stripPremium: (feeLedger.stripPremium ?? 0) + epochFlow.stripPremium,
+          contractPremium: (feeLedger.contractPremium ?? 0) + epochFlow.contractPremium,
+          rentalIncome: (feeLedger.rentalIncome ?? 0) + epochFlow.rentalIncome,
+          routedToBuffer: (feeLedger.routedToBuffer ?? 0) + epochFlow.routedToBuffer,
+          routedToPool: (feeLedger.routedToPool ?? 0) + epochFlow.routedToPool,
+          routedToDepositors:
+            (feeLedger.routedToDepositors ?? 0) + epochFlow.routedToDepositors,
+          claimsPaid: (feeLedger.claimsPaid ?? 0) + epochFlow.claimsPaid,
+          bufferDraws: (feeLedger.bufferDraws ?? 0) + epochFlow.bufferDraws,
+          lastEpoch: epochFlow,
+        };
 
         // Settle lending market (NPC offers added before settlement).
         const offersWithNpcs = [...lendingOffers, ...npcOrders.offers];
@@ -333,6 +379,7 @@ export function useEpochLoop({
           yieldModel: updatedYieldModel,
           yieldBuffer: newYieldBuffer,
           yieldBufferEpochs: yieldBufferEpochs + 1,
+          feeLedger: newFeeLedger,
           lendingBorrows: settledBorrows,
           lendingOffers: settledOffers,
           epochIndex: epochIndex + 1,

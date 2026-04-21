@@ -52,6 +52,20 @@ export function initPairState(pairKey) {
     yieldBuffer: 0,
     yieldBufferEpochs: 0,
 
+    // Fee-flow ledger: cumulative flows of each fee category since init.
+    feeLedger: {
+      stabilityFee: 0,      // collected from RISKY tier settlements
+      stripPremium: 0,      // collected from strip issuance
+      contractPremium: 0,   // collected from imbalance + entropy contracts
+      rentalIncome: 0,      // collected from lending
+      routedToBuffer: 0,    // accumulated yield-buffer contributions
+      routedToPool: 0,      // revenue that became pendingPremiums in the pool
+      routedToDepositors: 0, // net distrib paid out to pool depositors
+      claimsPaid: 0,        // drawn from pool to cover shortfalls
+      bufferDraws: 0,       // drawn from buffer to cover unmet claims
+      lastEpoch: null,      // { stabilityFee, stripPremium, ... } last epoch breakdown
+    },
+
     // Slow-epoch analytics.
     epochIndex: 0,
     correlationMap: {},

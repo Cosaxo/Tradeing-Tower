@@ -46,7 +46,8 @@ export function TipTierEditor({ tipTiers = [], cap = 2, onChange }) {
             </span>
             <button
               onClick={() => removeTier(i)}
-              className="text-[9px] font-mono text-red-400 hover:text-red-300"
+              className="text-[9px] font-mono text-red-400 hover:text-red-200 hover:bg-red-950/50 px-2 py-0.5 rounded transition-colors"
+              aria-label={`Remove tier ${i + 1}`}
             >
               ×
             </button>

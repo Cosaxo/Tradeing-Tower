@@ -150,6 +150,13 @@ describe("evaluateGates", () => {
     expect(passed).toBe(false);
     expect(gates.composition).toBe(false);
   });
+  it("exposes perfPassRatio alongside binary gates", () => {
+    const history = makeHistory(CREDIT_ROLLING_WINDOW + 5, 5000, 200);
+    const result = evaluateGates(history, 0.5);
+    expect(result.perfPassRatio).toBeGreaterThanOrEqual(0);
+    expect(result.perfPassRatio).toBeLessThanOrEqual(1);
+    expect(Number.isInteger(result.perfPassed)).toBe(true);
+  });
 });
 
 // ----- Multiplier ---------------------------------------------------------
@@ -198,6 +205,23 @@ describe("creditMultiplier", () => {
       performanceScore: 0.8,
     });
     expect(compDriven).toBeGreaterThan(perfDriven);
+  });
+
+  it("perfPassRatio scales the performance contribution (floor 0.5)", () => {
+    const full = creditMultiplier({
+      qualified: true,
+      compositionScore: 0.5,
+      performanceScore: 1,
+      perfPassRatio: 1,
+    });
+    const halfPerf = creditMultiplier({
+      qualified: true,
+      compositionScore: 0.5,
+      performanceScore: 1,
+      perfPassRatio: 0.5,
+    });
+    expect(halfPerf).toBeLessThan(full);
+    expect(halfPerf).toBeGreaterThan(0); // composition + baseline still apply
   });
 
   it("drift penalty reduces multiplier", () => {

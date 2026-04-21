@@ -51,7 +51,7 @@ export function PlayerPanel({
           <button
             key={p.label}
             onClick={() => onUpdate(p.config)}
-            className="text-[10px] font-mono px-2 py-0.5 rounded border border-gray-700 bg-gray-800 hover:border-indigo-500 hover:text-indigo-300 transition-colors"
+            className="text-[10px] font-mono px-2 py-0.5 rounded border border-gray-700 bg-gray-800 text-gray-300 hover:border-indigo-500 hover:text-indigo-200 hover:bg-gray-700 transition-colors"
           >
             {p.label}
           </button>
@@ -91,12 +91,13 @@ export function PlayerPanel({
           <button
             key={s}
             onClick={() => onUpdate({ side: s, strategy: s === "LONG" ? "FIXED_LONG" : "FIXED_SHORT" })}
+            aria-pressed={player.side === s}
             className={`flex-1 text-xs font-mono py-1 rounded border transition-colors ${
               player.side === s
                 ? s === "LONG"
                   ? "border-emerald-500 bg-emerald-950 text-emerald-300"
                   : "border-red-500 bg-red-950 text-red-300"
-                : "border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-500"
+                : "border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-500 hover:bg-gray-700 hover:text-gray-200"
             }`}
           >
             {s}

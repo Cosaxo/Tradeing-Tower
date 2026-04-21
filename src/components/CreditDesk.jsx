@@ -1,17 +1,26 @@
 // Credit Desk — whitepaper §7.4 faithful view.
 // Shows:
-//   - binary performance gates (all must pass)
+//   - performance gates (composition + window hard-required; perf gates graduated)
 //   - composition sub-scores (primary driver of multiplier)
 //   - multiplier with baseline / cap / drift penalty
 import { HelpHint } from "./Tooltip.jsx";
+import {
+  CREDIT_GATE_SORTINO,
+  CREDIT_GATE_CALMAR,
+  CREDIT_GATE_MAX_DD,
+  CREDIT_GATE_WIN_RATE,
+  CREDIT_GATE_COMPOSITION,
+  CREDIT_MIN_PERF_GATES,
+  CREDIT_TOTAL_PERF_GATES,
+} from "../constants/system.js";
 
 const GATE_LABELS = {
   window: "Window",
-  sortino: "Sortino > 0.8",
-  calmar: "Calmar > 0.5",
-  maxDD: "DD < 15%",
-  winRate: "WinRate > 48%",
-  composition: "Comp > 0.2",
+  sortino: `Sortino ≥ ${CREDIT_GATE_SORTINO}`,
+  calmar: `Calmar ≥ ${CREDIT_GATE_CALMAR}`,
+  maxDD: `DD ≤ ${(CREDIT_GATE_MAX_DD * 100).toFixed(0)}%`,
+  winRate: `WinRate ≥ ${(CREDIT_GATE_WIN_RATE * 100).toFixed(0)}%`,
+  composition: `Comp ≥ ${CREDIT_GATE_COMPOSITION}`,
 };
 
 const COMP_SUBSCORES = [
@@ -34,14 +43,24 @@ export function CreditDesk({ assessment }) {
     gates = {},
     composition,
     performance,
+    perfPassed = 0,
   } = assessment;
+
+  // Partial qualification: below minimum gates but composition + window
+  // still pass — shown in amber so the user sees progress.
+  const partial =
+    !qualified &&
+    gates.window &&
+    gates.composition &&
+    perfPassed > 0 &&
+    perfPassed < CREDIT_MIN_PERF_GATES;
 
   const statusColor = qualified
     ? deleveraging ? "#fbbf24" : "#34d399"
-    : "#f87171";
+    : partial ? "#fbbf24" : "#f87171";
   const statusLabel = qualified
     ? deleveraging ? "DELEVERAGING" : "QUALIFIED"
-    : "NOT QUALIFIED";
+    : partial ? `PARTIAL (${perfPassed}/${CREDIT_MIN_PERF_GATES})` : "NOT QUALIFIED";
 
   return (
     <div className="flex flex-col gap-3 p-3 rounded border border-gray-700 bg-gray-900">
@@ -49,8 +68,8 @@ export function CreditDesk({ assessment }) {
         <span className="text-xs font-mono text-gray-300 flex items-center">
           Credit Desk
           <HelpHint
-            width={280}
-            text="Credit rewards how your portfolio is BUILT, not how it recently performed. All 5 performance gates must pass; composition drives the multiplier magnitude via hedge balance, HHI concentration, tail coverage (>15% in hedgeChar>0.3 assets), asset-class diversity, and leverage discipline."
+            width={300}
+            text={`Credit rewards how your portfolio is BUILT. Composition and the history window are hard requirements. Of the four performance gates (Sortino, Calmar, MaxDD, WinRate), at least ${CREDIT_MIN_PERF_GATES} of ${CREDIT_TOTAL_PERF_GATES} must clear — the multiplier then scales with how many you pass. Composition drives the base multiplier: hedge balance, HHI concentration, tail coverage (≥15% in hedgeChar>0.3), asset-class diversity, and leverage discipline.`}
           />
         </span>
         <span
@@ -164,8 +183,9 @@ export function CreditDesk({ assessment }) {
 
       {!qualified && (
         <div className="text-[10px] font-mono text-gray-500">
-          Fix any failed gate above to qualify. The multiplier then depends
-          primarily on how balanced, diversified, and tail-covered your book is.
+          {partial
+            ? `Clear ${CREDIT_MIN_PERF_GATES - perfPassed} more performance gate${CREDIT_MIN_PERF_GATES - perfPassed === 1 ? "" : "s"} to qualify. Composition and history window are both passing.`
+            : `Need composition ≥ ${CREDIT_GATE_COMPOSITION}, at least ${CREDIT_MIN_PERF_GATES} of ${CREDIT_TOTAL_PERF_GATES} performance gates, and a full ${30}-epoch window. Multiplier then scales with composition and performance.`}
         </div>
       )}
     </div>

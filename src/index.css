@@ -28,10 +28,28 @@
   ::-webkit-scrollbar-thumb {
     @apply bg-gray-700 rounded;
   }
+
+  /* Global focus ring for keyboard users. Dense UI is a nightmare to
+     navigate without one. */
+  :focus-visible {
+    outline: 2px solid rgb(129 140 248 / 0.9);
+    outline-offset: 1px;
+  }
 }
 
 @layer utilities {
   .font-syne {
     font-family: "Syne", sans-serif;
   }
+}
+
+/* Legibility floor — the codebase uses arbitrary 8px/9px/10px sizes in
+   ~26 components. Rather than rewriting every call site, bump all three
+   to an 11px minimum so small labels remain scannable without losing the
+   compact terminal feel. Declared after @layer so natural cascade wins. */
+.text-\[8px\],
+.text-\[9px\],
+.text-\[10px\] {
+  font-size: 11px;
+  line-height: 1.35;
 }

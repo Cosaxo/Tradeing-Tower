@@ -51,6 +51,8 @@ import {
   CREDIT_DRIFT_THRESHOLD,
   CREDIT_DELEVERAGE_EPOCHS,
   CREDIT_DRIFT_HALF_LIFE,
+  CREDIT_MIN_PERF_GATES,
+  CREDIT_TOTAL_PERF_GATES,
 } from "../constants/system.js";
 
 // --------------------------------------------------------------------------
@@ -203,6 +205,7 @@ export function evaluateGates(history, compositionScore) {
   if (!history || history.length < CREDIT_ROLLING_WINDOW) {
     return {
       passed: false,
+      perfPassRatio: 0,
       gates: {
         sortino: false, calmar: false, maxDD: false,
         winRate: false, composition: false, window: false,
@@ -228,8 +231,21 @@ export function evaluateGates(history, compositionScore) {
     winRate: wr >= CREDIT_GATE_WIN_RATE,
     composition: compositionScore >= CREDIT_GATE_COMPOSITION,
   };
+
+  // Composition and window are hard requirements; the four perf gates
+  // are graduated — the caller uses perfPassRatio to scale the multiplier.
+  const perfPassed = [gates.sortino, gates.calmar, gates.maxDD, gates.winRate]
+    .filter(Boolean).length;
+  const perfPassRatio = perfPassed / CREDIT_TOTAL_PERF_GATES;
+  const passed =
+    gates.window &&
+    gates.composition &&
+    perfPassed >= CREDIT_MIN_PERF_GATES;
+
   return {
-    passed: Object.values(gates).every(Boolean),
+    passed,
+    perfPassRatio,
+    perfPassed,
     gates,
     measured: { sortino: sor, calmar: cal, maxDD, winRate: wr },
   };
@@ -239,16 +255,29 @@ export function evaluateGates(history, compositionScore) {
 // Multiplier (§7.4.3)
 // --------------------------------------------------------------------------
 
-export function creditMultiplier({ qualified, compositionScore, performanceScore, drift = 0 }) {
+export function creditMultiplier({
+  qualified,
+  compositionScore,
+  performanceScore,
+  drift = 0,
+  perfPassRatio = 1,
+}) {
   if (!qualified) return 0;
   const raw =
     M_BASELINE +
     COMP_WEIGHT * compositionScore * COMP_AMPLITUDE +
     PERF_WEIGHT * performanceScore * PERF_AMPLITUDE;
 
+  // Smoothly scale the perf contribution by how many perf gates cleared
+  // (0.5 for the bare minimum, 1.0 for all four). Baseline + composition
+  // are unaffected.
+  const perfScale = Math.max(0.5, Math.min(1, perfPassRatio));
+  const perfComponent = PERF_WEIGHT * performanceScore * PERF_AMPLITUDE;
+  const scaled = raw - perfComponent + perfComponent * perfScale;
+
   // Drift penalty — up to 100% haircut when drift >= 1.
   const driftPenalty = 1 - Math.min(1, Math.max(0, drift));
-  return Math.min(M_MAX, raw * driftPenalty);
+  return Math.min(M_MAX, scaled * driftPenalty);
 }
 
 // --------------------------------------------------------------------------
@@ -282,6 +311,7 @@ export function assessCreditQualification(history, openPositions, corrMap, pairK
     compositionScore: comp.score,
     performanceScore: perf.score,
     drift,
+    perfPassRatio: gates.perfPassRatio,
   });
 
   // Deleverage schedule kicks in when drift >= threshold.
@@ -299,6 +329,8 @@ export function assessCreditQualification(history, openPositions, corrMap, pairK
     deleveraging,
     deleverageEpochsRemaining,
     gates: gates.gates,
+    perfPassRatio: gates.perfPassRatio,
+    perfPassed: gates.perfPassed,
     measuredPerformance: gates.measured,
     composition: comp,
     performance: perf,

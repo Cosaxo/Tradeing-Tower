@@ -27,7 +27,11 @@ export function Tooltip({ text, children, width = 200 }) {
 export function HelpHint({ text, width = 240 }) {
   return (
     <Tooltip text={text} width={width}>
-      <span className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-full border border-gray-600 text-[9px] font-mono text-gray-400 ml-1 cursor-help select-none">
+      <span
+        className="inline-flex items-center justify-center w-4 h-4 rounded-full border border-gray-600 text-[10px] font-mono text-gray-400 ml-1 cursor-help select-none hover:border-indigo-500 hover:text-indigo-300 transition-colors"
+        role="img"
+        aria-label={`Help: ${typeof text === "string" ? text.slice(0, 120) : ""}`}
+      >
         ?
       </span>
     </Tooltip>

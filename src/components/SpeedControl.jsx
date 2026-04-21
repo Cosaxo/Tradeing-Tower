@@ -14,10 +14,12 @@ export function SpeedControl({ speed, onSpeed }) {
         <button
           key={s.value}
           onClick={() => onSpeed(s.value)}
+          aria-pressed={speed === s.value}
+          aria-label={`Simulation speed ${s.label}`}
           className={`text-[10px] font-mono px-2 py-0.5 rounded transition-colors ${
             speed === s.value
               ? "bg-indigo-900 text-indigo-200"
-              : "bg-gray-800 text-gray-400 hover:text-gray-200"
+              : "bg-gray-800 text-gray-400 hover:text-gray-100 hover:bg-gray-700"
           }`}
         >
           {s.label}

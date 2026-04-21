@@ -550,8 +550,8 @@ export default function App() {
       <header className="border-b border-gray-800 px-4 py-2 flex items-center gap-4 flex-wrap">
         <button
           onClick={() => setMobileNav("left")}
-          className="md:hidden text-xs font-mono px-2 py-1 rounded border border-gray-700 text-gray-300"
-          aria-label="Instruments"
+          className="md:hidden text-xs font-mono px-2 py-1 rounded border border-gray-700 bg-gray-800 text-gray-300 hover:bg-gray-700 hover:border-gray-500 transition-colors"
+          aria-label="Open instruments drawer"
         >
           ☰
         </button>
@@ -578,15 +578,16 @@ export default function App() {
           <NotificationHistory history={history} onClear={clearHistory} />
           <button
             onClick={() => setMobileNav("right")}
-            className="md:hidden text-xs font-mono px-2 py-1 rounded border border-indigo-700 text-indigo-300"
-            aria-label="Your Position"
+            className="md:hidden text-xs font-mono px-2 py-1 rounded border border-indigo-700 bg-indigo-950/60 text-indigo-300 hover:bg-indigo-900/60 transition-colors"
+            aria-label="Open position drawer"
           >
             pos
           </button>
           <button
             onClick={handleResetSession}
-            className="text-xs font-mono px-2 py-1 rounded border border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-500 transition-colors"
+            className="text-xs font-mono px-2 py-1 rounded border border-gray-700 bg-gray-800 text-gray-400 hover:text-gray-200 hover:bg-gray-700 hover:border-gray-500 transition-colors"
             title="Reset session (R)"
+            aria-label="Reset session"
           >
             reset
           </button>
@@ -623,7 +624,8 @@ export default function App() {
                 <span className="text-xs font-mono text-gray-300">Instruments</span>
                 <button
                   onClick={() => setMobileNav(null)}
-                  className="text-xs font-mono text-gray-500"
+                  className="text-xs font-mono text-gray-500 hover:text-gray-200 px-2 py-0.5 rounded hover:bg-gray-800 transition-colors"
+                  aria-label="Close instrument drawer"
                 >
                   ×
                 </button>
@@ -643,20 +645,24 @@ export default function App() {
         {/* Center: main view */}
         <main className="flex-1 flex flex-col overflow-hidden">
           <div className="flex gap-1 px-3 py-1 border-b border-gray-800 flex-wrap">
-            {TABS.map((t) => (
-              <button
-                key={t}
-                onClick={() => setActiveTab(t)}
-                className={cx(
-                  "text-xs font-mono px-3 py-1 rounded transition-colors",
-                  activeTab === t
-                    ? "bg-indigo-900 text-indigo-200"
-                    : "text-gray-500 hover:text-gray-300"
-                )}
-              >
-                {t}
-              </button>
-            ))}
+            {TABS.map((t) => {
+              const isActive = activeTab === t;
+              return (
+                <button
+                  key={t}
+                  onClick={() => setActiveTab(t)}
+                  aria-current={isActive ? "page" : undefined}
+                  className={cx(
+                    "text-xs font-mono px-3 py-1 rounded transition-colors",
+                    isActive
+                      ? "bg-indigo-900 text-indigo-200"
+                      : "text-gray-400 hover:text-gray-100 hover:bg-gray-800"
+                  )}
+                >
+                  {t}
+                </button>
+              );
+            })}
           </div>
 
           <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-3">
@@ -889,7 +895,8 @@ export default function App() {
                 <span className="text-xs font-mono text-gray-300">Position</span>
                 <button
                   onClick={() => setMobileNav(null)}
-                  className="text-xs font-mono text-gray-500"
+                  className="text-xs font-mono text-gray-500 hover:text-gray-200 px-2 py-0.5 rounded hover:bg-gray-800 transition-colors"
+                  aria-label="Close position drawer"
                 >
                   ×
                 </button>
@@ -932,7 +939,7 @@ export default function App() {
       {/* Re-open tutorial button (bottom-left) */}
       <button
         onClick={() => setShowTutorial(true)}
-        className="fixed bottom-4 left-4 z-40 text-[10px] font-mono px-2 py-1 rounded-full border border-gray-700 bg-gray-900 text-gray-400 hover:text-gray-200 hover:border-indigo-500 transition-colors"
+        className="fixed bottom-4 left-4 z-40 text-[10px] font-mono px-3 py-1 rounded-full border border-gray-700 bg-gray-900 text-gray-400 hover:text-gray-100 hover:bg-gray-800 hover:border-indigo-500 transition-colors"
         aria-label="Open tutorial"
       >
         ? tutorial

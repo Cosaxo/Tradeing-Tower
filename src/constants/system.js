@@ -66,13 +66,26 @@ export const ADAPTIVE_SIGMA_SCALE_INIT = 0.12;
 // Credit facility — whitepaper §7.4 and Appendix B.
 export const CREDIT_BASE_RISK_BUDGET = 50;
 
-// Performance gates (binary; all must pass for credit eligibility).
-export const CREDIT_GATE_SORTINO = 0.8;
-export const CREDIT_GATE_CALMAR = 0.5;
-export const CREDIT_GATE_MAX_DD = 0.15;
-export const CREDIT_GATE_WIN_RATE = 0.48;
+// Performance gates. Composition + history-window are hard requirements;
+// the four perf gates (sortino/calmar/maxDD/winRate) are graduated — see
+// CREDIT_MIN_PERF_GATES. Thresholds were originally tuned for Bloomberg-
+// terminal heuristics and were unreachable inside a short simulator run,
+// which left the whole credit module effectively dead. Softening them and
+// scaling the multiplier by perf-pass fraction unlocks the feature while
+// still rewarding skill.
+export const CREDIT_GATE_SORTINO = 0.3;
+export const CREDIT_GATE_CALMAR = 0.25;
+export const CREDIT_GATE_MAX_DD = 0.20;
+export const CREDIT_GATE_WIN_RATE = 0.45;
 export const CREDIT_GATE_COMPOSITION = 0.2;
 export const CREDIT_ROLLING_WINDOW = 30;
+
+// Minimum of 4 perf gates to clear for baseline qualification. The
+// multiplier is further scaled by (passed / 4), so passing all four
+// still produces the full multiplier; passing only the minimum produces
+// a proportionally smaller one.
+export const CREDIT_MIN_PERF_GATES = 2;
+export const CREDIT_TOTAL_PERF_GATES = 4;
 
 // Multiplier formula coefficients.
 export const M_BASELINE = 0.5;

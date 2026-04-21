@@ -140,7 +140,15 @@ export function getEntropyMultForUser(userLeverage, normWeights, bucketLevsArr) 
 // Adaptive meta-parameters (KL gradient descent)
 // ---------------------------------------------------------------------------
 
-export function adaptMetaParams(prevParams, actualBuckets, idealBuckets, ratio, realizedSigma) {
+// Accepts an optional `learningRate` override (set by Floor 5 governance).
+export function adaptMetaParams(
+  prevParams,
+  actualBuckets,
+  idealBuckets,
+  ratio,
+  realizedSigma,
+  learningRate = ADAPTIVE_LR
+) {
   const n = idealBuckets.length;
   if (n === 0) return prevParams;
 
@@ -159,7 +167,7 @@ export function adaptMetaParams(prevParams, actualBuckets, idealBuckets, ratio, 
     gradAlpha += grad * (i / n - 0.5);
   }
 
-  const lr = ADAPTIVE_LR;
+  const lr = learningRate;
   const newMuLow = Math.max(-1, Math.min(1, (prevParams.muLow ?? 0) + lr * gradMuLow));
   const newAlpha = Math.max(0.1, Math.min(2.0, (prevParams.alpha ?? 0.5) + lr * gradAlpha * 0.1));
 

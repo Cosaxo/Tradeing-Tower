@@ -13,6 +13,7 @@ import { initStrip } from "./lib/strips.js";
 import { createOffer, matchBorrowRequest, cancelOffer } from "./lib/lending.js";
 import { initLedger } from "./lib/roleLedger.js";
 import { initTags, tryTag, untag, freeMargin } from "./lib/capitalTags.js";
+import { initGovernance } from "./lib/governance.js";
 import { cx } from "./lib/math.js";
 import { POOL_LOCKUP_EPOCHS } from "./constants/system.js";
 
@@ -38,6 +39,7 @@ import { NotificationHistory } from "./components/NotificationHistory.jsx";
 import { Tutorial } from "./components/Tutorial.jsx";
 import { FeeFlow } from "./components/FeeFlow.jsx";
 import { RoleLedger } from "./components/RoleLedger.jsx";
+import { GovernancePanel } from "./components/GovernancePanel.jsx";
 
 const INITIAL_PAIR_STATES = Object.fromEntries(
   ACTIVE_PAIRS.map((pk) => [pk, initPairState(pk)])
@@ -57,7 +59,7 @@ const INITIAL_PLAYER = {
   tags: initTags(), // §10.1 — capital accumulates roles via tags, not transfers
 };
 
-const TABS = ["Chart", "Auction", "Derivatives", "Lending", "Credit", "Stress", "Markets", "History", "Log"];
+const TABS = ["Chart", "Auction", "Derivatives", "Lending", "Credit", "Stress", "Markets", "Governance", "History", "Log"];
 
 export default function App() {
   const [pairStates, setPairStates] = useState(INITIAL_PAIR_STATES);
@@ -81,6 +83,10 @@ export default function App() {
   const [roleLedger, setRoleLedger, clearLedger] = usePersistentState(
     "tt.roleLedger",
     initLedger()
+  );
+  const [governance, setGovernance, clearGovernance] = usePersistentState(
+    "tt.governance",
+    initGovernance()
   );
 
   const { toasts, history, addToast, clearHistory } = useToast();
@@ -499,6 +505,7 @@ export default function App() {
     clearEquity();
     clearTrades();
     clearLedger();
+    clearGovernance();
     setPairStates(INITIAL_PAIR_STATES);
     setLogs([]);
     setShockResults(null);
@@ -527,8 +534,9 @@ export default function App() {
     "5": () => setActiveTab("Credit"),
     "6": () => setActiveTab("Stress"),
     "7": () => setActiveTab("Markets"),
-    "8": () => setActiveTab("History"),
-    "9": () => setActiveTab("Log"),
+    "8": () => setActiveTab("Governance"),
+    "9": () => setActiveTab("History"),
+    "0": () => setActiveTab("Log"),
     "+": () => setSpeed((s) => Math.min(5, s * 2)),
     "-": () => setSpeed((s) => Math.max(0.5, s / 2)),
     r: () => handleResetSession(),
@@ -812,6 +820,32 @@ export default function App() {
                   pairs={ACTIVE_PAIRS}
                 />
               </>
+            )}
+
+            {activeTab === "Governance" && (
+              <GovernancePanel
+                governance={governance}
+                setGovernance={setGovernance}
+                playerId={player.id}
+                currentEpoch={activePS?.epochIndex ?? 0}
+                playerContext={{
+                  poolLoyaltyEpochs:
+                    (activePS?.insurancePool?.deposits?.[player.id]?.depositEpoch != null)
+                      ? (activePS?.epochIndex ?? 0) -
+                        (activePS?.insurancePool?.deposits?.[player.id]?.depositEpoch ?? 0)
+                      : 0,
+                  openPositions,
+                  creditQualified: creditAssessment.qualified,
+                  contractsWritten:
+                    (activePS?.imbalanceContracts?.length ?? 0) +
+                    (activePS?.entropyContracts?.length ?? 0) +
+                    (activePS?.strips?.length ?? 0),
+                  lendingOffers: (activePS?.lendingOffers ?? []).filter(
+                    (o) => o.lenderId === player.id && o.active
+                  ).length,
+                  timeInProtocolEpochs: activePS?.epochIndex ?? 0,
+                }}
+              />
             )}
 
             {activeTab === "History" && <TradeHistory trades={tradeLog} />}

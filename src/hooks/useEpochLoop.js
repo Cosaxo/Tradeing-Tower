@@ -19,6 +19,8 @@ import { updateYieldModel, calcYieldBufferContribution } from "../lib/yieldModel
 import { calcCrossMarketCorrelations } from "../lib/correlation.js";
 import { settleLending } from "../lib/lending.js";
 import { generateNpcOrders } from "../lib/npcMarkets.js";
+import { appendEpochEntry } from "../lib/roleLedger.js";
+import { TBILL_RATE } from "../constants/system.js";
 import { pushPrice } from "../state/pairState.js";
 import { getEffectiveCap } from "../lib/esma.js";
 import { ACTIVE_PAIRS } from "../constants/assets.js";
@@ -32,6 +34,7 @@ export function useEpochLoop({
   addToast,         // (msg, type) => void
   running,          // boolean
   speed = 1,        // multiplier: 0.5x, 1x, 2x, 5x
+  setRoleLedger,    // setter for per-role attribution ledger
 }) {
   const mediumCountRef = useRef(0);
   const lastPlayerEditRef = useRef(0);
@@ -190,9 +193,40 @@ export function useEpochLoop({
         );
 
         // Update player margin if this is their active pair.
+        // Decompose settlement into T-bill + auction P&L + tips (§4.10).
+        let playerRoleEntry = null;
         if (!gracePeriod && player?.activePair === pk) {
           const playerSettled = settledUsers.find((u) => u.id === (player.id ?? "You"));
           if (playerSettled) {
+            const preMargin = player.margin ?? 0;
+            const postMargin = playerSettled.margin;
+            // Pool applies T-bill multiplicatively AFTER geometric P&L + stability fee.
+            // tbill portion = postMargin − postMargin / (1 + r).
+            const r = TBILL_RATE / 365;
+            const tbill = playerSettled.active ? postMargin - postMargin / (1 + r) : 0;
+            const auctionPnl = playerSettled.active
+              ? postMargin / (1 + r) - preMargin
+              : postMargin - preMargin;
+
+            // Tips: aggregate from matched entries where player appears.
+            const pid = player.id ?? "You";
+            let tips = 0;
+            for (const m of auctionResult.matched) {
+              if (m.longId === pid) tips -= (m.margin ?? 0) * (m.longTip ?? 0);
+              if (m.shortId === pid) tips -= (m.margin ?? 0) * (m.shortTip ?? 0);
+            }
+
+            playerRoleEntry = {
+              epoch: epochIndex,
+              tbill,
+              auctionPnl,
+              tips,
+              // poolYield + contractPnl + creditChange filled in below as we settle.
+              poolYield: 0,
+              contractPnl: 0,
+              creditChange: 0,
+            };
+
             setPlayer((prev) => ({
               ...prev,
               margin: playerSettled.margin,
@@ -237,12 +271,21 @@ export function useEpochLoop({
         if (npcOrders.imbalanceBuys.length > 0) {
           logs.push(`[NPC-IMB] ${npcOrders.imbalanceBuys.length} new buyers`);
         }
+        // Credit player's share of contract payouts back to margin (Floor 4 §4.10).
+        const pid = player?.id ?? "You";
+        let playerContractPnl = 0;
+        for (const c of imbalSettled) {
+          if (c.buyerId === pid && c.payout) playerContractPnl += c.payout;
+        }
 
         const { settled: entSettled, logs: entLogs } =
           settleEntropyContracts(entropyContractsWithNpcs, auctionResult.normWeights, avgEntMultPre ?? 1);
         entLogs.forEach((l) => logs.push(l));
         if (npcOrders.entropyBuys.length > 0) {
           logs.push(`[NPC-ENT] ${npcOrders.entropyBuys.length} new buyers`);
+        }
+        for (const c of entSettled) {
+          if (c.buyerId === pid && c.payout) playerContractPnl += c.payout;
         }
 
         // Settle strips (including fresh NPC strip buys).
@@ -254,6 +297,15 @@ export function useEpochLoop({
         const { settled: stripsSettled, totalPremiumCollected, logs: stripsLogs } =
           settleStrips(stripsWithNpcs, currentYield, realizedSigma, ps.returnHistory, playerMarginForStrips);
         stripsLogs.forEach((l) => logs.push(l));
+        for (const s of stripsSettled) {
+          if (s.buyerId === pid && s.lastPayout) playerContractPnl += s.lastPayout;
+        }
+
+        // Apply player contract payouts to margin + ledger.
+        if (playerContractPnl !== 0 && player?.activePair === pk) {
+          setPlayer((prev) => ({ ...prev, margin: (prev.margin ?? 0) + playerContractPnl }));
+          if (playerRoleEntry) playerRoleEntry.contractPnl += playerContractPnl;
+        }
         if (npcOrders.stripBuys.length > 0) {
           logs.push(`[NPC-STRIP] ${npcOrders.stripBuys.length} new strips`);
         }
@@ -269,12 +321,18 @@ export function useEpochLoop({
         let slowLogs = [];
         let poolFlow = null;
         if (doSlow) {
+          const playerPid = player?.id ?? "You";
+          const preDeposit = insurancePool.deposits?.[playerPid]?.amount ?? 0;
           const { pool: settledPool, log, flow } = settleInsurancePool(
             nextPool, allPairAuctions, epochIndex
           );
           nextPool = settledPool;
           slowLogs = log;
           poolFlow = flow;
+          // Attribute the player's pool yield slice (Floor 1, §4.10).
+          const postDeposit = settledPool.deposits?.[playerPid]?.amount ?? 0;
+          const delta = postDeposit - preDeposit;
+          if (playerRoleEntry) playerRoleEntry.poolYield = delta;
         }
 
         const updatedYieldModel = updateYieldModel(yieldModel, currentYield);
@@ -388,6 +446,11 @@ export function useEpochLoop({
         };
 
         if (slowLogs.length > 0) slowLogs.forEach((l) => logs.push(l));
+
+        // Post the player's per-role ledger entry for this epoch.
+        if (playerRoleEntry && setRoleLedger) {
+          setRoleLedger((prev) => appendEpochEntry(prev, playerRoleEntry));
+        }
       });
 
       if (logs.length > 0) {
@@ -396,7 +459,7 @@ export function useEpochLoop({
 
       return next;
     });
-  }, [setPairStates, player, setPlayer, setLogs, addToast]);
+  }, [setPairStates, player, setPlayer, setLogs, addToast, setRoleLedger]);
 
   // -------------------------------------------------------------------------
   // Interval management

@@ -11,6 +11,7 @@ import { calcYieldRouterSuggestions } from "./lib/yieldRouter.js";
 import { getEffectiveCap } from "./lib/esma.js";
 import { initStrip } from "./lib/strips.js";
 import { createOffer, matchBorrowRequest, cancelOffer } from "./lib/lending.js";
+import { initLedger } from "./lib/roleLedger.js";
 import { cx } from "./lib/math.js";
 import { POOL_LOCKUP_EPOCHS } from "./constants/system.js";
 
@@ -35,6 +36,7 @@ import { LendingDesk } from "./components/LendingDesk.jsx";
 import { NotificationHistory } from "./components/NotificationHistory.jsx";
 import { Tutorial } from "./components/Tutorial.jsx";
 import { FeeFlow } from "./components/FeeFlow.jsx";
+import { RoleLedger } from "./components/RoleLedger.jsx";
 
 const INITIAL_PAIR_STATES = Object.fromEntries(
   ACTIVE_PAIRS.map((pk) => [pk, initPairState(pk)])
@@ -74,6 +76,10 @@ export default function App() {
     [INITIAL_PLAYER.margin]
   );
   const [tradeLog, setTradeLog, clearTrades] = usePersistentState("tt.trades", []);
+  const [roleLedger, setRoleLedger, clearLedger] = usePersistentState(
+    "tt.roleLedger",
+    initLedger()
+  );
 
   const { toasts, history, addToast, clearHistory } = useToast();
   const [showTutorial, setShowTutorial] = useState(false);
@@ -87,6 +93,7 @@ export default function App() {
     addToast,
     running,
     speed,
+    setRoleLedger,
   });
 
   // Track equity history (one sample per medium epoch — the hook updates player.margin).
@@ -225,7 +232,7 @@ export default function App() {
           ...ps,
           imbalanceContracts: [
             ...ps.imbalanceContracts,
-            { id, size, direction, strikeImbalance, premium },
+            { id, buyerId: player.id, size, direction, strikeImbalance, premium },
           ],
         },
       };
@@ -247,7 +254,7 @@ export default function App() {
           ...ps,
           entropyContracts: [
             ...ps.entropyContracts,
-            { id, size, lockedMult, premium },
+            { id, buyerId: player.id, size, lockedMult, premium },
           ],
         },
       };
@@ -257,11 +264,14 @@ export default function App() {
   }
 
   function handleBuyStrip(params) {
-    const strip = initStrip({
-      id: `STRIP-${Date.now()}`,
-      ...params,
-      yieldModel: activePS?.yieldModel,
-    });
+    const strip = {
+      ...initStrip({
+        id: `STRIP-${Date.now()}`,
+        ...params,
+        yieldModel: activePS?.yieldModel,
+      }),
+      buyerId: player.id,
+    };
     const cost = strip.margin * strip.premium;
     if (cost > player.margin) return;
     setPairStates((prev) => {
@@ -441,6 +451,7 @@ export default function App() {
     clearInitialPositions();
     clearEquity();
     clearTrades();
+    clearLedger();
     setPairStates(INITIAL_PAIR_STATES);
     setLogs([]);
     setShockResults(null);
@@ -603,6 +614,7 @@ export default function App() {
                   currentEpoch={activePS?.epochIndex ?? 0}
                 />
                 <MetricsPanel equityHistory={equityHistory} />
+                <RoleLedger ledger={roleLedger} playerMargin={player.margin ?? 0} />
                 <LeverageCurve
                   longCurve={activePS?.auctionResult?.longCurve ?? []}
                   shortCurve={activePS?.auctionResult?.shortCurve ?? []}

@@ -20,6 +20,7 @@ import { calcCrossMarketCorrelations } from "../lib/correlation.js";
 import { settleLending } from "../lib/lending.js";
 import { generateNpcOrders } from "../lib/npcMarkets.js";
 import { appendEpochEntry } from "../lib/roleLedger.js";
+import { normalizeTags } from "../lib/capitalTags.js";
 import { TBILL_RATE } from "../constants/system.js";
 import { pushPrice } from "../state/pairState.js";
 import { getEffectiveCap } from "../lib/esma.js";
@@ -232,6 +233,8 @@ export function useEpochLoop({
               margin: playerSettled.margin,
               pnl: playerSettled.pnl ?? 0,
               liquidated: playerSettled.liquidated,
+              // If margin fell below tagged total, shrink tags proportionally (§10.1).
+              tags: normalizeTags(playerSettled.margin, prev.tags ?? {}),
             }));
             if (playerSettled.liquidated) {
               addToast(`Liquidated on ${pk}!`, "error");

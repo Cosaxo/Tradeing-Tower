@@ -12,6 +12,7 @@ import { getEffectiveCap } from "./lib/esma.js";
 import { initStrip } from "./lib/strips.js";
 import { createOffer, matchBorrowRequest, cancelOffer } from "./lib/lending.js";
 import { initLedger } from "./lib/roleLedger.js";
+import { initTags, tryTag, untag, freeMargin } from "./lib/capitalTags.js";
 import { cx } from "./lib/math.js";
 import { POOL_LOCKUP_EPOCHS } from "./constants/system.js";
 
@@ -53,6 +54,7 @@ const INITIAL_PLAYER = {
   tip_tiers: [{ lev_start: 1.0, lev_end: 2.0, tip: 0.02, fill_direction: "bottom-up" }],
   pnl: 0,
   liquidated: false,
+  tags: initTags(), // §10.1 — capital accumulates roles via tags, not transfers
 };
 
 const TABS = ["Chart", "Auction", "Derivatives", "Lending", "Credit", "Stress", "Markets", "History", "Log"];
@@ -218,11 +220,23 @@ export default function App() {
     addToast(`Shock: ${result.liquidated} liq, $${result.systemLoss?.toFixed(0)} loss`, "warning");
   }
 
-  // --- Contract / strip / pool handlers ---
+  // --- Contract / strip / pool handlers (§10.1 same-capital semantics) ---
+  //
+  // Cash-flow operations (pay premium, receive payout) change `margin`.
+  // Role operations (deposit, open position, post offer) only tag a slice
+  // of margin as serving that role — margin itself is untouched.
+
   function handleBuyImbalance({ size, direction, strikeImbalance, premium }) {
     const id = `IMB-${Date.now()}`;
     const cost = size * premium;
+    // Premium is a real cash flow (paid to insurer).
     if (cost > player.margin) return;
+    // Collateralise the contract: tag `size` as backing this obligation.
+    const newTags = tryTag(player.margin - cost, player.tags, "contractCollateral", size);
+    if (!newTags) {
+      addToast("Insufficient free margin to collateralise contract", "warning");
+      return;
+    }
     setPairStates((prev) => {
       const ps = prev[activePair];
       if (!ps) return prev;
@@ -237,14 +251,19 @@ export default function App() {
         },
       };
     });
-    setPlayer((p) => ({ ...p, margin: p.margin - cost }));
-    addToast(`Bought imbalance ${direction} for $${cost.toFixed(2)}`, "info");
+    setPlayer((p) => ({ ...p, margin: p.margin - cost, tags: newTags }));
+    addToast(`Imbalance ${direction} · premium $${cost.toFixed(2)}`, "info");
   }
 
   function handleBuyEntropy({ size, lockedMult, premium }) {
     const id = `ENT-${Date.now()}`;
     const cost = size * premium;
     if (cost > player.margin) return;
+    const newTags = tryTag(player.margin - cost, player.tags, "contractCollateral", size);
+    if (!newTags) {
+      addToast("Insufficient free margin to collateralise contract", "warning");
+      return;
+    }
     setPairStates((prev) => {
       const ps = prev[activePair];
       if (!ps) return prev;
@@ -259,8 +278,8 @@ export default function App() {
         },
       };
     });
-    setPlayer((p) => ({ ...p, margin: p.margin - cost }));
-    addToast(`Locked entropy at ${lockedMult.toFixed(1)}× for $${cost.toFixed(2)}`, "info");
+    setPlayer((p) => ({ ...p, margin: p.margin - cost, tags: newTags }));
+    addToast(`Entropy lock ${lockedMult.toFixed(1)}× · premium $${cost.toFixed(2)}`, "info");
   }
 
   function handleBuyStrip(params) {
@@ -274,17 +293,28 @@ export default function App() {
     };
     const cost = strip.margin * strip.premium;
     if (cost > player.margin) return;
+    const tagAmount = strip.margin * strip.protectedFraction;
+    const newTags = tryTag(player.margin - cost, player.tags, "contractCollateral", tagAmount);
+    if (!newTags) {
+      addToast("Insufficient free margin to collateralise strip", "warning");
+      return;
+    }
     setPairStates((prev) => {
       const ps = prev[activePair];
       if (!ps) return prev;
       return { ...prev, [activePair]: { ...ps, strips: [...ps.strips, strip] } };
     });
-    setPlayer((p) => ({ ...p, margin: p.margin - cost }));
-    addToast(`Strip issued — cover ${(strip.protectedFraction * 100).toFixed(0)}% for ${strip.epochs} epochs`, "info");
+    setPlayer((p) => ({ ...p, margin: p.margin - cost, tags: newTags }));
+    addToast(`Strip ${(strip.protectedFraction * 100).toFixed(0)}% × ${strip.epochs}ep · premium $${cost.toFixed(2)}`, "info");
   }
 
+  // Pool deposit is a TAG — no margin transfer (§10.1).
   function handleDeposit(amount) {
-    if (amount > player.margin) return;
+    const newTags = tryTag(player.margin, player.tags, "poolDeposit", amount);
+    if (!newTags) {
+      addToast("Insufficient free margin to tag for pool", "warning");
+      return;
+    }
     setPairStates((prev) => {
       const ps = prev[activePair];
       if (!ps) return prev;
@@ -309,10 +339,11 @@ export default function App() {
         },
       };
     });
-    setPlayer((p) => ({ ...p, margin: p.margin - amount }));
-    addToast(`Deposited $${amount} into insurance pool`, "info");
+    setPlayer((p) => ({ ...p, tags: newTags }));
+    addToast(`Tagged $${amount} as pool collateral (margin untouched)`, "info");
   }
 
+  // Pool withdraw releases the tag — no margin transfer.
   function handleWithdraw(amount) {
     setPairStates((prev) => {
       const ps = prev[activePair];
@@ -336,8 +367,8 @@ export default function App() {
         },
       };
     });
-    setPlayer((p) => ({ ...p, margin: p.margin + amount }));
-    addToast(`Withdrew $${amount} from insurance pool`, "info");
+    setPlayer((p) => ({ ...p, tags: untag(p.tags, "poolDeposit", amount) }));
+    addToast(`Released $${amount} pool tag (margin untouched)`, "info");
   }
 
   function handleClosePosition(i) {
@@ -352,7 +383,12 @@ export default function App() {
 
     setOpenPositions((prev) => prev.filter((_, idx) => idx !== i));
     setTradeLog((prev) => [...prev, { ...pos, pnl, closedPrice: priceNow }]);
-    setPlayer((p) => ({ ...p, margin: p.margin + pos.margin + pnl }));
+    // P&L is a real cash flow; auction-margin tag is released.
+    setPlayer((p) => ({
+      ...p,
+      margin: p.margin + pnl,
+      tags: untag(p.tags, "auctionMargin", pos.margin),
+    }));
     addToast(
       `Closed ${pos.pairKey} ${pos.side}: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`,
       pnl >= 0 ? "info" : "warning"
@@ -361,9 +397,15 @@ export default function App() {
 
   function handleOpenPosition() {
     const priceNow = activePS?.prices?.slice(-1)[0] ?? 1;
-    const size = Math.min(1000, player.margin * 0.2);
+    const size = Math.min(1000, freeMargin(player.margin, player.tags) * 0.2);
     if (size < 100) {
-      addToast("Insufficient margin to open position", "warning");
+      addToast("Not enough free margin to open position", "warning");
+      return;
+    }
+    // Tag `size` as auction collateral — margin is untouched (§10.1).
+    const newTags = tryTag(player.margin, player.tags, "auctionMargin", size);
+    if (!newTags) {
+      addToast("Insufficient free margin", "warning");
       return;
     }
     const newPos = {
@@ -374,15 +416,18 @@ export default function App() {
       openPrice: priceNow,
     };
     setOpenPositions((prev) => [...prev, newPos]);
-    // Snapshot as baseline for drift penalty on the first-ever open.
     setInitialPositions((prev) => (prev.length === 0 ? [newPos] : [...prev, newPos]));
-    setPlayer((p) => ({ ...p, margin: p.margin - size }));
-    addToast(`Opened ${activePair} ${player.side} x${player.leverage.toFixed(1)}`, "info");
+    setPlayer((p) => ({ ...p, tags: newTags }));
+    addToast(`Opened ${activePair} ${player.side} x${player.leverage.toFixed(1)} · $${size.toFixed(0)} tagged`, "info");
   }
 
-  // --- Lending handlers ---
+  // --- Lending handlers (§10.1 same-capital semantics) ---
   function handlePostLendingOffer({ amount, rate, duration }) {
-    if (amount > player.margin) return;
+    const newTags = tryTag(player.margin, player.tags, "lendingOffered", amount);
+    if (!newTags) {
+      addToast("Insufficient free margin to offer", "warning");
+      return;
+    }
     const offer = createOffer(player.id, amount, rate, duration);
     setPairStates((prev) => {
       const ps = prev[activePair];
@@ -395,8 +440,8 @@ export default function App() {
         },
       };
     });
-    setPlayer((p) => ({ ...p, margin: p.margin - amount }));
-    addToast(`Posted offer: $${amount} @ ${(rate * 100).toFixed(3)}%`, "info");
+    setPlayer((p) => ({ ...p, tags: newTags }));
+    addToast(`Tagged $${amount} @ ${(rate * 100).toFixed(3)}% as lending (margin untouched)`, "info");
   }
 
   function handleCancelLendingOffer(offerId) {
@@ -405,8 +450,10 @@ export default function App() {
       if (!ps) return prev;
       const offer = ps.lendingOffers.find((o) => o.id === offerId);
       if (!offer || offer.lenderId !== player.id) return prev;
-      const refund = offer.remaining;
-      if (refund > 0) setPlayer((p) => ({ ...p, margin: p.margin + refund }));
+      const release = offer.remaining;
+      if (release > 0) {
+        setPlayer((p) => ({ ...p, tags: untag(p.tags, "lendingOffered", release) }));
+      }
       return {
         ...prev,
         [activePair]: {

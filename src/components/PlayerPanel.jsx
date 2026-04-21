@@ -2,6 +2,7 @@
 import { PRESETS } from "../constants/presets.js";
 import { TipTierEditor } from "./TipTierEditor.jsx";
 import { shouldUnwindCredit } from "../lib/credit.js";
+import { CapitalBreakdown } from "./CapitalBreakdown.jsx";
 
 const SIDES = ["LONG", "SHORT"];
 const STRATEGIES = ["FIXED_LONG", "FIXED_SHORT", "YIELD_CHASER"];
@@ -74,6 +75,9 @@ export function PlayerPanel({
           <div className="text-sm font-mono text-indigo-400">{((creditScore ?? 0) * 100).toFixed(0)}%</div>
         </div>
       </div>
+
+      {/* Capital breakdown — tags sharing the same margin (§10.1). */}
+      <CapitalBreakdown margin={player.margin ?? 0} tags={player.tags ?? {}} />
 
       {/* Leverage — always ESMA-capped. Credit expands capital, not leverage (§10.5). */}
       {field("leverage", player.leverage ?? 1, 0.5, cap ?? 2, 0.25)}

@@ -148,15 +148,16 @@ export default function App() {
     );
   }, [equityHistory, openPositions, initialPositions, activePair, activePS]);
 
-  const creditEligibility = useMemo(() => {
-    const corrMap = activePS?.correlationMap ?? {};
-    return Object.fromEntries(
-      ACTIVE_PAIRS.map((pk) => [
-        pk,
-        calcPairCreditEligibility(pk, creditAssessment.creditScore, openPositions, corrMap),
-      ])
-    );
-  }, [creditAssessment, openPositions, activePS]);
+  const creditEligibility = useMemo(
+    () =>
+      Object.fromEntries(
+        ACTIVE_PAIRS.map((pk) => [
+          pk,
+          calcPairCreditEligibility(pk, creditAssessment.creditScore, openPositions),
+        ])
+      ),
+    [creditAssessment, openPositions]
+  );
 
   const solvency = useMemo(
     () => calcSystemSolvencyBuffer(pairStates, activePS?.insurancePool?.totalDeposits ?? 0),
@@ -775,7 +776,7 @@ export default function App() {
             activePair={activePair}
             cap={cap}
             creditScore={creditAssessment.creditScore}
-            creditExtension={creditAssessment.leverageExtension}
+            creditMultiplier={creditAssessment.multiplier}
           />
         </aside>
 

@@ -63,8 +63,39 @@ export const ADAPTIVE_LR = 0.005;
 export const ADAPTIVE_MU_SCALE_INIT = 0.7;
 export const ADAPTIVE_SIGMA_SCALE_INIT = 0.12;
 
-// Credit facility
+// Credit facility — whitepaper §7.4 and Appendix B.
 export const CREDIT_BASE_RISK_BUDGET = 50;
+
+// Performance gates (binary; all must pass for credit eligibility).
+export const CREDIT_GATE_SORTINO = 0.8;
+export const CREDIT_GATE_CALMAR = 0.5;
+export const CREDIT_GATE_MAX_DD = 0.15;
+export const CREDIT_GATE_WIN_RATE = 0.48;
+export const CREDIT_GATE_COMPOSITION = 0.2;
+export const CREDIT_ROLLING_WINDOW = 30;
+
+// Multiplier formula coefficients.
+export const M_BASELINE = 0.5;
+export const M_MAX = 2.5;
+export const COMP_WEIGHT = 0.7;
+export const PERF_WEIGHT = 0.3;
+export const COMP_AMPLITUDE = 2.0;
+export const PERF_AMPLITUDE = 1.0;
+
+// Composition sub-score weights (sum to 1.0).
+export const W_HEDGE = 0.30;
+export const W_CONCENTRATION = 0.25;
+export const W_TAIL = 0.20;
+export const W_DIVERSITY = 0.15;
+export const W_DISCIPLINE = 0.10;
+
+// Tail-coverage specifics.
+export const TAIL_COVERAGE_TARGET = 0.15;
+export const TAIL_HEDGE_THRESHOLD = 0.3;
+
+// Configuration drift that triggers deleveraging schedule.
+export const CREDIT_DRIFT_THRESHOLD = 0.5;
+export const CREDIT_DELEVERAGE_EPOCHS = 5;
 
 // Soft-close boundary: last 20% of each medium epoch is frozen for deterministic clear
 export const SOFT_CLOSE_PCT = 0.8;

@@ -1,11 +1,19 @@
 // Player position configuration and live P&L readout.
 import { PRESETS } from "../constants/presets.js";
 import { TipTierEditor } from "./TipTierEditor.jsx";
+import { shouldUnwindCredit } from "../lib/credit.js";
 
 const SIDES = ["LONG", "SHORT"];
 const STRATEGIES = ["FIXED_LONG", "FIXED_SHORT", "YIELD_CHASER"];
 
-export function PlayerPanel({ player, onUpdate, activePair, cap, creditScore, creditExtension }) {
+export function PlayerPanel({
+  player,
+  onUpdate,
+  activePair,
+  cap,
+  creditScore,
+  creditMultiplier = 0,
+}) {
   function field(key, value, min, max, step = 0.1) {
     return (
       <div className="flex flex-col gap-0.5">
@@ -67,8 +75,8 @@ export function PlayerPanel({ player, onUpdate, activePair, cap, creditScore, cr
         </div>
       </div>
 
-      {/* Leverage */}
-      {field("leverage", player.leverage ?? 1, 0.5, Math.min(cap ?? 2, creditExtension ? cap + creditExtension : cap), 0.25)}
+      {/* Leverage — always ESMA-capped. Credit expands capital, not leverage (§10.5). */}
+      {field("leverage", player.leverage ?? 1, 0.5, cap ?? 2, 0.25)}
 
       {/* Margin slider */}
       {field("margin", player.margin ?? 5000, 500, 50000, 500)}
@@ -122,11 +130,21 @@ export function PlayerPanel({ player, onUpdate, activePair, cap, creditScore, cr
         </div>
       )}
 
-      {creditScore > 0.6 && creditExtension > 0 && (
-        <div className="text-[10px] font-mono text-indigo-400 text-center">
-          Credit extension: +{creditExtension.toFixed(1)}× available
-        </div>
-      )}
+      {creditMultiplier > 1 && (() => {
+        const deployed = (player.margin ?? 0) * (creditMultiplier - 1);
+        const atFloor = shouldUnwindCredit(player.margin ?? 0, deployed);
+        return (
+          <div
+            className={`text-[10px] font-mono text-center ${
+              atFloor ? "text-red-400 animate-pulse" : "text-indigo-400"
+            }`}
+          >
+            Credit {creditMultiplier.toFixed(2)}× · effective $
+            {((player.margin ?? 0) * creditMultiplier).toFixed(0)}
+            {atFloor && " · HARD FLOOR"}
+          </div>
+        );
+      })()}
     </div>
   );
 }

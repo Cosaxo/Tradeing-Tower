@@ -97,5 +97,10 @@ export const TAIL_HEDGE_THRESHOLD = 0.3;
 export const CREDIT_DRIFT_THRESHOLD = 0.5;
 export const CREDIT_DELEVERAGE_EPOCHS = 5;
 
+// Drift half-life in epochs: per-position drift contribution decays by
+// 0.5^(age / HALF_LIFE) once the position carries an openedAtEpoch tag.
+// Without this, rebalancing (which is healthy) permanently inflates drift.
+export const CREDIT_DRIFT_HALF_LIFE = 15;
+
 // Soft-close boundary: last 20% of each medium epoch is frozen for deterministic clear
 export const SOFT_CLOSE_PCT = 0.8;

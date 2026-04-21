@@ -31,9 +31,11 @@ export function calcVolatility(returns) {
 }
 
 export function calcCalmar(returns, maxDD) {
-  if (!returns || !returns.length || maxDD === 0) return null;
+  if (!returns || !returns.length) return null;
+  if (!Number.isFinite(maxDD) || maxDD === 0) return null;
   const annualised = (returns.reduce((s, r) => s + r, 0) / returns.length) * 365;
-  return annualised / maxDD;
+  const calmar = annualised / maxDD;
+  return Number.isFinite(calmar) ? calmar : null;
 }
 
 export function calcWinRate(returns) {
@@ -47,8 +49,12 @@ export function calcMaxDrawdown(history) {
   let maxDD = 0;
   margins.forEach((m) => {
     if (m > peak) peak = m;
-    const dd = (peak - m) / peak;
-    if (dd > maxDD) maxDD = dd;
+    // Guard against peak=0 (e.g. fully liquidated equity) which would
+    // otherwise yield NaN and silently fail downstream gate comparisons.
+    if (peak > 0) {
+      const dd = (peak - m) / peak;
+      if (dd > maxDD) maxDD = dd;
+    }
   });
   return maxDD;
 }

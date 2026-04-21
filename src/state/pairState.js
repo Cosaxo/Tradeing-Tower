@@ -90,10 +90,23 @@ export function initPairState(pairKey) {
 }
 
 // Append a price to history respecting the MAX_HISTORY cap.
+//
+// returnHistory is maintained as its own ring buffer so it can hold a full
+// MAX_HISTORY samples rather than being derived from (and thus bounded by)
+// the price window. Previously the derivation collapsed to
+// prices.length - 1 samples — a silent off-by-one for any consumer that
+// expected its own MAX_HISTORY of returns — and rebuilt every tick in O(N).
 export function pushPrice(state, newPrice) {
+  const prevPrice = state.prices[state.prices.length - 1];
   const prices = [...state.prices, newPrice].slice(-MAX_HISTORY);
-  const returnHistory = prices.length > 1
-    ? prices.slice(1).map((p, i) => Math.log(p / prices[i]))
-    : state.returnHistory;
+
+  let returnHistory = state.returnHistory;
+  if (Number.isFinite(prevPrice) && prevPrice > 0 && Number.isFinite(newPrice) && newPrice > 0) {
+    const r = Math.log(newPrice / prevPrice);
+    if (Number.isFinite(r)) {
+      returnHistory = [...state.returnHistory, r].slice(-MAX_HISTORY);
+    }
+  }
+
   return { ...state, prices, returnHistory };
 }

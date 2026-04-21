@@ -251,6 +251,18 @@ describe("calcConfigurationDrift", () => {
     const init = [{ pairKey: "EURUSD", side: "LONG", leverage: 2 }];
     expect(calcConfigurationDrift(now, init)).toBeGreaterThan(0);
   });
+  it("decays drift over time when positions carry openedAtEpoch", () => {
+    const init = [{ pairKey: "EURUSD", side: "LONG", leverage: 2, openedAtEpoch: 0 }];
+    const fresh = calcConfigurationDrift([], init, { currentEpoch: 1, halfLifeEpochs: 10 });
+    const stale = calcConfigurationDrift([], init, { currentEpoch: 40, halfLifeEpochs: 10 });
+    expect(stale).toBeLessThan(fresh);
+  });
+  it("is backwards-compatible when no epoch metadata is supplied", () => {
+    const init = [{ pairKey: "EURUSD", side: "LONG", leverage: 2 }];
+    const decayed = calcConfigurationDrift([], init, { currentEpoch: 100, halfLifeEpochs: 10 });
+    const undecayed = calcConfigurationDrift([], init);
+    expect(decayed).toBeCloseTo(undecayed);
+  });
 });
 
 // ----- Full assessment ----------------------------------------------------

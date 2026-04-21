@@ -333,6 +333,31 @@ export function runAuction(
     (u) => u.strategy === "FIXED_SHORT" || (u.strategy === "YIELD_CHASER" && ratio < 0)
   );
 
+  // Zero-match short-circuit: if either side of the book is empty, nothing
+  // can clear. Return a well-formed empty result so downstream consumers
+  // (entropy contracts, strips, NPC markets) don't have to defend against
+  // undefined/malformed auction state.
+  if (longBids.length === 0 || shortBids.length === 0) {
+    logs.push(
+      `[AUCTION] No match: longBids=${longBids.length} shortBids=${shortBids.length} — skipping clear.`
+    );
+    return {
+      matched: [],
+      longCurve: [],
+      shortCurve: [],
+      dominantSide: longBids.length >= shortBids.length ? "LONG" : "SHORT",
+      normWeights: [],
+      smoothFills: prevSmoothFills ?? [],
+      bucketLevs: [],
+      smileParams: smileParams ?? { sk: 0, ek: 0 },
+      metaParams: metaParams ?? {},
+      imbalanceRatio: 1,
+      softClose: true,
+      totalMatched: 0,
+      avgLev: 0,
+    };
+  }
+
   const liveSmile = estimateSmileParams([...longBids, ...shortBids], ratio);
   const blended = blendSmileParams(smileParams ?? { sk: 0, ek: 0 }, liveSmile);
 

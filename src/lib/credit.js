@@ -50,6 +50,7 @@ import {
   TAIL_HEDGE_THRESHOLD,
   CREDIT_DRIFT_THRESHOLD,
   CREDIT_DELEVERAGE_EPOCHS,
+  CREDIT_DRIFT_HALF_LIFE,
 } from "../constants/system.js";
 
 // --------------------------------------------------------------------------
@@ -160,7 +161,15 @@ export function scorePortfolioComposition(openPositions /*, corrMap unused */) {
 
 function scaleToUnit(value, lo, hi) {
   if (hi === lo) return 0;
+  if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(1, (value - lo) / (hi - lo)));
+}
+
+// Metric-safe fallback: if a statistic is NaN/Infinity, substitute a sentinel.
+// Using a sentinel instead of silently dropping the metric lets gate logic
+// explicitly fail the check rather than let NaN short-circuit comparisons.
+function finiteOr(value, fallback) {
+  return Number.isFinite(value) ? value : fallback;
 }
 
 export function performanceComposite(history) {
@@ -169,10 +178,10 @@ export function performanceComposite(history) {
   }
   const window = history.slice(-CREDIT_ROLLING_WINDOW);
   const returns = calcReturns(window);
-  const maxDD = calcMaxDrawdown(window);
-  const sor = sortino(returns) ?? 0;
-  const cal = calcCalmar(returns, maxDD) ?? 0;
-  const wr = calcWinRate(returns) ?? 0.5;
+  const maxDD = finiteOr(calcMaxDrawdown(window), 0);
+  const sor = finiteOr(sortino(returns), 0);
+  const cal = finiteOr(calcCalmar(returns, maxDD), 0);
+  const wr = finiteOr(calcWinRate(returns), 0.5);
 
   // Scale each to [0, 1] over "just passed gate" → "clearly excellent".
   const sorScore = scaleToUnit(sor, CREDIT_GATE_SORTINO, 3.0);
@@ -202,11 +211,15 @@ export function evaluateGates(history, compositionScore) {
   }
   const window = history.slice(-CREDIT_ROLLING_WINDOW);
   const returns = calcReturns(window);
-  const maxDD = calcMaxDrawdown(window);
-  const sor = sortino(returns) ?? 0;
-  const cal = calcCalmar(returns, maxDD) ?? 0;
-  const wr = calcWinRate(returns) ?? 0.5;
+  const maxDD = finiteOr(calcMaxDrawdown(window), Infinity);
+  const sor = finiteOr(sortino(returns), -Infinity);
+  const cal = finiteOr(calcCalmar(returns, maxDD), -Infinity);
+  const wr = finiteOr(calcWinRate(returns), 0);
 
+  // Each gate compares against a well-defined threshold. Non-finite inputs
+  // are mapped to the failing sentinel above, so any NaN in the raw metric
+  // deterministically fails the gate rather than silently disqualifying on
+  // a comparison with NaN.
   const gates = {
     window: true,
     sortino: sor >= CREDIT_GATE_SORTINO,
@@ -244,16 +257,21 @@ export function creditMultiplier({ qualified, compositionScore, performanceScore
 
 // Whitepaper §7.4: credit rewards book construction primarily; performance
 // is a binary sanity gate with marginal magnitude contribution.
-export function assessCreditQualification(history, openPositions, corrMap, pairKey, initialPositions) {
+export function assessCreditQualification(history, openPositions, corrMap, pairKey, initialPositions, currentEpoch) {
   const comp = scorePortfolioComposition(openPositions ?? []);
   const perf = performanceComposite(history);
   const gates = evaluateGates(history, comp.score);
 
   // Drift includes composition drift (§7.4.4) — selling tail hedges counts
-  // even if leverage is unchanged.
+  // even if leverage is unchanged. Positional drift decays exponentially
+  // with position age (via openedAtEpoch + currentEpoch) so that rebalancing
+  // isn't punished indefinitely.
   let drift = 0;
   if (initialPositions && initialPositions.length > 0) {
-    const cfgDrift = calcConfigurationDrift(openPositions ?? [], initialPositions);
+    const cfgDrift = calcConfigurationDrift(openPositions ?? [], initialPositions, {
+      currentEpoch,
+      halfLifeEpochs: CREDIT_DRIFT_HALF_LIFE,
+    });
     const initComp = scorePortfolioComposition(initialPositions).score;
     const compDrift = Math.abs(comp.score - initComp);
     drift = Math.min(1, cfgDrift * 0.5 + compDrift * 2);
@@ -296,22 +314,44 @@ export function assessCreditQualification(history, openPositions, corrMap, pairK
 // Helpers retained from earlier API
 // --------------------------------------------------------------------------
 
-export function calcConfigurationDrift(currentPositions, initialPositions) {
+export function calcConfigurationDrift(currentPositions, initialPositions, opts = {}) {
   if (!initialPositions || initialPositions.length === 0) return 0;
+  const { currentEpoch, halfLifeEpochs } = opts;
+
+  // Decay factor for a position anchored at `openedAtEpoch`. Falls back to
+  // no decay (weight=1) when either timestamp or half-life is unavailable,
+  // preserving the original behavior for untagged positions.
+  const decayWeight = (openedAtEpoch) => {
+    if (
+      !Number.isFinite(currentEpoch) ||
+      !Number.isFinite(halfLifeEpochs) ||
+      !Number.isFinite(openedAtEpoch) ||
+      halfLifeEpochs <= 0
+    ) {
+      return 1;
+    }
+    const age = Math.max(0, currentEpoch - openedAtEpoch);
+    return Math.pow(0.5, age / halfLifeEpochs);
+  };
+
   let drift = 0;
   currentPositions.forEach((pos) => {
     const init = initialPositions.find(
       (p) => p.pairKey === pos.pairKey && p.side === pos.side
     );
-    if (init) drift += Math.abs((pos.leverage ?? 1) - (init.leverage ?? 1));
-    else drift += 0.5; // wholly new position
+    if (init) {
+      drift += Math.abs((pos.leverage ?? 1) - (init.leverage ?? 1)) * decayWeight(init.openedAtEpoch);
+    } else {
+      drift += 0.5 * decayWeight(pos.openedAtEpoch);
+    }
   });
-  // Positions in initial but now closed also count.
+  // Positions in initial but now closed also count — decay uses the
+  // position's opening epoch so long-resolved trades don't linger.
   initialPositions.forEach((init) => {
     const still = currentPositions.find(
       (p) => p.pairKey === init.pairKey && p.side === init.side
     );
-    if (!still) drift += 0.5;
+    if (!still) drift += 0.5 * decayWeight(init.openedAtEpoch);
   });
   return drift / Math.max(1, Math.max(currentPositions.length, initialPositions.length));
 }

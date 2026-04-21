@@ -159,7 +159,8 @@ export default function App() {
       openPositions,
       corrMap,
       activePair,
-      initialPositions
+      initialPositions,
+      activePS?.epochIndex ?? 0
     );
   }, [equityHistory, openPositions, initialPositions, activePair, activePS]);
 
@@ -420,6 +421,7 @@ export default function App() {
       leverage: player.leverage,
       margin: size,
       openPrice: priceNow,
+      openedAtEpoch: activePS?.epochIndex ?? 0,
     };
     setOpenPositions((prev) => [...prev, newPos]);
     setInitialPositions((prev) => (prev.length === 0 ? [newPos] : [...prev, newPos]));

@@ -88,3 +88,27 @@ export function calcRealizedSigma(priceHistory, window = 12) {
   const variance = returns.reduce((s, r) => s + (r - mean) ** 2, 0) / returns.length;
   return Math.sqrt(variance);
 }
+
+// Ratio-beta: covariance of log(ratio) with |returns|, normalised by var(log(ratio)).
+// Used for ratio-correlated volatility amplification (§4.6).
+export function calcRatioBeta(ratioHistory, returnHistory) {
+  const n = Math.min(ratioHistory?.length ?? 0, returnHistory?.length ?? 0);
+  if (n < 5) return 0;
+  const ratios = ratioHistory.slice(-n).map((r) => Math.log(Math.max(0.01, r)));
+  const absR = returnHistory.slice(-n).map(Math.abs);
+  const meanR = ratios.reduce((s, v) => s + v, 0) / n;
+  const meanA = absR.reduce((s, v) => s + v, 0) / n;
+  const cov = ratios.reduce((s, v, i) => s + (v - meanR) * (absR[i] - meanA), 0) / n;
+  const varR = ratios.reduce((s, v) => s + (v - meanR) ** 2, 0) / n;
+  if (varR <= 1e-8) return 0;
+  return Math.max(0, Math.min(1, cov / varR));
+}
+
+// Effective vol with ratio amplification (§4.6):
+//   σ_eff = σ · (1 + β · log(ratio))
+// Crowded books are structurally more fragile → tighter caps, earlier flags.
+export function ratioEffectiveSigma(realizedSigma, ratio, beta = 0.3) {
+  if (!Number.isFinite(ratio) || ratio <= 0) return realizedSigma;
+  const amp = 1 + beta * Math.log(ratio);
+  return realizedSigma * Math.max(0.5, amp);
+}

@@ -21,6 +21,8 @@ export function initPairState(pairKey) {
     prices: [pair.startPrice],
     returnHistory: [],
     realizedSigma: initialSigma,
+    effectiveSigma: initialSigma,
+    ratioHistory: [],
 
     // Auction state.
     auctionResult: null,

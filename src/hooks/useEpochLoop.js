@@ -5,13 +5,13 @@
 //  Slow   (every SLOW_EVERY medium ticks): analytics, insurance pool, regime, correlation
 
 import { useEffect, useRef, useCallback } from "react";
-import { FAST_MS, MEDIUM_MS, SLOW_EVERY, GRACE_MS } from "../constants/system.js";
+import { FAST_MS, MEDIUM_MS, SLOW_EVERY, GRACE_MS, SOFT_CLOSE_PCT } from "../constants/system.js";
 import { priceStep } from "../lib/priceModels.js";
-import { calcRealizedSigma } from "../lib/math.js";
+import { calcRealizedSigma, calcRatioBeta as calcRatioBetaStat, ratioEffectiveSigma } from "../lib/math.js";
 import { detectRegime } from "../lib/regime.js";
 import { updateNpcRegime, applyNpcSettlement, tickNpcRestock, isNpcActive } from "../lib/npcs.js";
 import { runAuction } from "../lib/auction.js";
-import { settleDominantPool, calcRatioBeta } from "../lib/pool.js";
+import { settleDominantPool, calcRatioBeta, escrowTips } from "../lib/pool.js";
 import { settleImbalanceContracts, settleEntropyContracts } from "../lib/contracts.js";
 import { settleStrips } from "../lib/strips.js";
 import { settleInsurancePool } from "../lib/insurance.js";
@@ -21,6 +21,7 @@ import { settleLending } from "../lib/lending.js";
 import { generateNpcOrders } from "../lib/npcMarkets.js";
 import { appendEpochEntry } from "../lib/roleLedger.js";
 import { normalizeTags } from "../lib/capitalTags.js";
+import { checkConservation, formatConservationLog } from "../lib/conservation.js";
 import { TBILL_RATE } from "../constants/system.js";
 import { pushPrice } from "../state/pairState.js";
 import { getEffectiveCap } from "../lib/esma.js";
@@ -70,7 +71,15 @@ export function useEpochLoop({
   // -------------------------------------------------------------------------
   const mediumTick = useCallback(() => {
     const now = Date.now();
+    // Soft-close (§2.2): bids amended within the last SOFT_CLOSE_PCT of the epoch
+    // are frozen out. GRACE_MS handles per-edit settling; soft-close handles the
+    // intra-epoch bid-freeze window.
     const gracePeriod = now - lastPlayerEditRef.current < GRACE_MS;
+    const softCloseWindowMs = MEDIUM_MS * (1 - SOFT_CLOSE_PCT);
+    const timeSinceLastEdit = now - lastPlayerEditRef.current;
+    const inSoftClose =
+      timeSinceLastEdit < softCloseWindowMs && timeSinceLastEdit >= GRACE_MS;
+    const bidsFrozen = gracePeriod || inSoftClose;
     mediumCountRef.current += 1;
     const doSlow = mediumCountRef.current % SLOW_EVERY === 0;
 
@@ -133,7 +142,7 @@ export function useEpochLoop({
           ...n,
           base_margin: n.current_margin ?? n.base_margin,
         }));
-        if (!gracePeriod && player && player.activePair === pk) {
+        if (!bidsFrozen && player && player.activePair === pk) {
           participants.push({
             ...player,
             max_lev: Math.min(player.leverage ?? 1, cap),
@@ -162,6 +171,12 @@ export function useEpochLoop({
           .reduce((s, m) => s + m.margin, 0);
         const newAlpha = calcRatioBeta(longMargin, shortMargin);
 
+        // Ratio-correlated effective sigma (§4.6).
+        const ratioRaw = shortMargin > 0 ? longMargin / shortMargin : (longMargin > 0 ? 10 : 1);
+        const newRatioHistory = [...(ps.ratioHistory ?? []).slice(-99), ratioRaw];
+        const ratioBeta = calcRatioBetaStat(newRatioHistory, ps.returnHistory);
+        const effectiveSigma = ratioEffectiveSigma(realizedSigma, ratioRaw, ratioBeta);
+
         // Build user list for pool settlement (active NPC + player positions).
         const poolUsers = activeNpcs.map((npc) => ({
           id: npc.id,
@@ -170,7 +185,7 @@ export function useEpochLoop({
           side: npc.strategy?.includes("SHORT") ? "SHORT" : "LONG",
           active: true,
         }));
-        if (!gracePeriod && player?.activePair === pk) {
+        if (!bidsFrozen && player?.activePair === pk) {
           poolUsers.push({
             id: player.id ?? "You",
             margin: player.margin ?? 5000,
@@ -181,7 +196,7 @@ export function useEpochLoop({
         }
 
         const { users: settledUsers, stabilityFeeCollected, logs: poolLogs } =
-          settleDominantPool(poolUsers, priceOld, priceNew, realizedSigma, corrMap);
+          settleDominantPool(poolUsers, priceOld, priceNew, effectiveSigma, corrMap);
         poolLogs.forEach((l) => logs.push(l));
 
         // Write NPC settlement margins back — track liquidations + schedule restock.
@@ -196,7 +211,7 @@ export function useEpochLoop({
         // Update player margin if this is their active pair.
         // Decompose settlement into T-bill + auction P&L + tips (§4.10).
         let playerRoleEntry = null;
-        if (!gracePeriod && player?.activePair === pk) {
+        if (!bidsFrozen && player?.activePair === pk) {
           const playerSettled = settledUsers.find((u) => u.id === (player.id ?? "You"));
           if (playerSettled) {
             const preMargin = player.margin ?? 0;
@@ -209,13 +224,11 @@ export function useEpochLoop({
               ? postMargin / (1 + r) - preMargin
               : postMargin - preMargin;
 
-            // Tips: aggregate from matched entries where player appears.
+            // Tips are escrowed separately (§5.2) — use the escrow, not raw matches.
             const pid = player.id ?? "You";
-            let tips = 0;
-            for (const m of auctionResult.matched) {
-              if (m.longId === pid) tips -= (m.margin ?? 0) * (m.longTip ?? 0);
-              if (m.shortId === pid) tips -= (m.margin ?? 0) * (m.shortTip ?? 0);
-            }
+            const { tipEscrow } = escrowTips(auctionResult.matched);
+            const tipEntry = tipEscrow[pid] ?? { paid: 0, received: 0 };
+            const tips = tipEntry.received - tipEntry.paid;
 
             playerRoleEntry = {
               epoch: epochIndex,
@@ -399,6 +412,22 @@ export function useEpochLoop({
           lastEpoch: epochFlow,
         };
 
+        // §9 conservation assertion — verify pool identity each epoch.
+        const tipsEscrowed = auctionResult.matched.reduce(
+          (s, m) => s + (m.margin ?? 0) * ((m.longTip ?? 0) + (m.shortTip ?? 0)),
+          0
+        );
+        const conservation = checkConservation({
+          totalIn:
+            epochFlow.stabilityFee + epochFlow.stripPremium + epochFlow.contractPremium,
+          totalOut: epochFlow.routedToDepositors + epochFlow.claimsPaid,
+          tipsEscrowed,
+          totalPoolDeposit: nextPool.totalDeposits ?? 0,
+        });
+        if (conservation.violated) {
+          logs.push(formatConservationLog(pk, conservation));
+        }
+
         // Settle lending market (NPC offers added before settlement).
         const offersWithNpcs = [...lendingOffers, ...npcOrders.offers];
         const { borrows: settledBorrows, offers: settledOffers, totalRent, logs: lendLogs } =
@@ -446,6 +475,9 @@ export function useEpochLoop({
           epochIndex: epochIndex + 1,
           correlationMap: doSlow ? corrMap : ps.correlationMap,
           currentYield,
+          ratioHistory: newRatioHistory,
+          effectiveSigma,
+          ratioBeta,
         };
 
         if (slowLogs.length > 0) slowLogs.forEach((l) => logs.push(l));

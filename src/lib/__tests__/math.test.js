@@ -6,6 +6,8 @@ import {
   sortino,
   calcWinRate,
   calcMaxDrawdown,
+  calcRatioBeta,
+  ratioEffectiveSigma,
 } from "../math.js";
 
 describe("timeWeightedYieldMult", () => {
@@ -63,5 +65,37 @@ describe("sortino / winRate / maxDrawdown", () => {
       users: [{ id: "You", margin: m }],
     }));
     expect(calcMaxDrawdown(history)).toBeCloseTo(0.4, 2);
+  });
+});
+
+describe("calcRatioBeta (ratio-correlated vol)", () => {
+  it("returns 0 for too-short series", () => {
+    expect(calcRatioBeta([1], [0.01])).toBe(0);
+  });
+
+  it("is bounded in [0, 1]", () => {
+    const ratios = [1, 1.2, 1.5, 2, 2.5, 3, 2.5, 2];
+    const returns = [0.01, 0.02, 0.03, 0.05, 0.04, 0.03, 0.02, 0.01];
+    const beta = calcRatioBeta(ratios, returns);
+    expect(beta).toBeGreaterThanOrEqual(0);
+    expect(beta).toBeLessThanOrEqual(1);
+  });
+});
+
+describe("ratioEffectiveSigma", () => {
+  it("returns σ unchanged at ratio=1 (log=0)", () => {
+    expect(ratioEffectiveSigma(0.02, 1)).toBeCloseTo(0.02);
+  });
+  it("amplifies σ when ratio > 1", () => {
+    const amplified = ratioEffectiveSigma(0.02, 3);
+    expect(amplified).toBeGreaterThan(0.02);
+  });
+  it("reduces σ when ratio < 1 (short-heavy)", () => {
+    const reduced = ratioEffectiveSigma(0.02, 0.5);
+    expect(reduced).toBeLessThan(0.02);
+  });
+  it("floored at 0.5× realized σ", () => {
+    const extreme = ratioEffectiveSigma(0.02, 0.0001);
+    expect(extreme).toBeGreaterThanOrEqual(0.01);
   });
 });

@@ -17,10 +17,8 @@ import {
 } from "./lib/poolLinkage.js";
 import { getEffectiveCap } from "./lib/esma.js";
 import { initStrip } from "./lib/strips.js";
-import { createOffer, matchBorrowRequest, cancelOffer } from "./lib/lending.js";
 import { initLedger } from "./lib/roleLedger.js";
 import { initTags, tryTag, untag, freeMargin } from "./lib/capitalTags.js";
-import { initGovernance } from "./lib/governance.js";
 import { cx } from "./lib/math.js";
 import { POOL_LOCKUP_EPOCHS } from "./constants/system.js";
 
@@ -34,19 +32,16 @@ import { StressPanel } from "./components/StressPanel.jsx";
 import { LogicView } from "./components/LogicView.jsx";
 import { MetricsPanel } from "./components/MetricsPanel.jsx";
 import { NpcPanel } from "./components/NpcPanel.jsx";
-import { ContractDesk } from "./components/ContractDesk.jsx";
 import { StripDesk } from "./components/StripDesk.jsx";
 import { PoolDesk } from "./components/PoolDesk.jsx";
 import { TradeHistory } from "./components/TradeHistory.jsx";
 import { SpeedControl } from "./components/SpeedControl.jsx";
 import { CorrelationHeatmap } from "./components/CorrelationHeatmap.jsx";
 import { RegimeTimeline } from "./components/RegimeTimeline.jsx";
-import { LendingDesk } from "./components/LendingDesk.jsx";
 import { NotificationHistory } from "./components/NotificationHistory.jsx";
 import { Tutorial } from "./components/Tutorial.jsx";
 import { FeeFlow } from "./components/FeeFlow.jsx";
 import { RoleLedger } from "./components/RoleLedger.jsx";
-import { GovernancePanel } from "./components/GovernancePanel.jsx";
 
 const INITIAL_PAIR_STATES = Object.fromEntries(
   ACTIVE_PAIRS.map((pk) => [pk, initPairState(pk)])
@@ -66,7 +61,7 @@ const INITIAL_PLAYER = {
   tags: initTags(), // §10.1 — capital accumulates roles via tags, not transfers
 };
 
-const TABS = ["Chart", "Auction", "Derivatives", "Lending", "Credit", "Stress", "Markets", "Governance", "History", "Log"];
+const TABS = ["Chart", "Auction", "Pool", "Credit", "Stress", "Markets", "History", "Log"];
 
 export default function App() {
   const [pairStates, setPairStates] = useState(INITIAL_PAIR_STATES);
@@ -91,11 +86,6 @@ export default function App() {
     "tt.roleLedger",
     initLedger()
   );
-  const [governance, setGovernance, clearGovernance] = usePersistentState(
-    "tt.governance",
-    initGovernance()
-  );
-
   const { toasts, history, addToast, clearHistory } = useToast();
   const [showTutorial, setShowTutorial] = useState(false);
 
@@ -199,28 +189,6 @@ export default function App() {
     [poolDepositAmount, openPositions, deployedPoolCredit]
   );
 
-  // Derived auction-side statistics.
-  const longMargin = useMemo(
-    () =>
-      (activePS?.auctionResult?.matched ?? [])
-        .filter((m) => m.longId)
-        .reduce((s, m) => s + m.margin, 0),
-    [activePS]
-  );
-  const shortMargin = useMemo(
-    () =>
-      (activePS?.auctionResult?.matched ?? [])
-        .filter((m) => m.shortId)
-        .reduce((s, m) => s + m.margin, 0),
-    [activePS]
-  );
-
-  const normWeights = activePS?.auctionResult?.normWeights ?? [];
-  const avgEntropyMult =
-    normWeights.length > 0
-      ? normWeights.reduce((s, w) => s + w, 0) / normWeights.length
-      : 1;
-
   // Credit assessment driven by actual equity history.
   const creditAssessment = useMemo(() => {
     const corrMap = activePS?.correlationMap ?? {};
@@ -300,67 +268,11 @@ export default function App() {
     addToast(`Shock: ${result.liquidated} liq, $${result.systemLoss?.toFixed(0)} loss`, "warning");
   }
 
-  // --- Contract / strip / pool handlers (§10.1 same-capital semantics) ---
+  // --- Strip / pool handlers (§10.1 same-capital semantics) ---
   //
   // Cash-flow operations (pay premium, receive payout) change `margin`.
   // Role operations (deposit, open position, post offer) only tag a slice
   // of margin as serving that role — margin itself is untouched.
-
-  function handleBuyImbalance({ size, direction, strikeImbalance, premium }) {
-    const id = `IMB-${Date.now()}`;
-    const cost = size * premium;
-    // Premium is a real cash flow (paid to insurer).
-    if (cost > player.margin) return;
-    // Collateralise the contract: tag `size` as backing this obligation.
-    const newTags = tryTag(player.margin - cost, player.tags, "contractCollateral", size);
-    if (!newTags) {
-      addToast("Insufficient free margin to collateralise contract", "warning");
-      return;
-    }
-    setPairStates((prev) => {
-      const ps = prev[activePair];
-      if (!ps) return prev;
-      return {
-        ...prev,
-        [activePair]: {
-          ...ps,
-          imbalanceContracts: [
-            ...ps.imbalanceContracts,
-            { id, buyerId: player.id, size, direction, strikeImbalance, premium },
-          ],
-        },
-      };
-    });
-    setPlayer((p) => ({ ...p, margin: p.margin - cost, tags: newTags }));
-    addToast(`Imbalance ${direction} · premium $${cost.toFixed(2)}`, "info");
-  }
-
-  function handleBuyEntropy({ size, lockedMult, premium }) {
-    const id = `ENT-${Date.now()}`;
-    const cost = size * premium;
-    if (cost > player.margin) return;
-    const newTags = tryTag(player.margin - cost, player.tags, "contractCollateral", size);
-    if (!newTags) {
-      addToast("Insufficient free margin to collateralise contract", "warning");
-      return;
-    }
-    setPairStates((prev) => {
-      const ps = prev[activePair];
-      if (!ps) return prev;
-      return {
-        ...prev,
-        [activePair]: {
-          ...ps,
-          entropyContracts: [
-            ...ps.entropyContracts,
-            { id, buyerId: player.id, size, lockedMult, premium },
-          ],
-        },
-      };
-    });
-    setPlayer((p) => ({ ...p, margin: p.margin - cost, tags: newTags }));
-    addToast(`Entropy lock ${lockedMult.toFixed(1)}× · premium $${cost.toFixed(2)}`, "info");
-  }
 
   function handleBuyStrip(params) {
     const strip = {
@@ -583,77 +495,6 @@ export default function App() {
     );
   }
 
-  // --- Lending handlers (§10.1 same-capital semantics) ---
-  function handlePostLendingOffer({ amount, rate, duration }) {
-    const newTags = tryTag(player.margin, player.tags, "lendingOffered", amount);
-    if (!newTags) {
-      addToast("Insufficient free margin to offer", "warning");
-      return;
-    }
-    const offer = createOffer(player.id, amount, rate, duration);
-    setPairStates((prev) => {
-      const ps = prev[activePair];
-      if (!ps) return prev;
-      return {
-        ...prev,
-        [activePair]: {
-          ...ps,
-          lendingOffers: [...ps.lendingOffers, { ...offer, createdEpoch: ps.epochIndex }],
-        },
-      };
-    });
-    setPlayer((p) => ({ ...p, tags: newTags }));
-    addToast(`Tagged $${amount} @ ${(rate * 100).toFixed(3)}% as lending (margin untouched)`, "info");
-  }
-
-  function handleCancelLendingOffer(offerId) {
-    setPairStates((prev) => {
-      const ps = prev[activePair];
-      if (!ps) return prev;
-      const offer = ps.lendingOffers.find((o) => o.id === offerId);
-      if (!offer || offer.lenderId !== player.id) return prev;
-      const release = offer.remaining;
-      if (release > 0) {
-        setPlayer((p) => ({ ...p, tags: untag(p.tags, "lendingOffered", release) }));
-      }
-      return {
-        ...prev,
-        [activePair]: {
-          ...ps,
-          lendingOffers: cancelOffer(ps.lendingOffers, offerId),
-        },
-      };
-    });
-    addToast(`Offer ${offerId} cancelled`, "info");
-  }
-
-  function handleBorrow({ amount, maxRate }) {
-    setPairStates((prev) => {
-      const ps = prev[activePair];
-      if (!ps) return prev;
-      const { borrows, updatedOffers, unfilled } = matchBorrowRequest(
-        ps.lendingOffers,
-        player.id,
-        amount,
-        maxRate
-      );
-      if (borrows.length === 0) {
-        addToast("No offers matched — try raising max rate", "warning");
-        return prev;
-      }
-      const filled = amount - unfilled;
-      addToast(`Borrowed $${filled.toFixed(0)} across ${borrows.length} offers`, "info");
-      return {
-        ...prev,
-        [activePair]: {
-          ...ps,
-          lendingOffers: updatedOffers,
-          lendingBorrows: [...ps.lendingBorrows, ...borrows],
-        },
-      };
-    });
-  }
-
   function handleResetSession() {
     clearPlayer();
     clearPositions();
@@ -661,7 +502,6 @@ export default function App() {
     clearEquity();
     clearTrades();
     clearLedger();
-    clearGovernance();
     setPairStates(INITIAL_PAIR_STATES);
     setLogs([]);
     setShockResults(null);
@@ -685,13 +525,11 @@ export default function App() {
     Space: () => setRunning((r) => !r),
     "1": () => setActiveTab("Chart"),
     "2": () => setActiveTab("Auction"),
-    "3": () => setActiveTab("Derivatives"),
-    "4": () => setActiveTab("Lending"),
-    "5": () => setActiveTab("Credit"),
-    "6": () => setActiveTab("Stress"),
-    "7": () => setActiveTab("Markets"),
-    "8": () => setActiveTab("Governance"),
-    "9": () => setActiveTab("History"),
+    "3": () => setActiveTab("Pool"),
+    "4": () => setActiveTab("Credit"),
+    "5": () => setActiveTab("Stress"),
+    "6": () => setActiveTab("Markets"),
+    "7": () => setActiveTab("History"),
     "0": () => setActiveTab("Log"),
     "+": () => setSpeed((s) => Math.min(5, s * 2)),
     "-": () => setSpeed((s) => Math.max(0.5, s / 2)),
@@ -905,27 +743,8 @@ export default function App() {
               </div>
             )}
 
-            {activeTab === "Derivatives" && (
+            {activeTab === "Pool" && (
               <>
-                <ContractDesk
-                  longMargin={longMargin}
-                  shortMargin={shortMargin}
-                  normWeights={normWeights}
-                  avgEntropyMult={avgEntropyMult}
-                  playerMargin={player.margin}
-                  onBuyImbalance={handleBuyImbalance}
-                  onBuyEntropy={handleBuyEntropy}
-                  openImbalance={activePS?.imbalanceContracts ?? []}
-                  openEntropy={activePS?.entropyContracts ?? []}
-                />
-                <StripDesk
-                  playerMargin={player.margin}
-                  leverage={player.leverage}
-                  realizedSigma={activePS?.realizedSigma ?? 0.02}
-                  returnHistory={activePS?.returnHistory ?? []}
-                  onBuyStrip={handleBuyStrip}
-                  openStrips={activePS?.strips ?? []}
-                />
                 <PoolDesk
                   pool={activePS?.insurancePool}
                   playerId={player.id}
@@ -935,20 +754,15 @@ export default function App() {
                   poolLtv={poolLtvInfo}
                   availablePoolCredit={availablePoolCredit}
                 />
+                <StripDesk
+                  playerMargin={player.margin}
+                  leverage={player.leverage}
+                  realizedSigma={activePS?.realizedSigma ?? 0.02}
+                  returnHistory={activePS?.returnHistory ?? []}
+                  onBuyStrip={handleBuyStrip}
+                  openStrips={activePS?.strips ?? []}
+                />
               </>
-            )}
-
-            {activeTab === "Lending" && (
-              <LendingDesk
-                playerId={player.id}
-                playerMargin={player.margin}
-                offers={activePS?.lendingOffers ?? []}
-                borrows={activePS?.lendingBorrows ?? []}
-                yieldBuffer={activePS?.yieldBuffer ?? 0}
-                onPostOffer={handlePostLendingOffer}
-                onCancelOffer={handleCancelLendingOffer}
-                onBorrow={handleBorrow}
-              />
             )}
 
             {activeTab === "Credit" && (
@@ -988,32 +802,6 @@ export default function App() {
                   pairs={ACTIVE_PAIRS}
                 />
               </>
-            )}
-
-            {activeTab === "Governance" && (
-              <GovernancePanel
-                governance={governance}
-                setGovernance={setGovernance}
-                playerId={player.id}
-                currentEpoch={activePS?.epochIndex ?? 0}
-                playerContext={{
-                  poolLoyaltyEpochs:
-                    (activePS?.insurancePool?.deposits?.[player.id]?.depositEpoch != null)
-                      ? (activePS?.epochIndex ?? 0) -
-                        (activePS?.insurancePool?.deposits?.[player.id]?.depositEpoch ?? 0)
-                      : 0,
-                  openPositions,
-                  creditQualified: creditAssessment.qualified,
-                  contractsWritten:
-                    (activePS?.imbalanceContracts?.length ?? 0) +
-                    (activePS?.entropyContracts?.length ?? 0) +
-                    (activePS?.strips?.length ?? 0),
-                  lendingOffers: (activePS?.lendingOffers ?? []).filter(
-                    (o) => o.lenderId === player.id && o.active
-                  ).length,
-                  timeInProtocolEpochs: activePS?.epochIndex ?? 0,
-                }}
-              />
             )}
 
             {activeTab === "History" && <TradeHistory trades={tradeLog} />}

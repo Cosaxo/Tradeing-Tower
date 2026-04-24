@@ -10,9 +10,15 @@ export const GRACE_MS = 800;
 // - Fast   (~1s):  safety monitoring (deterministic barrier checks)
 // - Medium (~6s):  auction + contract settlement
 // - Slow   (~30s): analytics, pool settlement, parameter adaptation (every 5th medium)
+//
+// Insurance settles on its own rarer, prime-stride cadence so depositors
+// see predictable, chunky yield steps instead of a new number every 30s —
+// and the prime stride keeps insurance out of sync with analytics (5·23 =
+// 115 medium ticks ≈ 11.5 min between any alignment).
 export const FAST_MS = 1000;
 export const MEDIUM_MS = 6000;
 export const SLOW_EVERY = 5;
+export const INSURANCE_EVERY = 23;
 
 // History pruning: keep last N snapshots per pair to bound memory growth.
 export const MAX_HISTORY = 200;
@@ -31,13 +37,6 @@ export const POOL_STABILITY_FEE = 0.02; // 2% of tip revenue routed to pool each
 export const POOL_MAX_CLAIM_RATIO = 0.5;
 export const POOL_LOCKUP_EPOCHS = 50;
 export const POOL_DEPTH_MAX = 2.0;
-
-// Imbalance contracts
-export const IMB_MAX_DURATION = 30;
-export const IMB_PAYOUT_BASE = 1000;
-
-// Entropy contracts
-export const ENT_LAMBDA = 0.15;
 
 // Loss strip
 export const STRIP_INSURER_BOOST = 0.12;

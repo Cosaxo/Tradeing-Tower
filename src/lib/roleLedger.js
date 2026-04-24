@@ -1,18 +1,20 @@
 // Role-return attribution — whitepaper §4.10.
 //
-// The per-epoch margin delta decomposes into five additive channels:
+// Post-cut (imbalance/entropy contracts + lending market removed), the
+// per-epoch margin delta decomposes into these additive channels:
 //
 //   Δm_i = r_tbill·m_i          (Floor 0)
 //        + y_pool·d_i           (Floor 1)
 //        + PnL_auction + τ_i    (Floor 2)
-//        + PnL_contracts        (Floor 4)
+//        + PnL_strip            (Floor 4 — loss strips, the only remaining
+//                                user risk-transfer product)
 //        + Δc_i                 (Floor 3 credit — notional)
 //
 // Each floor's contribution is tagged individually so the user can see
 // which role produced which chunk of P&L — a decision-theoretic signal
 // that aggregate P&L collapses.
 
-const ROLES = ["tbill", "poolYield", "auctionPnl", "tips", "contractPnl", "creditChange"];
+const ROLES = ["tbill", "poolYield", "auctionPnl", "tips", "stripPnl", "creditChange"];
 
 export function initLedger() {
   return {
@@ -54,7 +56,7 @@ export const ROLE_LABELS = {
   poolYield: "Pool Yield (Floor 1)",
   auctionPnl: "Auction P&L (Floor 2)",
   tips: "Tips (Floor 2)",
-  contractPnl: "Contracts (Floor 4)",
+  stripPnl: "Strips (Floor 4)",
   creditChange: "Credit Δ (Floor 3)",
 };
 
@@ -63,6 +65,6 @@ export const ROLE_COLORS = {
   poolYield: "#a78bfa",
   auctionPnl: "#34d399",
   tips: "#fbbf24",
-  contractPnl: "#60a5fa",
+  stripPnl: "#60a5fa",
   creditChange: "#e879f9",
 };

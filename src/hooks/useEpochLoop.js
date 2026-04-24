@@ -5,19 +5,17 @@
 //  Slow   (every SLOW_EVERY medium ticks): analytics, insurance pool, regime, correlation
 
 import { useEffect, useRef, useCallback } from "react";
-import { FAST_MS, MEDIUM_MS, SLOW_EVERY, GRACE_MS, SOFT_CLOSE_PCT } from "../constants/system.js";
+import { FAST_MS, MEDIUM_MS, SLOW_EVERY, INSURANCE_EVERY, GRACE_MS, SOFT_CLOSE_PCT } from "../constants/system.js";
 import { priceStep } from "../lib/priceModels.js";
 import { calcRealizedSigma, calcRatioBeta as calcRatioBetaStat, ratioEffectiveSigma } from "../lib/math.js";
 import { detectRegime } from "../lib/regime.js";
 import { updateNpcRegime, applyNpcSettlement, tickNpcRestock, isNpcActive } from "../lib/npcs.js";
 import { runAuction } from "../lib/auction.js";
 import { settleDominantPool, calcRatioBeta, escrowTips } from "../lib/pool.js";
-import { settleImbalanceContracts, settleEntropyContracts } from "../lib/contracts.js";
 import { settleStrips } from "../lib/strips.js";
 import { settleInsurancePool } from "../lib/insurance.js";
 import { updateYieldModel, calcYieldBufferContribution } from "../lib/yieldModel.js";
 import { calcCrossMarketCorrelations } from "../lib/correlation.js";
-import { settleLending } from "../lib/lending.js";
 import { generateNpcOrders } from "../lib/npcMarkets.js";
 import { appendEpochEntry } from "../lib/roleLedger.js";
 import { normalizeTags } from "../lib/capitalTags.js";
@@ -82,6 +80,10 @@ export function useEpochLoop({
     const bidsFrozen = gracePeriod || inSoftClose;
     mediumCountRef.current += 1;
     const doSlow = mediumCountRef.current % SLOW_EVERY === 0;
+    // Insurance runs on its own prime stride (INSURANCE_EVERY). Coprime
+    // with SLOW_EVERY so the two settlements never coincide — analytics
+    // and insurance never mutate overlapping state in the same frame.
+    const doInsurance = mediumCountRef.current % INSURANCE_EVERY === 0;
 
     setPairStates((prev) => {
       const logs = [];
@@ -103,10 +105,9 @@ export function useEpochLoop({
 
         const { prices, realizedSigma, npcs, regime, yieldModel,
                 smileParams, metaParams, prevSmoothFills, alpha,
-                imbalanceContracts, entropyContracts, strips,
+                strips,
                 insurancePool, epochIndex, yieldBuffer = 0,
                 yieldBufferEpochs = 0, regimeHistory = [],
-                lendingOffers = [], lendingBorrows = [],
                 feeLedger = {} } = ps;
 
         const priceOld = prices[prices.length - 2] ?? prices[prices.length - 1];
@@ -235,9 +236,9 @@ export function useEpochLoop({
               tbill,
               auctionPnl,
               tips,
-              // poolYield + contractPnl + creditChange filled in below as we settle.
+              // poolYield + stripPnl + creditChange filled in below as we settle.
               poolYield: 0,
-              contractPnl: 0,
+              stripPnl: 0,
               creditChange: 0,
             };
 
@@ -255,54 +256,19 @@ export function useEpochLoop({
           }
         }
 
-        // NPC market participation: produce offers + contract purchases + strip buys.
-        const avgEntMultPre =
-          auctionResult.normWeights?.reduce((s, w) => s + w, 0) /
-          Math.max(1, auctionResult.normWeights?.length ?? 1);
+        // NPC market participation: strip buys only (contracts + lending cut).
         const npcOrders = generateNpcOrders({
           npcs: updatedNpcs.filter(isNpcActive),
-          existingOffers: lendingOffers,
           longMargin,
           shortMargin,
           regime: updatedRegime,
           normWeights: auctionResult.normWeights ?? [],
-          avgEntropyMult: avgEntMultPre ?? 1,
           realizedSigma,
           returnHistory: ps.returnHistory,
           epochIndex,
         });
 
-        // Settle contracts (including the fresh NPC buys).
-        const imbalanceContractsWithNpcs = [
-          ...imbalanceContracts,
-          ...npcOrders.imbalanceBuys,
-        ];
-        const entropyContractsWithNpcs = [
-          ...entropyContracts,
-          ...npcOrders.entropyBuys,
-        ];
-        const { settled: imbalSettled, logs: imbalLogs } =
-          settleImbalanceContracts(imbalanceContractsWithNpcs, longMargin, shortMargin);
-        imbalLogs.forEach((l) => logs.push(l));
-        if (npcOrders.imbalanceBuys.length > 0) {
-          logs.push(`[NPC-IMB] ${npcOrders.imbalanceBuys.length} new buyers`);
-        }
-        // Credit player's share of contract payouts back to margin (Floor 4 §4.10).
         const pid = player?.id ?? "You";
-        let playerContractPnl = 0;
-        for (const c of imbalSettled) {
-          if (c.buyerId === pid && c.payout) playerContractPnl += c.payout;
-        }
-
-        const { settled: entSettled, logs: entLogs } =
-          settleEntropyContracts(entropyContractsWithNpcs, auctionResult.normWeights, avgEntMultPre ?? 1);
-        entLogs.forEach((l) => logs.push(l));
-        if (npcOrders.entropyBuys.length > 0) {
-          logs.push(`[NPC-ENT] ${npcOrders.entropyBuys.length} new buyers`);
-        }
-        for (const c of entSettled) {
-          if (c.buyerId === pid && c.payout) playerContractPnl += c.payout;
-        }
 
         // Settle strips (including fresh NPC strip buys).
         const currentYield = auctionResult.matched.length > 0
@@ -313,14 +279,16 @@ export function useEpochLoop({
         const { settled: stripsSettled, totalPremiumCollected, logs: stripsLogs } =
           settleStrips(stripsWithNpcs, currentYield, realizedSigma, ps.returnHistory, playerMarginForStrips);
         stripsLogs.forEach((l) => logs.push(l));
-        for (const s of stripsSettled) {
-          if (s.buyerId === pid && s.lastPayout) playerContractPnl += s.lastPayout;
-        }
 
-        // Apply player contract payouts to margin + ledger.
-        if (playerContractPnl !== 0 && player?.activePair === pk) {
-          setPlayer((prev) => ({ ...prev, margin: (prev.margin ?? 0) + playerContractPnl }));
-          if (playerRoleEntry) playerRoleEntry.contractPnl += playerContractPnl;
+        // Strip payouts flow back to the buyer's margin (Floor 4 §4.10).
+        let playerStripPnl = 0;
+        for (const s of stripsSettled) {
+          if (s.buyerId === pid && s.lastPayout) playerStripPnl += s.lastPayout;
+        }
+        if (playerStripPnl !== 0 && player?.activePair === pk) {
+          setPlayer((prev) => ({ ...prev, margin: (prev.margin ?? 0) + playerStripPnl }));
+          if (playerRoleEntry) playerRoleEntry.stripPnl =
+            (playerRoleEntry.stripPnl ?? 0) + playerStripPnl;
         }
         if (npcOrders.stripBuys.length > 0) {
           logs.push(`[NPC-STRIP] ${npcOrders.stripBuys.length} new strips`);
@@ -333,10 +301,13 @@ export function useEpochLoop({
           pendingStabilityFee: 0,
         };
 
-        // Slow: settle insurance pool + yield model + correlations.
+        // Insurance settles on its own prime-stride cadence (INSURANCE_EVERY),
+        // deliberately decoupled from the analytics slow tick. Rarer + chunkier
+        // yield is more predictable for depositors; the coprime stride
+        // guarantees insurance and analytics never settle in the same frame.
         let slowLogs = [];
         let poolFlow = null;
-        if (doSlow) {
+        if (doInsurance) {
           const playerPid = player?.id ?? "You";
           const preDeposit = insurancePool.deposits?.[playerPid]?.amount ?? 0;
           const { pool: settledPool, log, flow } = settleInsurancePool(
@@ -372,28 +343,14 @@ export function useEpochLoop({
           );
         }
 
-        // Contract premiums collected by the player (imbalance + entropy) flow back via
-        // pool too; for the ledger we approximate the inbound total as the settled
-        // contracts' premiums over their size (since those were paid up-front).
-        const contractPremium =
-          npcOrders.imbalanceBuys.reduce((s, b) => s + b.size * b.premium, 0) +
-          npcOrders.entropyBuys.reduce((s, b) => s + b.size * b.premium, 0);
-
-        // Lending rental income this epoch (re-derive since settleLending's totalRent
-        // is already consumed above).
-        const rentalIncome = lendingBorrows
-          .filter((b) => b.active)
-          .reduce((s, b) => s + b.amount * b.rate, 0);
-
-        // Fee ledger: tally the epoch's flows.
+        // Fee ledger: tally the epoch's flows (stabilityFee + stripPremium are
+        // the only inbound revenue streams remaining after the contract and
+        // lending market cuts).
         const epochFlow = {
           stabilityFee: stabilityFeeCollected,
           stripPremium: totalPremiumCollected,
-          contractPremium,
-          rentalIncome,
           routedToBuffer: bufferContrib,
-          routedToPool:
-            stabilityFeeCollected + totalPremiumCollected + contractPremium,
+          routedToPool: stabilityFeeCollected + totalPremiumCollected,
           routedToDepositors: poolFlow?.netDistrib ?? 0,
           claimsPaid: poolFlow?.claimsPaid ?? 0,
           bufferDraws: bufferDraw,
@@ -401,8 +358,6 @@ export function useEpochLoop({
         const newFeeLedger = {
           stabilityFee: (feeLedger.stabilityFee ?? 0) + epochFlow.stabilityFee,
           stripPremium: (feeLedger.stripPremium ?? 0) + epochFlow.stripPremium,
-          contractPremium: (feeLedger.contractPremium ?? 0) + epochFlow.contractPremium,
-          rentalIncome: (feeLedger.rentalIncome ?? 0) + epochFlow.rentalIncome,
           routedToBuffer: (feeLedger.routedToBuffer ?? 0) + epochFlow.routedToBuffer,
           routedToPool: (feeLedger.routedToPool ?? 0) + epochFlow.routedToPool,
           routedToDepositors:
@@ -418,24 +373,13 @@ export function useEpochLoop({
           0
         );
         const conservation = checkConservation({
-          totalIn:
-            epochFlow.stabilityFee + epochFlow.stripPremium + epochFlow.contractPremium,
+          totalIn: epochFlow.stabilityFee + epochFlow.stripPremium,
           totalOut: epochFlow.routedToDepositors + epochFlow.claimsPaid,
           tipsEscrowed,
           totalPoolDeposit: nextPool.totalDeposits ?? 0,
         });
         if (conservation.violated) {
           logs.push(formatConservationLog(pk, conservation));
-        }
-
-        // Settle lending market (NPC offers added before settlement).
-        const offersWithNpcs = [...lendingOffers, ...npcOrders.offers];
-        const { borrows: settledBorrows, offers: settledOffers, totalRent, logs: lendLogs } =
-          settleLending(lendingBorrows, offersWithNpcs);
-        lendLogs.forEach((l) => logs.push(l));
-        void totalRent;
-        if (npcOrders.offers.length > 0) {
-          logs.push(`[NPC-LEND] ${npcOrders.offers.length} new lending offers`);
         }
 
         // Event log for annotations.
@@ -462,16 +406,12 @@ export function useEpochLoop({
           metaParams: auctionResult.metaParams,
           prevSmoothFills: auctionResult.smoothFills,
           alpha: newAlpha,
-          imbalanceContracts: imbalSettled.filter((c) => !c.expired),
-          entropyContracts: entSettled.filter((c) => !c.expired),
           strips: stripsSettled,
           insurancePool: nextPool,
           yieldModel: updatedYieldModel,
           yieldBuffer: newYieldBuffer,
           yieldBufferEpochs: yieldBufferEpochs + 1,
           feeLedger: newFeeLedger,
-          lendingBorrows: settledBorrows,
-          lendingOffers: settledOffers,
           epochIndex: epochIndex + 1,
           correlationMap: doSlow ? corrMap : ps.correlationMap,
           currentYield,

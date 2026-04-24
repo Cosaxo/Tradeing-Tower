@@ -58,8 +58,6 @@ export function initPairState(pairKey) {
     feeLedger: {
       stabilityFee: 0,      // collected from RISKY tier settlements
       stripPremium: 0,      // collected from strip issuance
-      contractPremium: 0,   // collected from imbalance + entropy contracts
-      rentalIncome: 0,      // collected from lending
       routedToBuffer: 0,    // accumulated yield-buffer contributions
       routedToPool: 0,      // revenue that became pendingPremiums in the pool
       routedToDepositors: 0, // net distrib paid out to pool depositors
@@ -78,13 +76,7 @@ export function initPairState(pairKey) {
     // Event ticks (for chart annotations): { epoch, type, meta }.
     events: [],
 
-    // Lending market.
-    lendingOffers: [], // { id, lenderId, amount, rate, duration }
-    lendingBorrows: [], // { id, borrowerId, lenderId, amount, rate, remaining }
-
-    // Contracts.
-    imbalanceContracts: [],
-    entropyContracts: [],
+    // Loss strips — the only remaining user-sold risk-transfer product.
     strips: [],
   };
 }

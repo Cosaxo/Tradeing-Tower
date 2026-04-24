@@ -8,6 +8,13 @@ import { usePersistentState } from "./hooks/usePersistentState.js";
 import { assessCreditQualification, calcPairCreditEligibility } from "./lib/credit.js";
 import { calcSystemSolvencyBuffer, propagateShock, applyShockToPositions } from "./lib/stress.js";
 import { calcYieldRouterSuggestions } from "./lib/yieldRouter.js";
+import { calcPoolLtv, calcAvailablePoolCredit } from "./lib/ltv.js";
+import {
+  makeLapId,
+  linkLapToDeposit,
+  unlinkLapFromDeposit,
+  applyPoolToLapHaircut,
+} from "./lib/poolLinkage.js";
 import { getEffectiveCap } from "./lib/esma.js";
 import { initStrip } from "./lib/strips.js";
 import { createOffer, matchBorrowRequest, cancelOffer } from "./lib/lending.js";
@@ -114,6 +121,48 @@ export default function App() {
     }
   }, [player.margin, running, setEquityHistory]);
 
+  // Pool → LAP haircut propagation. Pool settlement (slow tick) writes
+  // pendingLapHaircutPct on the pool state; this effect runs on the next
+  // render (which is the next medium-tick cycle's render) and applies
+  // the haircut to linked positions, then clears the queue. The
+  // different-render separation is what keeps the two subsystems from
+  // mutating the same position in the same frame.
+  useEffect(() => {
+    const anyQueued = ACTIVE_PAIRS.some(
+      (pk) =>
+        Object.keys(pairStates[pk]?.insurancePool?.pendingLapHaircutPct ?? {})
+          .length > 0
+    );
+    if (!anyQueued) return;
+
+    ACTIVE_PAIRS.forEach((pk) => {
+      const pool = pairStates[pk]?.insurancePool;
+      if (!pool?.pendingLapHaircutPct) return;
+      if (Object.keys(pool.pendingLapHaircutPct).length === 0) return;
+
+      const { positions: nextPositions, pool: nextPool } = applyPoolToLapHaircut(
+        pool,
+        openPositions
+      );
+
+      // Position state: uniformly reduced margin on linked LAPs.
+      if (nextPositions !== openPositions) {
+        setOpenPositions(nextPositions);
+        addToast("Pool claim propagated to linked LAPs", "warning");
+      }
+
+      // Clear the queue on the pool.
+      setPairStates((prev) => ({
+        ...prev,
+        [pk]: {
+          ...prev[pk],
+          insurancePool: nextPool,
+        },
+      }));
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pairStates]);
+
   const handlePlayerUpdate = useCallback(
     (patch) => {
       setPlayer((prev) => ({ ...prev, ...patch }));
@@ -125,6 +174,30 @@ export default function App() {
   const activePair = player.activePair ?? ACTIVE_PAIRS[0];
   const activePS = pairStates[activePair];
   const { effectiveCap: cap } = getEffectiveCap(activePair, activePS?.realizedSigma ?? 0.02);
+
+  // Pool deposit total across all pairs' pools (a depositor can hold
+  // slices in multiple pools; for the credit budget they sum).
+  const poolDepositAmount = useMemo(() => {
+    return ACTIVE_PAIRS.reduce((sum, pk) => {
+      const dep = pairStates[pk]?.insurancePool?.deposits?.[player.id];
+      return sum + (dep?.amount ?? 0);
+    }, 0);
+  }, [pairStates, player.id]);
+
+  // Deployed credit — sum of creditConsumed across all linked LAPs in
+  // the depositor's pool slices.
+  const deployedPoolCredit = useMemo(() => {
+    return ACTIVE_PAIRS.reduce((sum, pk) => {
+      const dep = pairStates[pk]?.insurancePool?.deposits?.[player.id];
+      return sum + (dep?.deployedCredit ?? 0);
+    }, 0);
+  }, [pairStates, player.id]);
+
+  const poolLtvInfo = useMemo(() => calcPoolLtv(openPositions), [openPositions]);
+  const availablePoolCredit = useMemo(
+    () => calcAvailablePoolCredit(poolDepositAmount, openPositions, deployedPoolCredit),
+    [poolDepositAmount, openPositions, deployedPoolCredit]
+  );
 
   // Derived auction-side statistics.
   const longMargin = useMemo(
@@ -388,6 +461,29 @@ export default function App() {
     const direction = pos.side === "LONG" ? 1 : -1;
     const pnl = pos.margin * pos.leverage * (Math.exp(direction * logRet) - 1);
 
+    // Pool-linked LAPs un-link on close. Voluntary closes at a loss
+    // queue a proportional pool haircut; gains / break-even un-link
+    // cleanly (user decision 4).
+    if (pos.poolLinkage) {
+      const lossPct = pnl < 0 ? Math.min(1, -pnl / Math.max(1e-8, pos.margin)) : 0;
+      setPairStates((prev) => {
+        const target = prev[pos.poolLinkage.pairKey];
+        if (!target) return prev;
+        return {
+          ...prev,
+          [pos.poolLinkage.pairKey]: {
+            ...target,
+            insurancePool: unlinkLapFromDeposit(
+              target.insurancePool,
+              pos.poolLinkage.depositorId,
+              pos.poolLinkage.lapId,
+              lossPct
+            ),
+          },
+        };
+      });
+    }
+
     setOpenPositions((prev) => prev.filter((_, idx) => idx !== i));
     setTradeLog((prev) => [...prev, { ...pos, pnl, closedPrice: priceNow }]);
     // P&L is a real cash flow; auction-margin tag is released.
@@ -397,24 +493,58 @@ export default function App() {
       tags: untag(p.tags, "auctionMargin", pos.margin),
     }));
     addToast(
-      `Closed ${pos.pairKey} ${pos.side}: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`,
+      `Closed ${pos.pairKey} ${pos.side}: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}${pos.poolLinkage ? " (pool-linked)" : ""}`,
       pnl >= 0 ? "info" : "warning"
     );
   }
 
-  function handleOpenPosition() {
+  function handleOpenPosition(opts = {}) {
+    const { usePoolCredit = false } = opts;
     const priceNow = activePS?.prices?.slice(-1)[0] ?? 1;
     const size = Math.min(1000, freeMargin(player.margin, player.tags) * 0.2);
     if (size < 100) {
       addToast("Not enough free margin to open position", "warning");
       return;
     }
-    // Tag `size` as auction collateral — margin is untouched (§10.1).
-    const newTags = tryTag(player.margin, player.tags, "auctionMargin", size);
-    if (!newTags) {
-      addToast("Insufficient free margin", "warning");
-      return;
+
+    // If the user wants pool-backed credit, verify there's enough headroom
+    // BEFORE tagging. A pool-backed LAP uses `size` of the depositor's
+    // available credit (not free margin).
+    let poolLinkage = null;
+    if (usePoolCredit) {
+      const availableCredit = calcAvailablePoolCredit(
+        poolDepositAmount,
+        openPositions,
+        deployedPoolCredit
+      );
+      if (availableCredit < size) {
+        addToast(
+          `Not enough pool credit: $${availableCredit.toFixed(0)} available, need $${size.toFixed(0)}`,
+          "warning"
+        );
+        return;
+      }
+      poolLinkage = {
+        depositorId: player.id,
+        lapId: makeLapId(),
+        pairKey: activePair, // deposit lives on the active pair's pool
+        creditConsumed: size,
+      };
     }
+
+    // Non-pool path uses auctionMargin tag (§10.1). Pool-backed path
+    // doesn't consume the user's margin — the credit comes from their
+    // deposit slice, already held in the pool. Tag only the direct path.
+    let newTags = player.tags;
+    if (!usePoolCredit) {
+      const tagged = tryTag(player.margin, player.tags, "auctionMargin", size);
+      if (!tagged) {
+        addToast("Insufficient free margin", "warning");
+        return;
+      }
+      newTags = tagged;
+    }
+
     const newPos = {
       pairKey: activePair,
       side: player.side,
@@ -422,11 +552,35 @@ export default function App() {
       margin: size,
       openPrice: priceNow,
       openedAtEpoch: activePS?.epochIndex ?? 0,
+      poolLinkage,
     };
+
+    if (poolLinkage) {
+      setPairStates((prev) => {
+        const target = prev[poolLinkage.pairKey];
+        if (!target) return prev;
+        return {
+          ...prev,
+          [poolLinkage.pairKey]: {
+            ...target,
+            insurancePool: linkLapToDeposit(
+              target.insurancePool,
+              poolLinkage.depositorId,
+              poolLinkage.lapId,
+              size
+            ),
+          },
+        };
+      });
+    }
+
     setOpenPositions((prev) => [...prev, newPos]);
     setInitialPositions((prev) => (prev.length === 0 ? [newPos] : [...prev, newPos]));
-    setPlayer((p) => ({ ...p, tags: newTags }));
-    addToast(`Opened ${activePair} ${player.side} x${player.leverage.toFixed(1)} · $${size.toFixed(0)} tagged`, "info");
+    if (!usePoolCredit) setPlayer((p) => ({ ...p, tags: newTags }));
+    addToast(
+      `Opened ${activePair} ${player.side} x${player.leverage.toFixed(1)} · $${size.toFixed(0)}${usePoolCredit ? " (pool credit)" : " tagged"}`,
+      "info"
+    );
   }
 
   // --- Lending handlers (§10.1 same-capital semantics) ---
@@ -778,6 +932,8 @@ export default function App() {
                   playerMargin={player.margin}
                   onDeposit={handleDeposit}
                   onWithdraw={handleWithdraw}
+                  poolLtv={poolLtvInfo}
+                  availablePoolCredit={availablePoolCredit}
                 />
               </>
             )}
@@ -803,6 +959,10 @@ export default function App() {
                   creditEligibility={creditEligibility}
                   onOpen={handleOpenPosition}
                   onClose={handleClosePosition}
+                  poolLtv={poolLtvInfo}
+                  availablePoolCredit={availablePoolCredit}
+                  poolDepositAmount={poolDepositAmount}
+                  deployedPoolCredit={deployedPoolCredit}
                 />
               </>
             )}

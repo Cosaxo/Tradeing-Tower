@@ -13,6 +13,7 @@ import {
   POOL_LOCKUP_EPOCHS,
 } from "../constants/system.js";
 import { timeWeightedYieldMult } from "./math.js";
+import { applyLapToPoolHaircut, queuePoolToLapHaircut } from "./poolLinkage.js";
 
 export const INSURANCE_POOL_CONSTANTS = { INSURANCE_K, INSURANCE_PREMIUM_RATE, POOL_LOCKUP_EPOCHS };
 
@@ -23,7 +24,7 @@ export function calcInsurancePremium(exposure, realizedSigma) {
 
 export function initInsurancePool() {
   return {
-    deposits: {}, // { userId: { amount, depositEpoch, lockupRemaining } }
+    deposits: {}, // { userId: { amount, depositEpoch, lockupRemaining, linkedLaps: [], deployedCredit } }
     totalDeposits: 0,
     pendingPremiums: 0,
     pendingStabilityFee: 0,
@@ -34,6 +35,15 @@ export function initInsurancePool() {
     yieldMultiplier: 1.0,
     cumulativeYield: 0,
     mediumEpochCount: 0,
+
+    // Propagation queues (different epochs consume each direction so both
+    // sides aren't mutating the same slice in one frame).
+    // Set by slow-tick pool settlement, consumed by next medium-tick LAP
+    // settlement.
+    pendingLapHaircutPct: {}, // { depositorId: pct }
+    // Written by medium-tick LAP settlement (loss/liquidation); consumed
+    // on the next slow-tick pool settlement BEFORE normal pool flows.
+    pendingPoolHaircutPct: {}, // { depositorId: pct (fraction of linked credit lost) }
   };
 }
 
@@ -64,12 +74,19 @@ export function depthToYieldMultiplier(depthScore) {
 
 export function settleInsurancePool(pool, allPairAuctions, epochIndex) {
   const log = [];
+
+  // Step 0: drain the pending LAP→pool haircut queue BEFORE anything else.
+  // LAPs that lost value in the medium-tick cycles since last slow-tick
+  // have pre-registered a deposit reduction; apply it now so subsequent
+  // share calculations are against the haircut-adjusted deposit amounts.
+  let working = applyLapToPoolHaircut(pool);
+
   const next = {
-    ...pool,
+    ...working,
     deposits: Object.fromEntries(
-      Object.entries(pool.deposits).map(([uid, d]) => [uid, { ...d }])
+      Object.entries(working.deposits).map(([uid, d]) => [uid, { ...d }])
     ),
-    claimsHistory: [...pool.claimsHistory],
+    claimsHistory: [...(working.claimsHistory ?? [])],
   };
 
   // Step 1: average auction depth across all pairs
@@ -95,6 +112,25 @@ export function settleInsurancePool(pool, allPairAuctions, epochIndex) {
     next.claimsHistory.push({ epoch: epochIndex, amount: claimsPaid, unmet: unmetClaims });
     log.push(`[POOL CLAIM] $${claimsPaid.toFixed(2)} paid. Unmet: $${unmetClaims.toFixed(2)}`);
   }
+
+  // Step 3a: propagate claim loss to linked LAPs. A claim of X% of the
+  // total pool is charged pro-rata to every depositor; for depositors
+  // with linked LAPs, queue the same pct as a medium-tick LAP haircut.
+  // The queue lives on the pool and is consumed by the next medium tick —
+  // different-epoch separation so LAP settlement isn't mid-mutation.
+  let pushdownNext = next;
+  if (claimsPaid > 0 && next.totalDeposits > 0) {
+    const claimPct = claimsPaid / next.totalDeposits;
+    Object.entries(next.deposits).forEach(([uid, d]) => {
+      if ((d.linkedLaps ?? []).length === 0) return;
+      pushdownNext = queuePoolToLapHaircut(pushdownNext, uid, claimPct);
+    });
+    log.push(
+      `[POOL→LAP] queued ${(claimPct * 100).toFixed(2)}% haircut on linked LAPs (applies next medium tick)`
+    );
+  }
+  // Merge queue changes back onto the working state.
+  next.pendingLapHaircutPct = pushdownNext.pendingLapHaircutPct ?? next.pendingLapHaircutPct ?? {};
 
   // Step 4: net to distribute
   const netDistrib = adjustedRevenue - claimsPaid;

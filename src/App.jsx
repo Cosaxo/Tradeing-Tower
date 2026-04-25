@@ -15,6 +15,7 @@ import {
   unlinkLapFromDeposit,
   applyPoolToLapHaircut,
 } from "./lib/poolLinkage.js";
+import { makePairedLap, isPairedLap, calcPairedLapClosePnl } from "./lib/pairedLap.js";
 import { getEffectiveCap } from "./lib/esma.js";
 import { initStrip } from "./lib/strips.js";
 import { initLedger } from "./lib/roleLedger.js";
@@ -351,13 +352,25 @@ export default function App() {
     const ps = pairStates[pos.pairKey];
     const priceNow = ps?.prices?.slice(-1)[0] ?? 1;
     const priceThen = pos.openPrice ?? priceNow;
-    const logRet = Math.log(priceNow / priceThen);
-    const direction = pos.side === "LONG" ? 1 : -1;
-    const pnl = pos.margin * pos.leverage * (Math.exp(direction * logRet) - 1);
+
+    // Two close formulas. Single LAPs use the directional log-return
+    // formula; paired LAPs decompose into long + short legs that
+    // largely cancel, leaving positive gamma. Both close atomically —
+    // a paired LAP can't be half-closed in Phase 2.
+    let pnl;
+    if (isPairedLap(pos)) {
+      const { netPnl } = calcPairedLapClosePnl(pos, priceNow);
+      pnl = netPnl;
+    } else {
+      const logRet = Math.log(priceNow / priceThen);
+      const direction = pos.side === "LONG" ? 1 : -1;
+      pnl = pos.margin * pos.leverage * (Math.exp(direction * logRet) - 1);
+    }
 
     // Pool-linked LAPs un-link on close. Voluntary closes at a loss
     // queue a proportional pool haircut; gains / break-even un-link
-    // cleanly (user decision 4).
+    // cleanly (user decision 4). The pct uses TOTAL margin (so paired
+    // LAPs and single LAPs are treated consistently — pct = |loss| / margin).
     if (pos.poolLinkage) {
       const lossPct = pnl < 0 ? Math.min(1, -pnl / Math.max(1e-8, pos.margin)) : 0;
       setPairStates((prev) => {
@@ -380,30 +393,40 @@ export default function App() {
 
     setOpenPositions((prev) => prev.filter((_, idx) => idx !== i));
     setTradeLog((prev) => [...prev, { ...pos, pnl, closedPrice: priceNow }]);
-    // P&L is a real cash flow; auction-margin tag is released.
+    // P&L is a real cash flow; auction-margin tag is released. Paired
+    // LAPs untag the FULL `pos.margin` (both legs were tagged together
+    // at open time).
     setPlayer((p) => ({
       ...p,
       margin: p.margin + pnl,
       tags: untag(p.tags, "auctionMargin", pos.margin),
     }));
+    const desc = isPairedLap(pos)
+      ? `${pos.pairKey} PAIRED`
+      : `${pos.pairKey} ${pos.side}`;
     addToast(
-      `Closed ${pos.pairKey} ${pos.side}: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}${pos.poolLinkage ? " (pool-linked)" : ""}`,
+      `Closed ${desc}: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}${pos.poolLinkage ? " (pool-linked)" : ""}`,
       pnl >= 0 ? "info" : "warning"
     );
   }
 
   function handleOpenPosition(opts = {}) {
-    const { usePoolCredit = false } = opts;
+    const { usePoolCredit = false, paired = false } = opts;
     const priceNow = activePS?.prices?.slice(-1)[0] ?? 1;
-    const size = Math.min(1000, freeMargin(player.margin, player.tags) * 0.2);
-    if (size < 100) {
+
+    // For paired LAPs, the user funds BOTH legs — `requiredCapital` is
+    // 2× the displayed size. We size the long-leg at the same default
+    // as a single LAP, so a paired LAP costs twice as much capital.
+    const legSize = Math.min(1000, freeMargin(player.margin, player.tags) * 0.2);
+    if (legSize < 100) {
       addToast("Not enough free margin to open position", "warning");
       return;
     }
+    const requiredCapital = paired ? legSize * 2 : legSize;
 
-    // If the user wants pool-backed credit, verify there's enough headroom
-    // BEFORE tagging. A pool-backed LAP uses `size` of the depositor's
-    // available credit (not free margin).
+    // Pool-credit path: verify headroom for the FULL required capital
+    // (both legs if paired). One pool linkage covers the whole paired
+    // LAP — both legs share a single linkage id.
     let poolLinkage = null;
     if (usePoolCredit) {
       const availableCredit = calcAvailablePoolCredit(
@@ -411,9 +434,9 @@ export default function App() {
         openPositions,
         deployedPoolCredit
       );
-      if (availableCredit < size) {
+      if (availableCredit < requiredCapital) {
         addToast(
-          `Not enough pool credit: $${availableCredit.toFixed(0)} available, need $${size.toFixed(0)}`,
+          `Not enough pool credit: $${availableCredit.toFixed(0)} available, need $${requiredCapital.toFixed(0)}${paired ? " (paired = 2 legs)" : ""}`,
           "warning"
         );
         return;
@@ -421,17 +444,17 @@ export default function App() {
       poolLinkage = {
         depositorId: player.id,
         lapId: makeLapId(),
-        pairKey: activePair, // deposit lives on the active pair's pool
-        creditConsumed: size,
+        pairKey: activePair,
+        creditConsumed: requiredCapital,
       };
     }
 
-    // Non-pool path uses auctionMargin tag (§10.1). Pool-backed path
-    // doesn't consume the user's margin — the credit comes from their
-    // deposit slice, already held in the pool. Tag only the direct path.
+    // Direct-path tagging: tag the full required capital once. Paired
+    // LAPs consume 2× a single LAP's capital but share one tag entry
+    // (auction margin is fungible across the legs).
     let newTags = player.tags;
     if (!usePoolCredit) {
-      const tagged = tryTag(player.margin, player.tags, "auctionMargin", size);
+      const tagged = tryTag(player.margin, player.tags, "auctionMargin", requiredCapital);
       if (!tagged) {
         addToast("Insufficient free margin", "warning");
         return;
@@ -439,15 +462,24 @@ export default function App() {
       newTags = tagged;
     }
 
-    const newPos = {
-      pairKey: activePair,
-      side: player.side,
-      leverage: player.leverage,
-      margin: size,
-      openPrice: priceNow,
-      openedAtEpoch: activePS?.epochIndex ?? 0,
-      poolLinkage,
-    };
+    const newPos = paired
+      ? makePairedLap({
+          pairKey: activePair,
+          margin: requiredCapital, // total — each leg gets requiredCapital/2
+          leverage: player.leverage,
+          openPrice: priceNow,
+          openedAtEpoch: activePS?.epochIndex ?? 0,
+          poolLinkage,
+        })
+      : {
+          pairKey: activePair,
+          side: player.side,
+          leverage: player.leverage,
+          margin: legSize,
+          openPrice: priceNow,
+          openedAtEpoch: activePS?.epochIndex ?? 0,
+          poolLinkage,
+        };
 
     if (poolLinkage) {
       setPairStates((prev) => {
@@ -461,7 +493,7 @@ export default function App() {
               target.insurancePool,
               poolLinkage.depositorId,
               poolLinkage.lapId,
-              size
+              requiredCapital
             ),
           },
         };
@@ -470,10 +502,11 @@ export default function App() {
 
     setOpenPositions((prev) => [...prev, newPos]);
     if (!usePoolCredit) setPlayer((p) => ({ ...p, tags: newTags }));
-    addToast(
-      `Opened ${activePair} ${player.side} x${player.leverage.toFixed(1)} · $${size.toFixed(0)}${usePoolCredit ? " (pool credit)" : " tagged"}`,
-      "info"
-    );
+    const labelTag = usePoolCredit ? "(pool credit)" : "tagged";
+    const label = paired
+      ? `Opened ${activePair} PAIRED x${player.leverage.toFixed(1)} · $${requiredCapital.toFixed(0)} ${labelTag}`
+      : `Opened ${activePair} ${player.side} x${player.leverage.toFixed(1)} · $${legSize.toFixed(0)} ${labelTag}`;
+    addToast(label, "info");
   }
 
   function handleResetSession() {

@@ -5,7 +5,7 @@ import { useEpochLoop } from "./hooks/useEpochLoop.js";
 import { useToast } from "./hooks/useToast.js";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts.js";
 import { usePersistentState } from "./hooks/usePersistentState.js";
-import { assessCreditQualification, calcPairCreditEligibility } from "./lib/credit.js";
+import { calcPairCreditEligibility } from "./lib/credit.js";
 import { calcSystemSolvencyBuffer, propagateShock, applyShockToPositions } from "./lib/stress.js";
 import { calcYieldRouterSuggestions } from "./lib/yieldRouter.js";
 import { calcPoolLtv, calcAvailablePoolCredit } from "./lib/ltv.js";
@@ -73,10 +73,6 @@ export default function App() {
   const [mobileNav, setMobileNav] = useState(null); // 'left' | 'right' | null
   const [shockResults, setShockResults] = useState(null);
   const [openPositions, setOpenPositions, clearPositions] = usePersistentState("tt.positions", []);
-  const [initialPositions, setInitialPositions, clearInitialPositions] = usePersistentState(
-    "tt.initialPositions",
-    []
-  );
   const [equityHistory, setEquityHistory, clearEquity] = usePersistentState(
     "tt.equity",
     [INITIAL_PLAYER.margin]
@@ -189,31 +185,15 @@ export default function App() {
     [poolDepositAmount, openPositions, deployedPoolCredit]
   );
 
-  // Credit assessment driven by actual equity history.
-  const creditAssessment = useMemo(() => {
-    const corrMap = activePS?.correlationMap ?? {};
-    const history = equityHistory.map((e) => ({
-      users: [{ id: "You", margin: e }],
-    }));
-    return assessCreditQualification(
-      history,
-      openPositions,
-      corrMap,
-      activePair,
-      initialPositions,
-      activePS?.epochIndex ?? 0
-    );
-  }, [equityHistory, openPositions, initialPositions, activePair, activePS]);
-
+  // Pool LTV is the only credit signal now (legacy credit assessment cut).
+  // Eligibility remains a per-pair structural check: don't open a third
+  // position on a pair that already holds long+short.
   const creditEligibility = useMemo(
     () =>
       Object.fromEntries(
-        ACTIVE_PAIRS.map((pk) => [
-          pk,
-          calcPairCreditEligibility(pk, creditAssessment.creditScore, openPositions),
-        ])
+        ACTIVE_PAIRS.map((pk) => [pk, calcPairCreditEligibility(pk, openPositions)])
       ),
-    [creditAssessment, openPositions]
+    [openPositions]
   );
 
   const solvency = useMemo(
@@ -250,8 +230,10 @@ export default function App() {
         ];
       })
     );
-    return calcYieldRouterSuggestions(states, openPositions, creditAssessment.creditScore);
-  }, [pairStates, openPositions, creditAssessment]);
+    // Yield router uses LTV as the "how confident is this trader" boost,
+    // replacing the old legacy creditScore.
+    return calcYieldRouterSuggestions(states, openPositions, poolLtvInfo?.ltv ?? 0);
+  }, [pairStates, openPositions, poolLtvInfo]);
 
   function handleRunShock() {
     const corrMap = activePS?.correlationMap ?? {};
@@ -487,7 +469,6 @@ export default function App() {
     }
 
     setOpenPositions((prev) => [...prev, newPos]);
-    setInitialPositions((prev) => (prev.length === 0 ? [newPos] : [...prev, newPos]));
     if (!usePoolCredit) setPlayer((p) => ({ ...p, tags: newTags }));
     addToast(
       `Opened ${activePair} ${player.side} x${player.leverage.toFixed(1)} · $${size.toFixed(0)}${usePoolCredit ? " (pool credit)" : " tagged"}`,
@@ -498,7 +479,6 @@ export default function App() {
   function handleResetSession() {
     clearPlayer();
     clearPositions();
-    clearInitialPositions();
     clearEquity();
     clearTrades();
     clearLedger();
@@ -767,7 +747,7 @@ export default function App() {
 
             {activeTab === "Credit" && (
               <>
-                <CreditDesk assessment={creditAssessment} />
+                <CreditDesk poolLtv={poolLtvInfo} />
                 <PortfolioStructurer
                   openPositions={openPositions}
                   creditEligibility={creditEligibility}
@@ -824,8 +804,9 @@ export default function App() {
             onUpdate={handlePlayerUpdate}
             activePair={activePair}
             cap={cap}
-            creditScore={creditAssessment.creditScore}
-            creditMultiplier={creditAssessment.multiplier}
+            poolLtv={poolLtvInfo}
+            availablePoolCredit={availablePoolCredit}
+            deployedPoolCredit={deployedPoolCredit}
           />
         </aside>
 
@@ -854,8 +835,9 @@ export default function App() {
                 onUpdate={handlePlayerUpdate}
                 activePair={activePair}
                 cap={cap}
-                creditScore={creditAssessment.creditScore}
-                creditExtension={creditAssessment.leverageExtension}
+                poolLtv={poolLtvInfo}
+                availablePoolCredit={availablePoolCredit}
+                deployedPoolCredit={deployedPoolCredit}
               />
             </aside>
           </div>

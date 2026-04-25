@@ -12,8 +12,9 @@ export function PlayerPanel({
   onUpdate,
   activePair,
   cap,
-  creditScore,
-  creditMultiplier = 0,
+  poolLtv = null,
+  availablePoolCredit = 0,
+  deployedPoolCredit = 0,
 }) {
   function field(key, value, min, max, step = 0.1) {
     return (
@@ -71,8 +72,10 @@ export function PlayerPanel({
           </div>
         </div>
         <div>
-          <div className="text-[10px] text-gray-500">Credit</div>
-          <div className="text-sm font-mono text-indigo-400">{((creditScore ?? 0) * 100).toFixed(0)}%</div>
+          <div className="text-[10px] text-gray-500">LTV</div>
+          <div className="text-sm font-mono text-indigo-400">
+            {(poolLtv?.ltv ?? 0).toFixed(2)}
+          </div>
         </div>
       </div>
 
@@ -135,17 +138,16 @@ export function PlayerPanel({
         </div>
       )}
 
-      {creditMultiplier > 1 && (() => {
-        const deployed = (player.margin ?? 0) * (creditMultiplier - 1);
-        const atFloor = shouldUnwindCredit(player.margin ?? 0, deployed);
+      {(deployedPoolCredit > 0 || availablePoolCredit > 0) && (() => {
+        const atFloor = shouldUnwindCredit(player.margin ?? 0, deployedPoolCredit);
         return (
           <div
             className={`text-[10px] font-mono text-center ${
               atFloor ? "text-red-400 animate-pulse" : "text-indigo-400"
             }`}
           >
-            Credit {creditMultiplier.toFixed(2)}× · effective $
-            {((player.margin ?? 0) * creditMultiplier).toFixed(0)}
+            Pool credit · deployed ${deployedPoolCredit.toFixed(0)} · avail $
+            {availablePoolCredit.toFixed(0)}
             {atFloor && " · HARD FLOOR"}
           </div>
         );

@@ -62,57 +62,5 @@ export const ADAPTIVE_LR = 0.005;
 export const ADAPTIVE_MU_SCALE_INIT = 0.7;
 export const ADAPTIVE_SIGMA_SCALE_INIT = 0.12;
 
-// Credit facility — whitepaper §7.4 and Appendix B.
-export const CREDIT_BASE_RISK_BUDGET = 50;
-
-// Performance gates. Composition + history-window are hard requirements;
-// the four perf gates (sortino/calmar/maxDD/winRate) are graduated — see
-// CREDIT_MIN_PERF_GATES. Thresholds were originally tuned for Bloomberg-
-// terminal heuristics and were unreachable inside a short simulator run,
-// which left the whole credit module effectively dead. Softening them and
-// scaling the multiplier by perf-pass fraction unlocks the feature while
-// still rewarding skill.
-export const CREDIT_GATE_SORTINO = 0.3;
-export const CREDIT_GATE_CALMAR = 0.25;
-export const CREDIT_GATE_MAX_DD = 0.20;
-export const CREDIT_GATE_WIN_RATE = 0.45;
-export const CREDIT_GATE_COMPOSITION = 0.2;
-export const CREDIT_ROLLING_WINDOW = 30;
-
-// Minimum of 4 perf gates to clear for baseline qualification. The
-// multiplier is further scaled by (passed / 4), so passing all four
-// still produces the full multiplier; passing only the minimum produces
-// a proportionally smaller one.
-export const CREDIT_MIN_PERF_GATES = 2;
-export const CREDIT_TOTAL_PERF_GATES = 4;
-
-// Multiplier formula coefficients.
-export const M_BASELINE = 0.5;
-export const M_MAX = 2.5;
-export const COMP_WEIGHT = 0.7;
-export const PERF_WEIGHT = 0.3;
-export const COMP_AMPLITUDE = 2.0;
-export const PERF_AMPLITUDE = 1.0;
-
-// Composition sub-score weights (sum to 1.0).
-export const W_HEDGE = 0.30;
-export const W_CONCENTRATION = 0.25;
-export const W_TAIL = 0.20;
-export const W_DIVERSITY = 0.15;
-export const W_DISCIPLINE = 0.10;
-
-// Tail-coverage specifics.
-export const TAIL_COVERAGE_TARGET = 0.15;
-export const TAIL_HEDGE_THRESHOLD = 0.3;
-
-// Configuration drift that triggers deleveraging schedule.
-export const CREDIT_DRIFT_THRESHOLD = 0.5;
-export const CREDIT_DELEVERAGE_EPOCHS = 5;
-
-// Drift half-life in epochs: per-position drift contribution decays by
-// 0.5^(age / HALF_LIFE) once the position carries an openedAtEpoch tag.
-// Without this, rebalancing (which is healthy) permanently inflates drift.
-export const CREDIT_DRIFT_HALF_LIFE = 15;
-
 // Soft-close boundary: last 20% of each medium epoch is frozen for deterministic clear
 export const SOFT_CLOSE_PCT = 0.8;

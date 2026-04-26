@@ -5,7 +5,7 @@
 //  Slow   (every SLOW_EVERY medium ticks): analytics, insurance pool, regime, correlation
 
 import { useEffect, useRef, useCallback } from "react";
-import { FAST_MS, MEDIUM_MS, SLOW_EVERY, INSURANCE_EVERY, GRACE_MS, SOFT_CLOSE_PCT } from "../constants/system.js";
+import { FAST_MS, MEDIUM_MS, SLOW_EVERY, INSURANCE_EVERY, REDEMPTION_EVERY, GRACE_MS, SOFT_CLOSE_PCT } from "../constants/system.js";
 import { priceStep } from "../lib/priceModels.js";
 import { calcRealizedSigma, calcRatioBeta as calcRatioBetaStat, ratioEffectiveSigma } from "../lib/math.js";
 import { detectRegime } from "../lib/regime.js";
@@ -19,6 +19,12 @@ import { calcCrossMarketCorrelations } from "../lib/correlation.js";
 import { generateNpcOrders } from "../lib/npcMarkets.js";
 import { matchRentalAuction, settleRentals } from "../lib/rentalMarket.js";
 import { isPairedLap } from "../lib/pairedLap.js";
+import {
+  runRedemptionCycle,
+  applySolvencyCheck,
+  submitRedemption as submitTtRedemption,
+} from "../lib/towerTether.js";
+import { calcPoolLtv } from "../lib/ltv.js";
 import { appendEpochEntry } from "../lib/roleLedger.js";
 import { normalizeTags } from "../lib/capitalTags.js";
 import { checkConservation, formatConservationLog } from "../lib/conservation.js";
@@ -33,6 +39,8 @@ export function useEpochLoop({
   player,           // { id, leverage, margin, side, strategy, minYield, tip_tiers, ... }
   setPlayer,        // React setter
   openPositions = [], // current player positions — used to look up paired LAPs by id during rental settlement
+  ttState = null,   // Tower Tether global state (mints, balances, queue, etc.)
+  setTtState,       // React setter for TT state
   setLogs,          // (fn) => void
   addToast,         // (msg, type) => void
   running,          // boolean
@@ -45,6 +53,21 @@ export function useEpochLoop({
   // callback doesn't have to recreate on every position change.
   const openPositionsRef = useRef(openPositions);
   openPositionsRef.current = openPositions;
+  // Same trick for ttState so the loop can read the latest snapshot
+  // without re-creating on every mint/transfer.
+  const ttStateRef = useRef(ttState);
+  ttStateRef.current = ttState;
+
+  // Helper: pick a representative epoch from the pair-states object.
+  // Used by the TT redemption cycle which is global, not per-pair.
+  function epochOfFirstPair(pairStatesObj) {
+    for (const pk of ACTIVE_PAIRS) {
+      if (pairStatesObj[pk]?.epochIndex != null) {
+        return pairStatesObj[pk].epochIndex;
+      }
+    }
+    return 0;
+  }
 
   // Signal that the player config was just changed.
   const onPlayerEdit = useCallback(() => {
@@ -489,13 +512,164 @@ export function useEpochLoop({
         }
       });
 
+      // -----------------------------------------------------------------
+      // Tower Tether redemption cycle (Phase 4)
+      //
+      // Runs on its own prime stride (REDEMPTION_EVERY) coprime with
+      // analytics + insurance, ~monthly in sim-days. On each cycle:
+      //   1. Merchant simulator queues 50% of its TT balance for
+      //      standard redemption — creates organic queue pressure.
+      //   2. runRedemptionCycle drains express + standard requests up to
+      //      the 10% cap; computes pro-rata collateral haircut by minter.
+      //   3. Apply the haircut to each minter's pool deposits (split
+      //      pro-rata across whichever pools they have stake in). The
+      //      penalty from express requests flows into the insurance
+      //      pool's pendingPremiums (depositors win when others panic).
+      //   4. Pay out dollars to each redeemer's main margin (cash flow).
+      //   5. Recheck solvency for each affected minter — if their
+      //      outstanding mint exceeds the new cap, claw back from
+      //      wallet TT first, then record any remaining shortfall as
+      //      debt.
+      // -----------------------------------------------------------------
+      if (mediumCountRef.current % REDEMPTION_EVERY === 0 && setTtState && ttStateRef.current) {
+        const tickEpoch = epochOfFirstPair(next);
+        let workingTt = ttStateRef.current;
+
+        // Step 1: merchant auto-redemption — 50% of merchant balance
+        // each cycle, standard tier.
+        if ((workingTt.merchantBalance ?? 0) > 1) {
+          const merchantRedeem = workingTt.merchantBalance * 0.5;
+          const submitted = submitTtRedemption({
+            ttState: workingTt,
+            userId: "MERCHANT",
+            amount: merchantRedeem,
+            express: false,
+            currentEpoch: tickEpoch,
+          });
+          if (submitted.ok) {
+            workingTt = submitted.ttState;
+            logs.push(
+              `[MERCHANT] queued ${merchantRedeem.toFixed(2)} TT for redemption`
+            );
+          }
+        }
+
+        // Step 2: drain the queue.
+        const cycle = runRedemptionCycle({
+          ttState: workingTt,
+          currentEpoch: tickEpoch,
+        });
+        cycle.logs.forEach((l) => logs.push(l));
+        workingTt = cycle.ttState;
+
+        // Step 3: apply collateral haircuts pro-rata across each
+        // minter's deposits in every pair pool.
+        const haircuts = cycle.collateralHaircuts;
+        for (const minterId of Object.keys(haircuts)) {
+          const totalToRemove = haircuts[minterId];
+          if (totalToRemove <= 0) continue;
+          // Sum the minter's deposits across all pools.
+          let minterDepositTotal = 0;
+          for (const pk of ACTIVE_PAIRS) {
+            minterDepositTotal +=
+              next[pk]?.insurancePool?.deposits?.[minterId]?.amount ?? 0;
+          }
+          if (minterDepositTotal <= 0) continue;
+          // Pro-rata reduce each pool slice.
+          for (const pk of ACTIVE_PAIRS) {
+            const ps = next[pk];
+            const dep = ps?.insurancePool?.deposits?.[minterId];
+            if (!dep || dep.amount <= 0) continue;
+            const share = dep.amount / minterDepositTotal;
+            const cut = Math.min(dep.amount, totalToRemove * share);
+            const newAmount = dep.amount - cut;
+            const newPool = {
+              ...ps.insurancePool,
+              deposits: {
+                ...ps.insurancePool.deposits,
+                [minterId]: { ...dep, amount: newAmount },
+              },
+              totalDeposits: Math.max(
+                0,
+                (ps.insurancePool.totalDeposits ?? 0) - cut
+              ),
+            };
+            next[pk] = { ...ps, insurancePool: newPool };
+          }
+        }
+
+        // Step 4: route the express penalty into the active pair's
+        // pool as pendingPremiums (depositors there benefit). Spreading
+        // pro-rata would be cleaner but adds noise; pinning to one pool
+        // is acceptable for v1.
+        if (cycle.penaltyToPool > 0) {
+          const targetPair = ACTIVE_PAIRS[0];
+          const ps = next[targetPair];
+          if (ps?.insurancePool) {
+            next[targetPair] = {
+              ...ps,
+              insurancePool: {
+                ...ps.insurancePool,
+                pendingPremiums:
+                  (ps.insurancePool.pendingPremiums ?? 0) + cycle.penaltyToPool,
+              },
+            };
+            logs.push(
+              `[TT-PENALTY] $${cycle.penaltyToPool.toFixed(2)} routed to ${targetPair} pool`
+            );
+          }
+        }
+
+        // Step 5: pay redemption dollars out to each holder's margin.
+        // Only the local player and the merchant matter here; merchant
+        // dollars stay in the merchant abstraction (ignored for now).
+        const playerDollars = cycle.dollarsOut[player?.id] ?? 0;
+        if (playerDollars > 0) {
+          setPlayer((prev) => ({
+            ...prev,
+            margin: (prev.margin ?? 0) + playerDollars,
+          }));
+        }
+
+        // Step 6: solvency recheck per affected minter.
+        for (const minterId of Object.keys(haircuts)) {
+          let newDeposit = 0;
+          for (const pk of ACTIVE_PAIRS) {
+            newDeposit +=
+              next[pk]?.insurancePool?.deposits?.[minterId]?.amount ?? 0;
+          }
+          // We need the LTV at this moment for the depositor's book.
+          // For the local player we have it via openPositions; for
+          // other depositors (none in current sim, but future-proofing)
+          // skip the check.
+          let ltv = 1;
+          if (minterId === player?.id) {
+            ltv = calcPoolLtv(openPositionsRef.current ?? []).ltv;
+          }
+          const solvency = applySolvencyCheck({
+            ttState: workingTt,
+            userId: minterId,
+            newDeposit,
+            ltv,
+          });
+          workingTt = solvency.ttState;
+          if (solvency.clawback > 0 || solvency.newDebt > 0) {
+            logs.push(
+              `[TT-SOLVENCY] ${minterId} clawback ${solvency.clawback.toFixed(2)} TT, debt +${solvency.newDebt.toFixed(2)}`
+            );
+          }
+        }
+
+        setTtState(workingTt);
+      }
+
       if (logs.length > 0) {
         setLogs((prev) => [...prev.slice(-300), ...logs]);
       }
 
       return next;
     });
-  }, [setPairStates, player, setPlayer, setLogs, addToast, setRoleLedger]);
+  }, [setPairStates, player, setPlayer, setLogs, addToast, setRoleLedger, setTtState]);
 
   // -------------------------------------------------------------------------
   // Interval management

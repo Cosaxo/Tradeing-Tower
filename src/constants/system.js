@@ -15,10 +15,16 @@ export const GRACE_MS = 800;
 // see predictable, chunky yield steps instead of a new number every 30s —
 // and the prime stride keeps insurance out of sync with analytics (5·23 =
 // 115 medium ticks ≈ 11.5 min between any alignment).
+//
+// Tower Tether redemption runs on yet another prime stride — much longer
+// (~monthly in sim-days) so the queue creates real liquidity pressure
+// and TT functions like a bank's redemption window. 31 is coprime with
+// both 5 and 23.
 export const FAST_MS = 1000;
 export const MEDIUM_MS = 6000;
 export const SLOW_EVERY = 5;
 export const INSURANCE_EVERY = 23;
+export const REDEMPTION_EVERY = 31;
 
 // History pruning: keep last N snapshots per pair to bound memory growth.
 export const MAX_HISTORY = 200;
@@ -64,3 +70,25 @@ export const ADAPTIVE_SIGMA_SCALE_INIT = 0.12;
 
 // Soft-close boundary: last 20% of each medium epoch is frozen for deterministic clear
 export const SOFT_CLOSE_PCT = 0.8;
+
+// -----------------------------------------------------------------------
+// Tower Tether (TT) — fully-collateralized stablecoin
+// -----------------------------------------------------------------------
+
+// Mint cap = deposit × LTV × MINT_COEFFICIENT. Conservative default;
+// half of LTV-adjusted deposit available as TT.
+export const MINT_COEFFICIENT = 0.5;
+
+// Minimum LTV required to mint at all. Forces diversification before a
+// depositor can extract circulating-stablecoin claims.
+export const MINT_LTV_GATE = 0.6;
+
+// Standard redemption capacity per cycle as a fraction of total TT
+// supply at cycle start. Anything beyond this either waits in queue
+// or pays the express penalty.
+export const STANDARD_REDEMPTION_CAP_PCT = 0.10;
+
+// Express tier penalty rate — fraction of redeemed amount the holder
+// forfeits to skip the queue / clear above the cap. Penalty proceeds
+// flow to the insurance pool (depositors win when others panic).
+export const EXPRESS_PENALTY_RATE = 0.05;

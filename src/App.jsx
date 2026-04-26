@@ -17,6 +17,14 @@ import {
 } from "./lib/poolLinkage.js";
 import { makePairedLap, isPairedLap, calcPairedLapClosePnl } from "./lib/pairedLap.js";
 import { publishLegOffer, terminateRental } from "./lib/rentalMarket.js";
+import {
+  initTtState,
+  mintTT,
+  transferTT,
+  submitRedemption,
+  cancelRedemption,
+  mintCapacity,
+} from "./lib/towerTether.js";
 import { getEffectiveCap } from "./lib/esma.js";
 import { initStrip } from "./lib/strips.js";
 import { initLedger } from "./lib/roleLedger.js";
@@ -36,6 +44,7 @@ import { MetricsPanel } from "./components/MetricsPanel.jsx";
 import { NpcPanel } from "./components/NpcPanel.jsx";
 import { StripDesk } from "./components/StripDesk.jsx";
 import { PoolDesk } from "./components/PoolDesk.jsx";
+import { TtDesk } from "./components/TtDesk.jsx";
 import { TradeHistory } from "./components/TradeHistory.jsx";
 import { SpeedControl } from "./components/SpeedControl.jsx";
 import { CorrelationHeatmap } from "./components/CorrelationHeatmap.jsx";
@@ -84,6 +93,10 @@ export default function App() {
     "tt.roleLedger",
     initLedger()
   );
+  const [ttState, setTtState, clearTt] = usePersistentState(
+    "tt.towerTether",
+    initTtState()
+  );
   const { toasts, history, addToast, clearHistory } = useToast();
   const [showTutorial, setShowTutorial] = useState(false);
 
@@ -93,6 +106,8 @@ export default function App() {
     player,
     setPlayer,
     openPositions,
+    ttState,
+    setTtState,
     setLogs,
     addToast,
     running,
@@ -589,12 +604,74 @@ export default function App() {
     addToast(label, "info");
   }
 
+  // --- Tower Tether handlers ----------------------------------------------
+  function handleMintTT(amount) {
+    const result = mintTT({
+      ttState,
+      userId: player.id,
+      amount,
+      deposit: poolDepositAmount,
+      ltv: poolLtvInfo.ltv,
+    });
+    if (!result.ok) {
+      addToast(`Mint failed: ${result.reason}`, "warning");
+      return;
+    }
+    setTtState(result.ttState);
+    addToast(`Minted ${amount.toFixed(0)} TT`, "info");
+  }
+
+  function handleSendToMerchant(amount) {
+    const result = transferTT({
+      ttState,
+      fromId: player.id,
+      toId: "MERCHANT",
+      amount,
+    });
+    if (!result.ok) {
+      addToast(`Send failed: ${result.reason}`, "warning");
+      return;
+    }
+    setTtState(result.ttState);
+    addToast(`Sent ${amount.toFixed(0)} TT to merchant`, "info");
+  }
+
+  function handleRedeem(amount, express = false) {
+    const result = submitRedemption({
+      ttState,
+      userId: player.id,
+      amount,
+      express,
+      currentEpoch: activePS?.epochIndex ?? 0,
+    });
+    if (!result.ok) {
+      addToast(`Redeem failed: ${result.reason}`, "warning");
+      return;
+    }
+    setTtState(result.ttState);
+    addToast(
+      `Queued ${amount.toFixed(0)} TT for redemption (${express ? "EXPRESS — 5% penalty" : "standard"})`,
+      express ? "warning" : "info"
+    );
+  }
+
+  function handleCancelRedemption(requestId) {
+    const result = cancelRedemption({ ttState, requestId });
+    if (!result.ok) {
+      addToast(`Cancel failed: ${result.reason}`, "warning");
+      return;
+    }
+    setTtState(result.ttState);
+    addToast("Redemption cancelled, TT returned to wallet", "info");
+  }
+
   function handleResetSession() {
     clearPlayer();
     clearPositions();
     clearEquity();
     clearTrades();
     clearLedger();
+    clearTt();
     setPairStates(INITIAL_PAIR_STATES);
     setLogs([]);
     setShockResults(null);
@@ -645,6 +722,14 @@ export default function App() {
         {openPositions.length > 0 && (
           <span className="text-[10px] font-mono text-emerald-400 px-2 py-0.5 rounded border border-emerald-900 bg-emerald-950">
             {openPositions.length} open
+          </span>
+        )}
+        {(ttState?.balances?.[player.id] ?? 0) > 0 && (
+          <span
+            className="text-[10px] font-mono text-emerald-200 px-2 py-0.5 rounded border border-emerald-700 bg-emerald-950"
+            title={`Outstanding mint $${(ttState?.mintedByUser?.[player.id] ?? 0).toFixed(0)} · Queue ${(ttState?.redemptionQueue ?? []).filter((q) => q.userId === player.id).length}`}
+          >
+            ${(ttState?.balances?.[player.id] ?? 0).toFixed(0)} TT
           </span>
         )}
         <div className="ml-auto flex items-center gap-3">
@@ -846,6 +931,22 @@ export default function App() {
                   onWithdraw={handleWithdraw}
                   poolLtv={poolLtvInfo}
                   availablePoolCredit={availablePoolCredit}
+                />
+                <TtDesk
+                  ttState={ttState}
+                  playerId={player.id}
+                  ltv={poolLtvInfo?.ltv ?? 0}
+                  poolDeposit={poolDepositAmount}
+                  mintCapacityRemaining={mintCapacity({
+                    ttState,
+                    userId: player.id,
+                    deposit: poolDepositAmount,
+                    ltv: poolLtvInfo?.ltv ?? 0,
+                  })}
+                  onMint={handleMintTT}
+                  onSendToMerchant={handleSendToMerchant}
+                  onRedeem={handleRedeem}
+                  onCancelRedemption={handleCancelRedemption}
                 />
                 <StripDesk
                   playerMargin={player.margin}

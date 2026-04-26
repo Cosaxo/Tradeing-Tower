@@ -16,6 +16,7 @@ import {
   applyPoolToLapHaircut,
 } from "./lib/poolLinkage.js";
 import { makePairedLap, isPairedLap, calcPairedLapClosePnl } from "./lib/pairedLap.js";
+import { publishLegOffer, terminateRental } from "./lib/rentalMarket.js";
 import { getEffectiveCap } from "./lib/esma.js";
 import { initStrip } from "./lib/strips.js";
 import { initLedger } from "./lib/roleLedger.js";
@@ -91,6 +92,7 @@ export default function App() {
     setPairStates,
     player,
     setPlayer,
+    openPositions,
     setLogs,
     addToast,
     running,
@@ -185,6 +187,20 @@ export default function App() {
     () => calcAvailablePoolCredit(poolDepositAmount, openPositions, deployedPoolCredit),
     [poolDepositAmount, openPositions, deployedPoolCredit]
   );
+
+  // pairKey → { activeRentals, rentalOffers } slice for the rental UI.
+  const rentalsByPair = useMemo(() => {
+    const out = {};
+    for (const pk of ACTIVE_PAIRS) {
+      const ps = pairStates[pk];
+      if (!ps) continue;
+      out[pk] = {
+        activeRentals: ps.activeRentals ?? [],
+        rentalOffers: ps.rentalOffers ?? [],
+      };
+    }
+    return out;
+  }, [pairStates]);
 
   // Pool LTV is the only credit signal now (legacy credit assessment cut).
   // Eligibility remains a per-pair structural check: don't open a third
@@ -391,6 +407,44 @@ export default function App() {
       });
     }
 
+    // Paired LAP close: terminate any active rentals on its legs and
+    // drop unmatched offers. Renters get any unspent rental margin
+    // back (added to the owner's accruedOwnerTips for clarity in the
+    // log; refunds to NPC margin happen via the loop on next tick).
+    if (isPairedLap(pos)) {
+      let ownerCreditFromTermination = 0;
+      setPairStates((prev) => {
+        const target = prev[pos.pairKey];
+        if (!target) return prev;
+        const stillActive = [];
+        for (const r of target.activeRentals ?? []) {
+          if (r.pairLapId === pos.id && r.active) {
+            const result = terminateRental(r);
+            if (result) ownerCreditFromTermination += result.finalOwnerCredit;
+          } else {
+            stillActive.push(r);
+          }
+        }
+        const remainingOffers = (target.rentalOffers ?? []).filter(
+          (o) => o.pairLapId !== pos.id
+        );
+        return {
+          ...prev,
+          [pos.pairKey]: {
+            ...target,
+            activeRentals: stillActive,
+            rentalOffers: remainingOffers,
+          },
+        };
+      });
+      if (ownerCreditFromTermination > 0) {
+        setPlayer((p) => ({
+          ...p,
+          margin: (p.margin ?? 0) + ownerCreditFromTermination,
+        }));
+      }
+    }
+
     setOpenPositions((prev) => prev.filter((_, idx) => idx !== i));
     setTradeLog((prev) => [...prev, { ...pos, pnl, closedPrice: priceNow }]);
     // P&L is a real cash flow; auction-margin tag is released. Paired
@@ -481,22 +535,48 @@ export default function App() {
           poolLinkage,
         };
 
-    if (poolLinkage) {
+    if (poolLinkage || paired) {
       setPairStates((prev) => {
-        const target = prev[poolLinkage.pairKey];
+        const target = prev[paired ? activePair : poolLinkage.pairKey];
         if (!target) return prev;
-        return {
-          ...prev,
-          [poolLinkage.pairKey]: {
-            ...target,
+        let nextPs = target;
+        // Pool linkage on the paired LAP's pair (if pool-funded).
+        if (poolLinkage) {
+          nextPs = {
+            ...nextPs,
             insurancePool: linkLapToDeposit(
-              target.insurancePool,
+              nextPs.insurancePool,
               poolLinkage.depositorId,
               poolLinkage.lapId,
               requiredCapital
             ),
-          },
-        };
+          };
+        }
+        // Auto-publish rental offers for both legs of a paired LAP.
+        // Owners can earn tip income when NPCs (or future humans) bid
+        // for directional exposure without paying full LAP capital.
+        if (paired) {
+          const epochNow = nextPs.epochIndex ?? 0;
+          const longOffer = publishLegOffer({
+            pairLapId: newPos.id,
+            legSide: "long",
+            ownerId: player.id,
+            pairKey: activePair,
+            publishedAtEpoch: epochNow,
+          });
+          const shortOffer = publishLegOffer({
+            pairLapId: newPos.id,
+            legSide: "short",
+            ownerId: player.id,
+            pairKey: activePair,
+            publishedAtEpoch: epochNow,
+          });
+          nextPs = {
+            ...nextPs,
+            rentalOffers: [...(nextPs.rentalOffers ?? []), longOffer, shortOffer],
+          };
+        }
+        return { ...prev, [paired ? activePair : poolLinkage.pairKey]: nextPs };
       });
     }
 
@@ -504,7 +584,7 @@ export default function App() {
     if (!usePoolCredit) setPlayer((p) => ({ ...p, tags: newTags }));
     const labelTag = usePoolCredit ? "(pool credit)" : "tagged";
     const label = paired
-      ? `Opened ${activePair} PAIRED x${player.leverage.toFixed(1)} · $${requiredCapital.toFixed(0)} ${labelTag}`
+      ? `Opened ${activePair} PAIRED x${player.leverage.toFixed(1)} · $${requiredCapital.toFixed(0)} ${labelTag} · legs auto-listed for rent`
       : `Opened ${activePair} ${player.side} x${player.leverage.toFixed(1)} · $${legSize.toFixed(0)} ${labelTag}`;
     addToast(label, "info");
   }
@@ -790,6 +870,7 @@ export default function App() {
                   availablePoolCredit={availablePoolCredit}
                   poolDepositAmount={poolDepositAmount}
                   deployedPoolCredit={deployedPoolCredit}
+                  rentalsByPair={rentalsByPair}
                 />
               </>
             )}

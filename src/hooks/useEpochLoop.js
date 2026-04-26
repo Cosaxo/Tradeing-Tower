@@ -17,6 +17,8 @@ import { settleInsurancePool } from "../lib/insurance.js";
 import { updateYieldModel, calcYieldBufferContribution } from "../lib/yieldModel.js";
 import { calcCrossMarketCorrelations } from "../lib/correlation.js";
 import { generateNpcOrders } from "../lib/npcMarkets.js";
+import { matchRentalAuction, settleRentals } from "../lib/rentalMarket.js";
+import { isPairedLap } from "../lib/pairedLap.js";
 import { appendEpochEntry } from "../lib/roleLedger.js";
 import { normalizeTags } from "../lib/capitalTags.js";
 import { checkConservation, formatConservationLog } from "../lib/conservation.js";
@@ -30,6 +32,7 @@ export function useEpochLoop({
   setPairStates,    // React setter
   player,           // { id, leverage, margin, side, strategy, minYield, tip_tiers, ... }
   setPlayer,        // React setter
+  openPositions = [], // current player positions — used to look up paired LAPs by id during rental settlement
   setLogs,          // (fn) => void
   addToast,         // (msg, type) => void
   running,          // boolean
@@ -38,6 +41,10 @@ export function useEpochLoop({
 }) {
   const mediumCountRef = useRef(0);
   const lastPlayerEditRef = useRef(0);
+  // Latest player positions, threaded via ref so the medium-tick
+  // callback doesn't have to recreate on every position change.
+  const openPositionsRef = useRef(openPositions);
+  openPositionsRef.current = openPositions;
 
   // Signal that the player config was just changed.
   const onPlayerEdit = useCallback(() => {
@@ -108,6 +115,7 @@ export function useEpochLoop({
                 strips,
                 insurancePool, epochIndex, yieldBuffer = 0,
                 yieldBufferEpochs = 0, regimeHistory = [],
+                rentalOffers = [], rentalBids = [], activeRentals = [],
                 feeLedger = {} } = ps;
 
         const priceOld = prices[prices.length - 2] ?? prices[prices.length - 1];
@@ -256,7 +264,7 @@ export function useEpochLoop({
           }
         }
 
-        // NPC market participation: strip buys only (contracts + lending cut).
+        // NPC market participation: strip buys + rental bids on paired-LAP legs.
         const npcOrders = generateNpcOrders({
           npcs: updatedNpcs.filter(isNpcActive),
           longMargin,
@@ -266,6 +274,8 @@ export function useEpochLoop({
           realizedSigma,
           returnHistory: ps.returnHistory,
           epochIndex,
+          pairKey: pk,
+          legNotionalEstimate: 1000,
         });
 
         const pid = player?.id ?? "You";
@@ -395,6 +405,54 @@ export function useEpochLoop({
           newEvents.push({ epoch: epochIndex, type: "liquidation", meta: { count: liqThisEpoch } });
         }
 
+        // -------------------------------------------------------------------
+        // Rental market (Phase 3)
+        //
+        // 1. Settle existing rentals one tick (P&L flows to renter,
+        //    tip flows to owner, defaults / expirations terminate).
+        // 2. Match the order book — owner offers + NPC bids — and append
+        //    new rentals.
+        // -------------------------------------------------------------------
+        const findPairedLap = (id) => {
+          const positions = openPositionsRef.current ?? [];
+          const found = positions.find((p) => isPairedLap(p) && p.id === id);
+          return found ?? null;
+        };
+        const rentalSettle = settleRentals({
+          activeRentals,
+          findPairedLap,
+          priceOld,
+          priceNew,
+          currentEpoch: epochIndex,
+        });
+        rentalSettle.logs.forEach((l) => logs.push(l));
+
+        // Owner-tip income flushed to player margin if the owner is the
+        // local player. (NPC-owned rentals don't exist yet in Phase 3,
+        // so this is the only counterparty handled.)
+        const ownerCredits = rentalSettle.ownerCredits ?? {};
+        const playerOwnerCredit = ownerCredits[pid] ?? 0;
+        if (playerOwnerCredit > 0) {
+          setPlayer((prev) => ({
+            ...prev,
+            margin: (prev.margin ?? 0) + playerOwnerCredit,
+          }));
+        }
+
+        // Match the orderbook against newly-arrived NPC bids.
+        const offersBeforeMatch = rentalOffers;
+        const bidsBeforeMatch = [...rentalBids, ...(npcOrders.rentalBids ?? [])];
+        const rentalMatch = matchRentalAuction({
+          offers: offersBeforeMatch,
+          bids: bidsBeforeMatch,
+          currentEpoch: epochIndex,
+        });
+        rentalMatch.logs.forEach((l) => logs.push(l));
+
+        const nextRentalOffers = rentalMatch.remainingOffers;
+        const nextRentalBids = rentalMatch.remainingBids;
+        const nextActiveRentals = [...rentalSettle.rentals, ...rentalMatch.newRentals];
+
         next[pk] = {
           ...ps,
           npcs: updatedNpcs,
@@ -412,6 +470,9 @@ export function useEpochLoop({
           yieldBuffer: newYieldBuffer,
           yieldBufferEpochs: yieldBufferEpochs + 1,
           feeLedger: newFeeLedger,
+          rentalOffers: nextRentalOffers,
+          rentalBids: nextRentalBids,
+          activeRentals: nextActiveRentals,
           epochIndex: epochIndex + 1,
           correlationMap: doSlow ? corrMap : ps.correlationMap,
           currentYield,

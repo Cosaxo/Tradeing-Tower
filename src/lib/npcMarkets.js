@@ -1,14 +1,23 @@
-// NPC market-making — post-cut this is only loss-strip demand. Lending
-// market, imbalance contracts, and entropy contracts all removed.
+// NPC market-making — strips + rental-leg bidding.
 //
-// Each behavior has its own appetite for strips — "Hedger" (conservative)
-// and "yield_farmer" buy strips in HIGH_VOL / CRASH regimes when risk
-// transfer is most useful.
+// After the contract / lending / governance cuts the only remaining
+// NPC products are:
+//
+//   - Loss strips: "Hedger" (conservative) and "yield_farmer" buy in
+//     HIGH_VOL / CRASH regimes when risk transfer is most useful.
+//   - Rental bids: directional NPCs (aggressive_long, contrarian) bid
+//     on paired-LAP legs to get cheap directional exposure without
+//     paying full LAP capital.
 
 import { initStrip } from "./strips.js";
+import { placeRentalBid, RENTAL_MARGIN_FRACTION } from "./rentalMarket.js";
 
 let idCounter = 0;
 const uid = (prefix) => `${prefix}-${++idCounter}`;
+
+// ---------------------------------------------------------------------------
+// Loss strips
+// ---------------------------------------------------------------------------
 
 // Should `npc` buy a strip this epoch?
 export function npcStripTick(npc, regime, realizedSigma, returnHistory) {
@@ -32,25 +41,83 @@ export function npcStripTick(npc, regime, realizedSigma, returnHistory) {
   });
 }
 
-// Top-level helper: produce all NPC orders for one medium epoch.
-// Returns { stripBuys }. Kept as an object for call-site stability.
+// ---------------------------------------------------------------------------
+// Rental bidding
+// ---------------------------------------------------------------------------
+
+// Per-behavior willingness to pay for leg exposure. Higher = more
+// aggressive demand. Multiplied against the legNotional to size the
+// bid's `maxTipRate`.
+const RENTAL_TIP_BIAS = {
+  aggressive_long: 0.012,  // happy to pay above floor for cheap leverage
+  contrarian:      0.010,
+  yield_chaser:    0.008,
+  yield_farmer:    0.000,  // doesn't rent — buys strips instead
+  conservative_long: 0.000, // doesn't rent
+};
+
+// Should `npc` bid for a rental leg on `pairKey` this epoch?
+//
+// Returns null if the NPC isn't a renter behavior, or if the regime
+// suggests directional bets aren't favored, or if the NPC's margin
+// can't support the rental margin.
+export function npcRentalBidTick(npc, pairKey, regime, currentEpoch, legNotionalEstimate) {
+  const tipBias = RENTAL_TIP_BIAS[npc.behavior] ?? 0;
+  if (tipBias <= 0) return null;
+
+  // Aggressive bidders skew higher in trending regimes.
+  const trendMult =
+    regime?.key === "TRENDING_UP" || regime?.key === "TRENDING_DN" ? 1.4 : 1.0;
+  const maxTipRate = tipBias * trendMult;
+
+  // Rental margin sized at RENTAL_MARGIN_FRACTION of leg notional.
+  // legNotionalEstimate is supplied by the caller (uses a typical
+  // paired-LAP size since the bid is published before a specific match).
+  const rentalMargin = Math.round((legNotionalEstimate ?? 1000) * RENTAL_MARGIN_FRACTION);
+  if (rentalMargin <= 0) return null;
+  if ((npc.current_margin ?? npc.base_margin ?? 0) < rentalMargin) return null;
+
+  return placeRentalBid({
+    bidderId: npc.id,
+    pairKey,
+    maxTipRate,
+    durationEpochs: 5,
+    rentalMargin,
+    publishedAtEpoch: currentEpoch ?? 0,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Top-level orchestrator
+// ---------------------------------------------------------------------------
+
+// Produce all NPC orders for one medium epoch on a pair.
+// Returns { stripBuys, rentalBids }.
 export function generateNpcOrders({
   npcs,
   regime,
   realizedSigma,
   returnHistory,
-  // unused but retained so call sites don't break if we add products back:
+  pairKey,
+  epochIndex,
+  legNotionalEstimate = 1000,
+  // unused but retained for call-site stability:
   longMargin: _longMargin,
   shortMargin: _shortMargin,
   normWeights: _normWeights,
-  epochIndex: _epochIndex,
 }) {
   const stripBuys = [];
+  const rentalBids = [];
 
   for (const npc of npcs) {
     const strip = npcStripTick(npc, regime, realizedSigma, returnHistory);
     if (strip) stripBuys.push(strip);
+
+    if (pairKey) {
+      const bid = npcRentalBidTick(npc, pairKey, regime, epochIndex, legNotionalEstimate);
+      if (bid) rentalBids.push(bid);
+    }
   }
 
-  return { stripBuys };
+  return { stripBuys, rentalBids };
 }

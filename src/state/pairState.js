@@ -78,6 +78,14 @@ export function initPairState(pairKey) {
 
     // Loss strips — the only remaining user-sold risk-transfer product.
     strips: [],
+
+    // Rental market for paired-LAP legs (Phase 3).
+    // Owners publish offers when they open a paired LAP; renters (NPCs
+    // for now, humans later) submit bids; matched leases live in
+    // activeRentals and settle each medium tick.
+    rentalOffers: [],
+    rentalBids: [],
+    activeRentals: [],
   };
 }
 

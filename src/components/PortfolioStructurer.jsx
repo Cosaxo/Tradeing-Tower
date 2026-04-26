@@ -20,6 +20,9 @@ export function PortfolioStructurer({
   availablePoolCredit = 0,
   poolDepositAmount = 0,
   deployedPoolCredit = 0,
+  // pairKey → { activeRentals, rentalOffers }, queried per position to
+  // surface lease status + offer queue.
+  rentalsByPair = {},
 }) {
   const hasPool = poolDepositAmount > 0;
   const [pairedMode, setPairedMode] = useState(false);
@@ -89,6 +92,15 @@ export function PortfolioStructurer({
           : pos.side === "LONG"
             ? "#34d399"
             : "#f87171";
+        // Rental status for paired LAPs only.
+        const rentalsHere = rentalsByPair[pos.pairKey] ?? {};
+        const activeForLap = paired
+          ? (rentalsHere.activeRentals ?? []).filter(
+              (r) => r.pairLapId === pos.id && r.active
+            )
+          : [];
+        const longRented = activeForLap.find((r) => r.legSide === "long");
+        const shortRented = activeForLap.find((r) => r.legSide === "short");
         return (
           <div
             key={i}
@@ -101,7 +113,7 @@ export function PortfolioStructurer({
             }`}
           >
             <div className="flex flex-col min-w-0">
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-1 flex-wrap">
                 <span className="text-xs font-mono text-gray-200">{pair?.symbol ?? pos.pairKey}</span>
                 <span
                   className="text-[10px] font-mono px-1 rounded"
@@ -120,12 +132,42 @@ export function PortfolioStructurer({
                     pool
                   </span>
                 )}
+                {longRented && (
+                  <span
+                    className="text-[10px] font-mono px-1 rounded border border-emerald-700 bg-emerald-950 text-emerald-300"
+                    title={`Long leg leased to ${longRented.renterId} @ ${(longRented.tipRate * 100).toFixed(2)}%/ep`}
+                  >
+                    L:rent
+                  </span>
+                )}
+                {shortRented && (
+                  <span
+                    className="text-[10px] font-mono px-1 rounded border border-emerald-700 bg-emerald-950 text-emerald-300"
+                    title={`Short leg leased to ${shortRented.renterId} @ ${(shortRented.tipRate * 100).toFixed(2)}%/ep`}
+                  >
+                    S:rent
+                  </span>
+                )}
               </div>
               <div className="text-[10px] font-mono text-gray-500">
                 ${ (pos.margin ?? 0).toFixed(0) }
                 {paired && <span className="text-purple-400 ml-1">(both legs)</span>}
                 {elig && !elig.eligible && (
                   <span className="text-red-500 ml-1">({elig.reason})</span>
+                )}
+                {paired && (longRented || shortRented) && (
+                  <span className="text-emerald-400 ml-1">
+                    earning ~${(
+                      (longRented?.tipRate ?? 0) +
+                      (shortRented?.tipRate ?? 0)
+                    ) ===  0
+                      ? 0
+                      : (
+                          ((longRented?.tipRate ?? 0) + (shortRented?.tipRate ?? 0)) *
+                          ((pos.margin ?? 0) / 2) *
+                          (pos.leverage ?? 1)
+                        ).toFixed(2)}/ep
+                  </span>
                 )}
               </div>
             </div>

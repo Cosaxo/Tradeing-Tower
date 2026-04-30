@@ -1,52 +1,69 @@
-// Tower Tether (TT) — fully-collateralized stablecoin minted against
-// insurance-market allocations.
+// Tower Tether (TT) — thread-based, hyper-rehypothecated stablecoin.
 //
-// Phase 5 migration: TT no longer mints against a single "pool deposit"
-// amount. The new collateral is the user's distributed allocation
-// across insurance markets (where they sit as the insurer side),
-// PLUS an auto-purchased reinsurance hedge that covers their downside
-// if any market triggers.
+// A "thread" is one unit of value backed by the SAME dollar serving four
+// roles simultaneously, each carrying full notional:
 //
-// Mint flow
-// ---------
+//   1. T-bill stake          (Floor 1 — the underlying asset)
+//   2. Insurance-seller stakes spread across reinsurance-covered markets
+//   3. Paired-LAP (delta-neutral, both legs leased out as liquidity)
+//   4. TT in circulation
 //
-//   1. Compute mintCapacity from totalAllocatedStake × LTV × MINT_COEFFICIENT.
-//      - LTV is allocation-based (rewards spreading across many markets).
-//      - Minimum LTV gate (MINT_LTV_GATE) prevents minting against a
-//        concentrated allocation.
+// Mint is 1:1 against free margin — no LTV gate, no coefficient. The
+// gating constraint is "do you have $X of free margin to commit to all
+// four layers at once?" When a holder later redeems, that fraction of
+// the originating thread's T-bill is sold to pay them in dollars and
+// the remaining three layers shrink by the same amount atomically.
 //
-//   2. The caller (App.jsx / useEpochLoop) auto-buys reinsurance on
-//      each of the 3 products with face = mintAmount × 1.5 / 3 — the
-//      "1.5× rule": the user's potential payout liability never exceeds
-//      150 % of reinsurance coverage on that loss.
+// Loss propagation ("thread damage")
+// ----------------------------------
+// If any layer of a thread loses $L, the thread's underlying integrity
+// drops by $L → ALL four layers shrink by $L. This is what the user
+// gives up in exchange for the rehypothecation: a loss in any role
+// hits every other role simultaneously. Mint timing is structured so
+// loss-on-mint is near-impossible.
 //
-//   3. mintedByUser[uid] += amount; balances[uid] += amount.
-//      Total supply increments; user's outstanding mint claim grows.
+// Critical invariant (enforced in the epoch loop, not here): insurance
+// and LAP MUST NEVER calculate thread damage in the same epoch. If
+// they would coincide, insurance damage defers to the next available
+// medium tick.
 //
-// Redemption flow
-// ---------------
+// State shape
+// -----------
+//   {
+//     threads:   Thread[],        // active + closed (closed kept for audit)
+//     balances:  { [uid]: TT },   // wallet TT
+//     redemptionQueue: [...],     // pending redemption requests
+//     merchantBalance: number,
+//     debtByUser: { [uid]: $ },   // shortfall when wallet doesn't cover claw-back
+//     lastRedemptionEpoch: number,
+//     cumulativePenaltyToPool: number,
+//   }
 //
-// Per cycle, the queue drains up to STANDARD_REDEMPTION_CAP_PCT of total
-// supply at the cycle start. Express requests bypass the cap, paying
-// EXPRESS_PENALTY_RATE of redeemed amount to the insurance system.
+//   Thread {
+//     id, ownerId, createdAtEpoch,
+//     principal,                  // T-bill stake (current)
+//     ttFace,                     // outstanding TT minted from this thread
+//     insuranceWeights: { [eventId]: weight }, // sum ≈ 1
+//     lapPairKey, lapId,          // paired-LAP backing this thread
+//     closed: boolean,
+//   }
 //
-// When a redemption clears, EVERY current minter loses pro-rata. The
-// collateralHaircuts map returned by `runRedemptionCycle` should be
-// applied to minters' allocations (not pool deposits) — useEpochLoop
-// translates the haircut into reductions across the insurer-side
-// market stakes, pro-rata to the minter's stake in each market.
+//   `mintedByUser[uid]` is derived from threads (sum of ttFace per owner)
+//   so we don't have to keep two maps in sync. See `mintedByOf`.
 
 import {
-  MINT_COEFFICIENT,
-  MINT_LTV_GATE,
   STANDARD_REDEMPTION_CAP_PCT,
   EXPRESS_PENALTY_RATE,
 } from "../constants/system.js";
 
-// 1.5× rule — when minting, the auto-purchased reinsurance face is sized
-// to over-cover the mint amount by this factor (split across the 3
-// reinsurance products).
-export const TT_REINS_OVERSIZE = 1.5;
+// ---------------------------------------------------------------------------
+// IDs
+// ---------------------------------------------------------------------------
+
+let _threadCtr = 0;
+const _threadId = () => `THR-${Date.now().toString(36)}-${(++_threadCtr).toString(36)}`;
+let _reqCtr = 0;
+const _reqId = () => `RED-${Date.now().toString(36)}-${(++_reqCtr).toString(36)}`;
 
 // ---------------------------------------------------------------------------
 // State factory
@@ -54,7 +71,7 @@ export const TT_REINS_OVERSIZE = 1.5;
 
 export function initTtState() {
   return {
-    mintedByUser: {},
+    threads: [],
     balances: {},
     debtByUser: {},
     redemptionQueue: [],
@@ -65,11 +82,19 @@ export function initTtState() {
 }
 
 // ---------------------------------------------------------------------------
-// Derived
+// Derived accessors
 // ---------------------------------------------------------------------------
 
+export function activeThreads(ttState) {
+  return (ttState?.threads ?? []).filter((t) => !t.closed && t.ttFace > 1e-9);
+}
+
+export function threadsOf(ttState, ownerId) {
+  return activeThreads(ttState).filter((t) => t.ownerId === ownerId);
+}
+
 export function totalSupply(ttState) {
-  return Object.values(ttState?.mintedByUser ?? {}).reduce((s, v) => s + v, 0);
+  return activeThreads(ttState).reduce((s, t) => s + t.ttFace, 0);
 }
 
 export function totalCirculating(ttState) {
@@ -82,61 +107,193 @@ export function balanceOf(ttState, userId) {
 }
 
 export function mintedByOf(ttState, userId) {
-  return ttState?.mintedByUser?.[userId] ?? 0;
+  return threadsOf(ttState, userId).reduce((s, t) => s + t.ttFace, 0);
 }
 
 export function debtOf(ttState, userId) {
   return ttState?.debtByUser?.[userId] ?? 0;
 }
 
-// Mint capacity given the user's allocation total and LTV. The caller
-// is responsible for computing the inputs from the live insurance
-// markets (via calcAllocationLtv + allocationDiversificationStats).
-export function mintCapacity({ ttState, userId, totalStake, ltv }) {
-  if (!Number.isFinite(totalStake) || totalStake <= 0) return 0;
-  if (!Number.isFinite(ltv) || ltv <= 0) return 0;
-  if (ltv < MINT_LTV_GATE) return 0;
-  const cap = totalStake * ltv * MINT_COEFFICIENT;
-  const outstanding = mintedByOf(ttState, userId) + debtOf(ttState, userId);
-  return Math.max(0, cap - outstanding);
+// Principal currently locked across a user's active threads. Useful for
+// the UI's "thread stake" chip.
+export function totalThreadPrincipal(ttState, userId) {
+  return threadsOf(ttState, userId).reduce((s, t) => s + t.principal, 0);
 }
 
 // ---------------------------------------------------------------------------
-// Mint / transfer / redeem
+// Insurance fill weights
 // ---------------------------------------------------------------------------
 
-export function mintTT({ ttState, userId, amount, totalStake, ltv }) {
-  if (!userId) return { ok: false, reason: "no userId" };
-  if (!Number.isFinite(amount) || amount <= 0) {
-    return { ok: false, reason: "amount must be positive" };
+// Compute the per-market fill weights for a new thread's insurance
+// layer. The mix:
+//
+//   weight_i = 0.5 × (1/N) + 0.5 × size_i / Σsize
+//
+// - Even floor: every eligible market gets some flow even if it's tiny,
+//   so newly-launched markets aren't ignored.
+// - Size tilt: the bulk follows liquidity (bigger markets absorb more).
+//
+// `eligibleMarkets` are the markets that have any active reinsurance
+// backing — i.e. at least one reinsurance product carries seller capital
+// AND the market itself exists. Falls back to pure equal weight when
+// reinsurance is empty (so the 1.5× rule is degenerate).
+export function calcInsuranceFillWeights({ eligibleMarkets, reinsuranceLive }) {
+  const n = eligibleMarkets.length;
+  if (n === 0) return {};
+  const equal = 1 / n;
+  if (!reinsuranceLive) {
+    return Object.fromEntries(eligibleMarkets.map((m) => [m.eventId, equal]));
   }
-  if (ltv < MINT_LTV_GATE) {
-    return {
-      ok: false,
-      reason: `LTV ${ltv.toFixed(2)} below gate ${MINT_LTV_GATE.toFixed(2)}`,
-    };
+  const totalSize = eligibleMarkets.reduce(
+    (s, m) => s + Math.max(0, m.insurerCapital ?? 0),
+    0
+  );
+  if (totalSize <= 0) {
+    return Object.fromEntries(eligibleMarkets.map((m) => [m.eventId, equal]));
   }
-  const capacity = mintCapacity({ ttState, userId, totalStake, ltv });
-  if (amount > capacity + 1e-6) {
-    return { ok: false, reason: `over capacity (max ${capacity.toFixed(2)})` };
+  const out = {};
+  for (const m of eligibleMarkets) {
+    const sizeShare = Math.max(0, m.insurerCapital ?? 0) / totalSize;
+    out[m.eventId] = 0.5 * equal + 0.5 * sizeShare;
   }
+  // Renormalise (floating drift can push the sum a hair off 1).
+  const sum = Object.values(out).reduce((s, v) => s + v, 0);
+  if (sum > 0) {
+    for (const k of Object.keys(out)) out[k] = out[k] / sum;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Open a new thread (mint)
+// ---------------------------------------------------------------------------
+
+// Build a new thread record. Caller is responsible for:
+//   - posting the insurance stakes via the allocations / market helpers
+//   - creating the paired-LAP and publishing rental offers
+//   - tagging the user's margin for `principal`
+//
+// This module owns the thread bookkeeping + TT mint. The atomic
+// orchestration lives in App.jsx (handleMintTT).
+//
+// Returns { ok, ttState, thread, reason? }.
+export function openThread({
+  ttState,
+  ownerId,
+  principal,
+  insuranceWeights,
+  lapPairKey,
+  lapId,
+  currentEpoch,
+}) {
+  if (!ownerId) return { ok: false, reason: "no ownerId" };
+  if (!Number.isFinite(principal) || principal <= 0) {
+    return { ok: false, reason: "principal must be positive" };
+  }
+  const thread = {
+    id: _threadId(),
+    ownerId,
+    createdAtEpoch: currentEpoch ?? 0,
+    principal,
+    ttFace: principal, // 1:1 mint
+    insuranceWeights: { ...(insuranceWeights ?? {}) },
+    lapPairKey: lapPairKey ?? null,
+    lapId: lapId ?? null,
+    closed: false,
+  };
   return {
     ok: true,
     ttState: {
       ...ttState,
-      mintedByUser: {
-        ...ttState.mintedByUser,
-        [userId]: (ttState.mintedByUser[userId] ?? 0) + amount,
-      },
+      threads: [...(ttState.threads ?? []), thread],
       balances: {
         ...ttState.balances,
-        [userId]: (ttState.balances[userId] ?? 0) + amount,
+        [ownerId]: (ttState.balances?.[ownerId] ?? 0) + principal,
       },
     },
-    // Caller uses these to size the auto-purchased reinsurance.
-    reinsuranceFacePerProduct: (amount * TT_REINS_OVERSIZE) / 3,
+    thread,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Damage propagation
+// ---------------------------------------------------------------------------
+
+// Apply a loss to a single thread's principal. ALL four layers shrink
+// by `delta`. Returns:
+//
+//   {
+//     ttState,
+//     deltaApplied,                 // actual amount written down (capped at principal)
+//     insuranceLayerDeltas,         // { [eventId]: amountToWithdrawFromMarket }
+//     lapLayerDelta,                // amount to remove from the paired LAP
+//     ttFaceDelta,                  // shrink in mintedByUser / outstanding TT
+//   }
+//
+// The caller (epoch loop) is responsible for actually mutating the
+// insurance markets and paired-LAP state using these deltas.
+export function damageThread({ ttState, threadId, delta }) {
+  if (!Number.isFinite(delta) || delta <= 0) {
+    return {
+      ttState,
+      deltaApplied: 0,
+      insuranceLayerDeltas: {},
+      lapLayerDelta: 0,
+      ttFaceDelta: 0,
+    };
+  }
+  const threads = ttState.threads ?? [];
+  const idx = threads.findIndex((t) => t.id === threadId);
+  if (idx < 0) {
+    return {
+      ttState,
+      deltaApplied: 0,
+      insuranceLayerDeltas: {},
+      lapLayerDelta: 0,
+      ttFaceDelta: 0,
+    };
+  }
+  const t = threads[idx];
+  if (t.closed || t.principal <= 0) {
+    return {
+      ttState,
+      deltaApplied: 0,
+      insuranceLayerDeltas: {},
+      lapLayerDelta: 0,
+      ttFaceDelta: 0,
+    };
+  }
+  const applied = Math.min(t.principal, delta);
+  const newPrincipal = t.principal - applied;
+  // ttFace can't exceed principal; shrink it pro-rata if needed.
+  const newTtFace = Math.min(t.ttFace, newPrincipal);
+  const ttFaceDelta = t.ttFace - newTtFace;
+
+  const insuranceLayerDeltas = {};
+  for (const [eventId, w] of Object.entries(t.insuranceWeights ?? {})) {
+    insuranceLayerDeltas[eventId] = applied * w;
+  }
+
+  const updatedThread = {
+    ...t,
+    principal: newPrincipal,
+    ttFace: newTtFace,
+    closed: newPrincipal <= 1e-9,
+  };
+  const newThreads = threads.map((x, i) => (i === idx ? updatedThread : x));
+
+  return {
+    ttState: { ...ttState, threads: newThreads },
+    deltaApplied: applied,
+    insuranceLayerDeltas,
+    lapLayerDelta: applied,
+    ttFaceDelta,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// TT transfer / redemption queue
+// ---------------------------------------------------------------------------
 
 export function transferTT({ ttState, fromId, toId, amount }) {
   if (!Number.isFinite(amount) || amount <= 0) {
@@ -157,9 +314,6 @@ export function transferTT({ ttState, fromId, toId, amount }) {
   }
   return { ok: true, ttState: next };
 }
-
-let _reqCtr = 0;
-const _reqId = () => `RED-${Date.now().toString(36)}-${(++_reqCtr).toString(36)}`;
 
 export function submitRedemption({
   ttState,
@@ -216,6 +370,30 @@ export function cancelRedemption({ ttState, requestId }) {
   return { ok: true, ttState: next };
 }
 
+// ---------------------------------------------------------------------------
+// Redemption cycle
+// ---------------------------------------------------------------------------
+
+// Drain the redemption queue: express requests bypass the cap and pay
+// the penalty; standard requests respect the per-cycle cap and FIFO.
+//
+// For each cleared request, we walk the active threads in createdAtEpoch
+// order (oldest first — discrete-thread FIFO) and shrink their layers
+// until the request is satisfied. The returned `threadUnwinds` tells
+// the epoch loop:
+//   - which thread shrank by how much (so it can withdraw insurance
+//     stakes per market and shrink the paired LAP)
+//   - which TT face came out of which minter (so it can update
+//     mintedByUser-driven UI / accounting)
+//
+// Returns:
+//   {
+//     ttState,
+//     dollarsOut,            // { redeemerUid: $ }
+//     threadUnwinds,         // [{ threadId, ownerId, delta, insuranceLayerDeltas, lapLayerDelta }]
+//     penaltyToPool,         // express-penalty $ (epoch loop routes to reinsurance sellers)
+//     logs,
+//   }
 export function runRedemptionCycle({ ttState, currentEpoch }) {
   const logs = [];
   const queue = [...(ttState.redemptionQueue ?? [])];
@@ -223,7 +401,7 @@ export function runRedemptionCycle({ ttState, currentEpoch }) {
     return {
       ttState: { ...ttState, lastRedemptionEpoch: currentEpoch },
       dollarsOut: {},
-      collateralHaircuts: {},
+      threadUnwinds: [],
       penaltyToPool: 0,
       logs,
     };
@@ -232,51 +410,61 @@ export function runRedemptionCycle({ ttState, currentEpoch }) {
   const supplyAtCycleStart = totalSupply(ttState);
   const standardCap = supplyAtCycleStart * STANDARD_REDEMPTION_CAP_PCT;
   const dollarsOut = {};
-  const collateralHaircuts = {};
-  let mintedByUser = { ...ttState.mintedByUser };
+  const threadUnwinds = [];
+  let workingTt = ttState;
   let penaltyToPool = 0;
   let standardDrained = 0;
   const remaining = [];
 
-  // Snapshot minter list at cycle start so all clears in this cycle
-  // see the same composition.
-  const minterIds = Object.keys(mintedByUser).filter((id) => mintedByUser[id] > 0);
-  const totalMintedSnapshot = minterIds.reduce(
-    (s, id) => s + mintedByUser[id],
-    0
-  );
-
-  function applyClear(req, hint) {
+  function clearOne(req, hint) {
     const dollars = req.amount * (1 - req.penaltyRate);
     const penalty = req.amount * req.penaltyRate;
     dollarsOut[req.userId] = (dollarsOut[req.userId] ?? 0) + dollars;
     penaltyToPool += penalty;
 
-    // Pro-rata across every current minter — sum of haircuts === req.amount.
-    if (totalMintedSnapshot > 0) {
-      for (const minterId of minterIds) {
-        const share = mintedByUser[minterId] / totalMintedSnapshot;
-        const portion = req.amount * share;
-        if (portion <= 0) continue;
-        mintedByUser[minterId] = Math.max(0, mintedByUser[minterId] - portion);
-        collateralHaircuts[minterId] =
-          (collateralHaircuts[minterId] ?? 0) + portion;
-      }
+    // Walk threads oldest-first, shrinking each by the amount needed.
+    let amountLeft = req.amount;
+    const sortedThreads = activeThreads(workingTt)
+      .slice()
+      .sort((a, b) => a.createdAtEpoch - b.createdAtEpoch);
+    for (const t of sortedThreads) {
+      if (amountLeft <= 1e-9) break;
+      const take = Math.min(t.ttFace, amountLeft);
+      if (take <= 1e-9) continue;
+      const dmg = damageThread({
+        ttState: workingTt,
+        threadId: t.id,
+        delta: take,
+      });
+      if (dmg.deltaApplied <= 1e-9) continue;
+      workingTt = dmg.ttState;
+      threadUnwinds.push({
+        threadId: t.id,
+        ownerId: t.ownerId,
+        delta: dmg.deltaApplied,
+        insuranceLayerDeltas: dmg.insuranceLayerDeltas,
+        lapLayerDelta: dmg.lapLayerDelta,
+        lapPairKey: t.lapPairKey,
+        lapId: t.lapId,
+      });
+      amountLeft -= dmg.deltaApplied;
     }
+
     logs.push(
       `[TT-REDEEM ${hint}] ${req.userId} ${req.amount.toFixed(2)} TT → $${dollars.toFixed(2)}` +
         (penalty > 0 ? ` (penalty $${penalty.toFixed(2)} → pool)` : "")
     );
   }
 
+  // Express first (bypasses cap), then standard up to cap.
   for (const req of queue) {
     if (!req.express) continue;
-    applyClear(req, "EXPRESS");
+    clearOne(req, "EXPRESS");
   }
   for (const req of queue) {
     if (req.express) continue;
     if (standardDrained + req.amount <= standardCap + 1e-6) {
-      applyClear(req, "STANDARD");
+      clearOne(req, "STANDARD");
       standardDrained += req.amount;
     } else {
       remaining.push(req);
@@ -291,50 +479,53 @@ export function runRedemptionCycle({ ttState, currentEpoch }) {
 
   return {
     ttState: {
-      ...ttState,
-      mintedByUser,
+      ...workingTt,
       redemptionQueue: remaining,
       lastRedemptionEpoch: currentEpoch,
       cumulativePenaltyToPool:
-        (ttState.cumulativePenaltyToPool ?? 0) + penaltyToPool,
+        (workingTt.cumulativePenaltyToPool ?? 0) + penaltyToPool,
     },
     dollarsOut,
-    collateralHaircuts,
+    threadUnwinds,
     penaltyToPool,
     logs,
   };
 }
 
 // ---------------------------------------------------------------------------
-// Solvency claw-back
+// Solvency check
 // ---------------------------------------------------------------------------
 
-// When a minter's allocation total drops (LAP loss propagating through
-// allocations, or a market trigger), recheck their mint cap. Overflow
-// is clawed back from wallet TT first; remainder becomes debt.
-export function applySolvencyCheck({
-  ttState,
-  userId,
-  newTotalStake,
-  ltv,
-}) {
-  const minted = mintedByOf(ttState, userId);
-  if (minted <= 0) return { ttState, clawback: 0, newDebt: 0 };
-  const newCap = (newTotalStake ?? 0) * (ltv ?? 0) * MINT_COEFFICIENT;
-  const overflow = minted - newCap;
+// Outstanding TT mint can drift above the principal that backs it (e.g.
+// after a chain of damage events). When that happens, claw back from the
+// minter's wallet TT first; remainder becomes debt. Wallet TT clawed
+// back is destroyed (reduces ttFace on their oldest threads pro-rata).
+//
+// Returns { ttState, clawback, newDebt }.
+export function applySolvencyCheck({ ttState, userId }) {
+  const owned = threadsOf(ttState, userId);
+  if (owned.length === 0) return { ttState, clawback: 0, newDebt: 0 };
+  const totalFace = owned.reduce((s, t) => s + t.ttFace, 0);
+  const totalPrincipal = owned.reduce((s, t) => s + t.principal, 0);
+  const overflow = totalFace - totalPrincipal;
   if (overflow <= 1e-6) return { ttState, clawback: 0, newDebt: 0 };
 
   const wallet = balanceOf(ttState, userId);
   const clawback = Math.min(wallet, overflow);
   const debt = overflow - clawback;
 
-  const next = { ...ttState };
+  let next = { ...ttState };
   if (clawback > 0) {
     next.balances = { ...ttState.balances, [userId]: wallet - clawback };
-    next.mintedByUser = {
-      ...ttState.mintedByUser,
-      [userId]: minted - clawback,
-    };
+    // Burn ttFace from oldest threads first — match the FIFO rule used
+    // by redemptions so the audit trail is consistent.
+    let amountLeft = clawback;
+    next.threads = (ttState.threads ?? []).map((t) => {
+      if (t.ownerId !== userId || t.closed || amountLeft <= 1e-9) return t;
+      const burn = Math.min(t.ttFace, amountLeft);
+      amountLeft -= burn;
+      return { ...t, ttFace: t.ttFace - burn };
+    });
   }
   if (debt > 0) {
     next.debtByUser = {

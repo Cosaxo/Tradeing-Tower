@@ -16,16 +16,17 @@ import {
   allocationDiversificationStats,
   propagateLapPnl,
 } from "./lib/allocations.js";
-import { postReinsuranceBuyer } from "./lib/reinsurance.js";
+import { postInsurer } from "./lib/insuranceMarket.js";
 import { makePairedLap, isPairedLap, calcPairedLapClosePnl } from "./lib/pairedLap.js";
 import { publishLegOffer, terminateRental } from "./lib/rentalMarket.js";
 import {
   initTtState,
-  mintTT,
+  openThread,
+  calcInsuranceFillWeights,
   transferTT,
   submitRedemption,
   cancelRedemption,
-  mintCapacity,
+  totalThreadPrincipal,
 } from "./lib/towerTether.js";
 import { getEffectiveCap } from "./lib/esma.js";
 import { initLedger } from "./lib/roleLedger.js";
@@ -144,6 +145,7 @@ export default function App() {
     player,
     setPlayer,
     openPositions,
+    setOpenPositions,
     ttState,
     setTtState,
     insuranceState,
@@ -326,6 +328,13 @@ export default function App() {
   function handleClosePosition(i) {
     const pos = openPositions[i];
     if (!pos) return;
+    if (pos.threadLinked) {
+      addToast(
+        "Thread-linked LAP — redeem the underlying TT to unwind (preserves the 4-layer invariant)",
+        "warning"
+      );
+      return;
+    }
     const ps = pairStates[pos.pairKey];
     const priceNow = ps?.prices?.slice(-1)[0] ?? 1;
     const priceThen = pos.openPrice ?? priceNow;
@@ -344,10 +353,10 @@ export default function App() {
       pnl = pos.margin * pos.leverage * (Math.exp(direction * logRet) - 1);
     }
 
-    // Pool-linked LAPs propagate their P&L to the depositor's
-    // allocation stakes. Gains grow the stakes pro-rata; losses shrink
-    // them. (The legacy unlinkLapFromDeposit helper is gone — the new
-    // flow is one-shot and lives in `propagateLapPnl`.)
+    // Pool-linked LAP (loose allocation, not a thread): gains grow
+    // stakes pro-rata, losses shrink them. Thread-linked closes are
+    // blocked above — they must unwind via TT redemption to preserve
+    // the 4-layer invariant.
     if (pos.poolLinkage && pos.poolLinkage.depositorId === player.id) {
       const r = propagateLapPnl({
         markets: insuranceState.markets,
@@ -526,35 +535,143 @@ export default function App() {
   }
 
   // --- Tower Tether handlers ----------------------------------------------
+  //
+  // Mint = open a thread. The same `amount` of free margin is locked as
+  // the thread's underlying T-bill stake AND simultaneously deployed as:
+  //   - insurer-side fill across reinsurance-covered insurance markets
+  //     (mixed equal/size weighting)
+  //   - a delta-neutral paired LAP (both legs auto-leased)
+  //   - an equal amount of TT minted into the wallet
+  //
+  // No LTV gate, no coefficient — gate is purely "can you afford to
+  // deploy `amount` of free margin?"
   function handleMintTT(amount) {
-    const result = mintTT({
-      ttState,
-      userId: player.id,
-      amount,
-      totalStake: poolDepositAmount,
-      ltv: poolLtvInfo.ltv,
-    });
-    if (!result.ok) {
-      addToast(`Mint failed: ${result.reason}`, "warning");
+    if (!Number.isFinite(amount) || amount <= 0) {
+      addToast("Mint amount must be positive", "warning");
       return;
     }
-    setTtState(result.ttState);
-    // Auto-buy reinsurance: face = result.reinsuranceFacePerProduct
-    // on each of the 3 reinsurance products (the 1.5× rule, split
-    // across 3 sleeves). Each product post is independent.
-    setInsuranceState((prev) => {
-      const next = { ...prev };
-      next.reinsurance = prev.reinsurance.map((p) => {
-        const r = postReinsuranceBuyer({
-          product: p,
-          userId: player.id,
-          faceAmount: result.reinsuranceFacePerProduct,
-        });
-        return r.ok ? r.product : p;
-      });
-      return next;
+    const free = freeMargin(player.margin, player.tags);
+    if (amount > free + 1e-6) {
+      addToast(
+        `Not enough free margin: $${free.toFixed(0)} available, need $${amount.toFixed(0)}`,
+        "warning"
+      );
+      return;
+    }
+
+    // 1. Pick eligible markets — those with at least one reinsurance
+    //    product carrying seller capital. Falls back to all markets if
+    //    reinsurance is empty (so the system is still usable in early
+    //    sim states).
+    const reinsuranceLive = (insuranceState.reinsurance ?? []).some(
+      (p) => (p.sellerCapital ?? 0) > 0
+    );
+    const eligibleMarkets = insuranceState.markets ?? [];
+    if (eligibleMarkets.length === 0) {
+      addToast("No insurance markets available for thread", "warning");
+      return;
+    }
+    const weights = calcInsuranceFillWeights({
+      eligibleMarkets,
+      reinsuranceLive,
     });
-    addToast(`Minted ${amount.toFixed(0)} TT (auto-bought reinsurance)`, "info");
+
+    // 2. Tag the principal as threadStake. This locks the same dollar
+    //    across all four roles — threadStake on top of any existing
+    //    tags is the bookkeeping for "this $ is now busy in 4 places".
+    const newTags = tryTag(player.margin, player.tags, "threadStake", amount);
+    if (!newTags) {
+      addToast("Insufficient free margin (tag check)", "warning");
+      return;
+    }
+
+    // 3. Apply the insurance-fill: post insurer stakes weighted by the
+    //    fill weights. Same money the threadStake tag now claims.
+    let nextMarkets = insuranceState.markets;
+    for (const [eventId, w] of Object.entries(weights)) {
+      const fill = amount * w;
+      if (fill <= 1e-6) continue;
+      const idx = nextMarkets.findIndex((m) => m.eventId === eventId);
+      if (idx < 0) continue;
+      const r = postInsurer({
+        market: nextMarkets[idx],
+        userId: player.id,
+        amount: fill,
+      });
+      if (r.ok) {
+        nextMarkets = nextMarkets.map((m, i) => (i === idx ? r.market : m));
+      }
+    }
+
+    // 4. Build a delta-neutral paired LAP for the thread. Margin =
+    //    `amount` (split equally across long+short legs). Both legs
+    //    auto-listed for rent; thread-linked via the lapId.
+    const priceNow = activePS?.prices?.slice(-1)[0] ?? 1;
+    const lapId = makeLapId();
+    const pairedLap = makePairedLap({
+      pairKey: activePair,
+      margin: amount,
+      leverage: player.leverage ?? 2,
+      openPrice: priceNow,
+      openedAtEpoch: activePS?.epochIndex ?? 0,
+      poolLinkage: null,
+      id: lapId,
+    });
+    pairedLap.threadLinked = true; // marker for close-handler
+
+    // 5. Open the thread record in TT state. This 1:1-mints the TT
+    //    into the user's wallet.
+    const opened = openThread({
+      ttState,
+      ownerId: player.id,
+      principal: amount,
+      insuranceWeights: weights,
+      lapPairKey: activePair,
+      lapId,
+      currentEpoch: activePS?.epochIndex ?? 0,
+    });
+    if (!opened.ok) {
+      addToast(`Mint failed: ${opened.reason}`, "warning");
+      return;
+    }
+
+    // 6. Auto-publish rental offers for both legs of the paired LAP.
+    setPairStates((prev) => {
+      const target = prev[activePair];
+      if (!target) return prev;
+      const epochNow = target.epochIndex ?? 0;
+      const longOffer = publishLegOffer({
+        pairLapId: lapId,
+        legSide: "long",
+        ownerId: player.id,
+        pairKey: activePair,
+        publishedAtEpoch: epochNow,
+      });
+      const shortOffer = publishLegOffer({
+        pairLapId: lapId,
+        legSide: "short",
+        ownerId: player.id,
+        pairKey: activePair,
+        publishedAtEpoch: epochNow,
+      });
+      return {
+        ...prev,
+        [activePair]: {
+          ...target,
+          rentalOffers: [...(target.rentalOffers ?? []), longOffer, shortOffer],
+        },
+      };
+    });
+
+    // 7. Commit the new state.
+    setTtState(opened.ttState);
+    setInsuranceState({ ...insuranceState, markets: nextMarkets });
+    setOpenPositions((prev) => [...prev, pairedLap]);
+    setPlayer((p) => ({ ...p, tags: newTags }));
+    addToast(
+      `Thread opened: $${amount.toFixed(0)} → T-bill + insurance + LAP + TT (1 dollar, 4 jobs)`,
+      "info"
+    );
   }
 
   function handleSendToMerchant(amount) {
@@ -712,7 +829,7 @@ export default function App() {
                 ? "text-emerald-200 border-emerald-700 bg-emerald-950"
                 : "text-gray-500 border-gray-800 bg-gray-900"
             }
-            title={`Tower Tether wallet · outstanding mint $${(ttState?.mintedByUser?.[player.id] ?? 0).toFixed(0)} · queue ${(ttState?.redemptionQueue ?? []).filter((q) => q.userId === player.id).length}`}
+            title={`Tower Tether wallet · outstanding mint $${(ttState?.threads ?? []).filter((t) => !t.closed && t.ownerId === player.id).reduce((s, t) => s + t.ttFace, 0).toFixed(0)} · queue ${(ttState?.redemptionQueue ?? []).filter((q) => q.userId === player.id).length}`}
             onClick={() => setActiveTab("Insurance")}
           />
         </div>
@@ -824,7 +941,7 @@ export default function App() {
               <GettingStarted
                 hasAllocation={poolDepositAmount > 0}
                 hasPosition={openPositions.length > 0}
-                hasMinted={(ttState?.mintedByUser?.[player.id] ?? 0) > 0}
+                hasMinted={totalThreadPrincipal(ttState, player.id) > 0}
                 hasMerchantSent={(ttState?.merchantBalance ?? 0) > 0}
                 activeTab={activeTab}
                 onJump={(t) => setActiveTab(t)}
@@ -928,14 +1045,8 @@ export default function App() {
                 <TtDesk
                   ttState={ttState}
                   playerId={player.id}
-                  ltv={poolLtvInfo?.ltv ?? 0}
-                  poolDeposit={poolDepositAmount}
-                  mintCapacityRemaining={mintCapacity({
-                    ttState,
-                    userId: player.id,
-                    totalStake: poolDepositAmount,
-                    ltv: poolLtvInfo?.ltv ?? 0,
-                  })}
+                  freeMargin={freeMargin(player.margin, player.tags)}
+                  threadPrincipal={totalThreadPrincipal(ttState, player.id)}
                   onMint={handleMintTT}
                   onSendToMerchant={handleSendToMerchant}
                   onRedeem={handleRedeem}

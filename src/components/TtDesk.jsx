@@ -1,26 +1,29 @@
-// Tower Tether (TT) Desk — mint, balance, redemption queue, send-to-merchant.
+// Tower Tether (TT) Desk — open threads, balance, redemption queue,
+// send-to-merchant.
 //
-// Phase 4 surface for the protocol's stablecoin. Critically, TT has NO
-// in-protocol utility (no fee acceptance, no power-up sinks). Its
-// purpose is to circulate OUTSIDE the protocol (the eventual moat is
-// merchant acceptance like a credit-card network). This desk gives the
-// user three actions:
+// Thread model: minting opens a "thread" of value where the same dollar
+// simultaneously serves four roles — T-bill stake, insurance-seller
+// fill across reinsurance-covered markets, a delta-neutral paired LAP
+// (auto-leased), and the minted TT itself. No LTV gate, no coefficient.
+// The gate is "do you have $X of free margin to commit?" because the
+// dollar is locked across all four jobs at once and a loss in any one
+// of them shrinks the others atomically.
 //
-//   - Mint:    against pool-deposit collateral, capped by LTV × deposit ×
-//              MINT_COEFFICIENT. Requires LTV ≥ MINT_LTV_GATE.
-//   - Send:    to a simulated merchant — represents real-world purchase.
-//              The merchant accumulates TT and periodically auto-redeems,
-//              creating organic redemption-queue pressure.
-//   - Redeem:  hand TT back for dollars. Standard tier waits its turn at
-//              no cost (10% of supply per ~monthly cycle); Express tier
-//              clears immediately, paying a 5% penalty to the insurance
-//              pool. Any minter whose collateral backed redeemed TT loses
-//              pro-rata.
+// Three actions:
+//
+//   - Mint:    open a thread for $X. Free margin gets the threadStake
+//              tag; insurance fills, paired LAP, and TT all materialise.
+//   - Send:    transfer TT to the simulated merchant — represents an
+//              outside-protocol purchase. Merchant auto-redeems on
+//              cycle to create organic queue pressure.
+//   - Redeem:  hand TT back for $. Standard tier respects the 10%
+//              per-cycle cap; Express tier pays a 5% penalty (routed
+//              to reinsurance sellers) to bypass the cap. Each cleared
+//              redemption shrinks one or more threads — atomically
+//              writing down all four of their layers.
 import { useState } from "react";
 import { HelpHint } from "./Tooltip.jsx";
 import {
-  MINT_COEFFICIENT,
-  MINT_LTV_GATE,
   STANDARD_REDEMPTION_CAP_PCT,
   EXPRESS_PENALTY_RATE,
   REDEMPTION_EVERY,
@@ -29,9 +32,8 @@ import {
 export function TtDesk({
   ttState,
   playerId = "You",
-  ltv = 0,
-  poolDeposit = 0,
-  mintCapacityRemaining = 0,
+  freeMargin = 0,
+  threadPrincipal = 0,
   onMint,
   onSendToMerchant,
   onRedeem,
@@ -43,12 +45,14 @@ export function TtDesk({
   const [express, setExpress] = useState(false);
 
   const balance = ttState?.balances?.[playerId] ?? 0;
-  const minted = ttState?.mintedByUser?.[playerId] ?? 0;
   const debt = ttState?.debtByUser?.[playerId] ?? 0;
-  const totalSupply = Object.values(ttState?.mintedByUser ?? {}).reduce(
-    (s, v) => s + v,
-    0
+  const threads = (ttState?.threads ?? []).filter(
+    (t) => !t.closed && t.ownerId === playerId
   );
+  const minted = threads.reduce((s, t) => s + t.ttFace, 0);
+  const totalSupply = (ttState?.threads ?? [])
+    .filter((t) => !t.closed)
+    .reduce((s, t) => s + t.ttFace, 0);
   const merchantBalance = ttState?.merchantBalance ?? 0;
   const queue = ttState?.redemptionQueue ?? [];
   const cycleCap = totalSupply * STANDARD_REDEMPTION_CAP_PCT;
@@ -56,17 +60,16 @@ export function TtDesk({
   const myQueueEntries = queue.filter((q) => q.userId === playerId);
   const merchantQueueEntries = queue.filter((q) => q.userId === "MERCHANT");
 
-  const aboveGate = ltv >= MINT_LTV_GATE;
-  const cap = poolDeposit * ltv * MINT_COEFFICIENT;
+  const mintMax = Math.max(0, Math.floor(freeMargin));
 
   return (
     <div className="flex flex-col gap-3 p-3 rounded border border-gray-700 bg-gray-900">
       <div className="flex items-center justify-between">
         <span className="text-xs font-mono text-gray-300 flex items-center">
-          Tower Tether (TT)
+          Tower Tether (TT) — Threads
           <HelpHint
-            width={320}
-            text="Fully-collateralized stablecoin minted against your pool deposit. Designed for OUTSIDE the protocol — the goal is merchant acceptance like a credit-card network. No in-protocol utility on purpose. Mint cap = deposit × LTV × 0.5, gated by LTV ≥ 0.6. Redemption is rate-limited: 10% of supply per ~monthly cycle (standard tier, free) or pay a 5% penalty for Express to skip the cap. When TT is redeemed, the minters whose collateral backed it lose pro-rata."
+            width={360}
+            text="Mint TT 1:1 against free margin. The dollar you commit serves FOUR roles at once: a T-bill stake, an insurance-seller fill across reinsurance-covered markets, a neutral paired LAP (both legs auto-leased), and the TT itself. Loss in any layer shrinks all four. Redemption sells T-bills for cash and atomically unwinds the other layers. 10% standard cap per cycle; Express bypasses the cap for a 5% penalty (paid to reinsurance sellers)."
           />
         </span>
         <span className="text-[10px] font-mono px-2 py-0.5 rounded border border-emerald-700 bg-emerald-950 text-emerald-200">
@@ -87,57 +90,60 @@ export function TtDesk({
           <div className="text-sm font-mono text-amber-300">{minted.toFixed(0)}</div>
         </div>
         <div>
-          <div className="text-[10px] text-gray-500 font-mono">Cap</div>
-          <div className="text-sm font-mono text-indigo-300">{cap.toFixed(0)}</div>
+          <div className="text-[10px] text-gray-500 font-mono">Threads</div>
+          <div className="text-sm font-mono text-indigo-300">{threads.length}</div>
         </div>
         <div>
-          <div className="text-[10px] text-gray-500 font-mono">Available</div>
+          <div className="text-[10px] text-gray-500 font-mono">Free margin</div>
           <div className="text-sm font-mono text-gray-200">
-            {Math.max(0, mintCapacityRemaining).toFixed(0)}
+            ${freeMargin.toFixed(0)}
           </div>
         </div>
       </div>
 
-      {debt > 0 && (
-        <div className="text-[10px] font-mono text-red-400 border border-red-800 bg-red-950/40 px-2 py-1 rounded">
-          DEBT: ${debt.toFixed(2)} owed (clawback shortfall — blocks new mints
-          until repaid via shrinking outstanding mint).
+      {threadPrincipal > 0 && (
+        <div className="text-[10px] font-mono text-gray-400 border border-gray-800 bg-gray-950 px-2 py-1 rounded">
+          Thread principal locked: <span className="text-amber-300">${threadPrincipal.toFixed(0)}</span>
+          {" — "}same $ deployed across T-bill, insurance, LAP, and TT.
         </div>
       )}
 
-      {!aboveGate && (
-        <div className="text-[10px] font-mono text-amber-400 border border-amber-800 bg-amber-950/30 px-2 py-1 rounded">
-          LTV {ltv.toFixed(2)} below mint gate {MINT_LTV_GATE.toFixed(2)} —
-          diversify your book to unlock minting.
+      {debt > 0 && (
+        <div className="text-[10px] font-mono text-red-400 border border-red-800 bg-red-950/40 px-2 py-1 rounded">
+          DEBT: ${debt.toFixed(2)} owed (clawback shortfall — affects new mints
+          until repaid).
         </div>
       )}
 
       {/* Mint */}
       <div className="flex flex-col gap-1 rounded border border-gray-800 bg-gray-950 px-2 py-2">
         <span className="text-[10px] text-gray-500 font-mono uppercase">
-          Mint TT
+          Open thread (mint TT)
         </span>
         <div className="flex items-center gap-2">
           <input
             type="range"
             min={10}
-            max={Math.max(10, Math.floor(mintCapacityRemaining))}
+            max={Math.max(10, mintMax)}
             step={10}
-            value={Math.min(mintAmount, Math.max(10, Math.floor(mintCapacityRemaining)))}
+            value={Math.min(mintAmount, Math.max(10, mintMax))}
             onChange={(e) => setMintAmount(parseInt(e.target.value))}
             className="flex-1 accent-emerald-500"
-            disabled={!aboveGate || mintCapacityRemaining < 10}
+            disabled={mintMax < 10}
           />
           <span className="text-[10px] font-mono text-gray-300 w-12 text-right">
             ${mintAmount}
           </span>
           <button
             onClick={() => onMint?.(mintAmount)}
-            disabled={!aboveGate || mintAmount > mintCapacityRemaining || mintCapacityRemaining < 10}
+            disabled={mintMax < 10 || mintAmount > mintMax}
             className="text-[10px] font-mono px-3 py-1 rounded border border-emerald-700 bg-emerald-950 text-emerald-300 hover:bg-emerald-900 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            Mint
+            Open thread
           </button>
+        </div>
+        <div className="text-[9px] font-mono text-gray-600">
+          Deploys ${mintAmount} as: T-bill + insurance fill + neutral paired LAP + ${mintAmount} TT.
         </div>
       </div>
 
@@ -147,7 +153,7 @@ export function TtDesk({
           Send to Merchant (simulated purchase)
           <HelpHint
             width={260}
-            text="Simulates spending TT in the real world. The merchant pool periodically auto-redeems chunks of its balance, creating organic redemption-queue pressure. In production this is just a wallet-to-wallet transfer; here we model the redemption side."
+            text="Simulates spending TT outside the protocol. The merchant pool periodically auto-redeems chunks of its balance, creating organic redemption-queue pressure. In production this is just a wallet-to-wallet transfer; here we model the redemption side."
           />
         </span>
         <div className="flex items-center gap-2">
@@ -272,7 +278,7 @@ export function TtDesk({
 
       <div className="text-[10px] font-mono text-gray-500">
         Total supply: ${totalSupply.toFixed(0)} TT · Cumulative penalty to
-        pool: ${(ttState?.cumulativePenaltyToPool ?? 0).toFixed(2)}
+        sellers: ${(ttState?.cumulativePenaltyToPool ?? 0).toFixed(2)}
       </div>
     </div>
   );

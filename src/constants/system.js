@@ -44,16 +44,13 @@ export const ADAPTIVE_LR = 0.005;
 export const SOFT_CLOSE_PCT = 0.8;
 
 // -----------------------------------------------------------------------
-// Tower Tether (TT) — fully-collateralized stablecoin
+// Tower Tether (TT) — thread-based hyper-rehypothecated stablecoin
 // -----------------------------------------------------------------------
-
-// Mint cap = totalAllocatedStake × LTV × MINT_COEFFICIENT. Conservative
-// default; half of LTV-adjusted allocation available as TT.
-export const MINT_COEFFICIENT = 0.5;
-
-// Minimum LTV required to mint at all. Forces diversification before a
-// depositor can extract circulating-stablecoin claims.
-export const MINT_LTV_GATE = 0.6;
+//
+// Mint is 1:1 against free margin (no LTV gate, no coefficient). The
+// minted dollar simultaneously backs four full-notional positions:
+// T-bill stake, insurance-seller stakes across reinsurance-covered
+// markets, a delta-neutral paired LAP, and the TT itself.
 
 // Standard redemption capacity per cycle as a fraction of total TT
 // supply at cycle start. Anything beyond this either waits in queue
@@ -61,5 +58,6 @@ export const MINT_LTV_GATE = 0.6;
 export const STANDARD_REDEMPTION_CAP_PCT = 0.10;
 
 // Express tier penalty rate — fraction of redeemed amount the holder
-// forfeits to skip the queue / clear above the cap.
+// forfeits to skip the queue / clear above the cap. Routed to
+// reinsurance sellers via the epoch loop.
 export const EXPRESS_PENALTY_RATE = 0.05;

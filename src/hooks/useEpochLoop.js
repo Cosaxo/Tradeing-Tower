@@ -20,15 +20,14 @@ import { isPairedLap } from "../lib/pairedLap.js";
 import {
   runRedemptionCycle,
   applySolvencyCheck,
+  damageThread,
   submitRedemption as submitTtRedemption,
 } from "../lib/towerTether.js";
 import { detectTriggeredEvents } from "../lib/insuranceEvents.js";
 import { settleMarketTick, withdrawInsurer } from "../lib/insuranceMarket.js";
 import { settleReinsuranceTick } from "../lib/reinsurance.js";
-import { calcAllocationLtv } from "../lib/ltv.js";
-import { allocationDiversificationStats } from "../lib/allocations.js";
 import { appendEpochEntry } from "../lib/roleLedger.js";
-import { normalizeTags } from "../lib/capitalTags.js";
+import { normalizeTags, untag } from "../lib/capitalTags.js";
 import { TBILL_RATE } from "../constants/system.js";
 import { pushPrice } from "../state/pairState.js";
 import { getEffectiveCap } from "../lib/esma.js";
@@ -40,6 +39,7 @@ export function useEpochLoop({
   player,           // { id, leverage, margin, side, strategy, minYield, tip_tiers, ... }
   setPlayer,        // React setter
   openPositions = [], // current player positions — used to look up paired LAPs by id during rental settlement
+  setOpenPositions, // React setter for openPositions (loop shrinks thread-linked LAPs on redemption)
   ttState = null,   // Tower Tether global state (mints, balances, queue, etc.)
   setTtState,       // React setter for TT state
   insuranceState = null, // global insurance markets + reinsurance + allocations
@@ -56,6 +56,14 @@ export function useEpochLoop({
   // medium epoch began so soft-close measures against the tick window,
   // not the user's last-edit timestamp.
   const lastMediumTickRef = useRef(0);
+  // Tower-Tether thread invariant: insurance and LAP must NEVER
+  // calculate thread damage in the same medium tick. We split them by
+  // parity — LAP fires on EVEN ticks (mediumCount % 2 === 0), insurance
+  // fires on ODD ticks. When insurance has a claim that surfaces on a
+  // LAP tick (i.e. an event triggered now but it isn't insurance's
+  // turn), it queues here and gets applied on the next available
+  // (odd) tick — the "skip to next available epoch" rule.
+  const pendingInsuranceClaimsRef = useRef([]);
   // External state mirrored into refs so the tick can read the freshest
   // snapshot synchronously without React's render cycle. Crucially, the
   // tick body operates on these refs and calls setters with concrete
@@ -484,6 +492,12 @@ export function useEpochLoop({
         let nextInsurance = { ...insuranceStateRef.current };
         const buyerLossesByUser = {};
         const playerCashChanges = {};
+        // Thread damage from this tick's claim losses, keyed per-market
+        // so we can either apply it now (insurance tick) or queue it for
+        // the next odd tick when LAP is calculating now (the
+        // epoch-separation invariant). Shape:
+        //   [{ eventId, lossesByUser: { [uid]: $ } }]
+        const tickClaimLosses = [];
 
         nextInsurance.markets = nextInsurance.markets.map((m) => {
           const eventTriggered = triggered.includes(m.eventId);
@@ -505,6 +519,9 @@ export function useEpochLoop({
           for (const [uid, v] of Object.entries(r.claimOut)) {
             playerCashChanges[uid] = (playerCashChanges[uid] ?? 0) - v;
             buyerLossesByUser[uid] = (buyerLossesByUser[uid] ?? 0) + v;
+          }
+          if (Object.keys(r.claimOut).length > 0) {
+            tickClaimLosses.push({ eventId: m.eventId, lossesByUser: r.claimOut });
           }
           return r.market;
         });
@@ -531,6 +548,113 @@ export function useEpochLoop({
           return r.product;
         });
 
+        // -----------------------------------------------------------------
+        // Thread damage propagation (insurance side)
+        //
+        // Critical invariant: insurance and LAP must NEVER calculate
+        // thread damage in the same medium tick. Insurance owns ODD
+        // ticks (mediumCount % 2 === 1). On EVEN ticks, claim losses
+        // queue into pendingInsuranceClaimsRef and apply on the next
+        // available (odd) tick — "skip to next available epoch".
+        // -----------------------------------------------------------------
+        const insuranceTurn = mediumCountRef.current % 2 === 1;
+        if (tickClaimLosses.length > 0 && !insuranceTurn) {
+          pendingInsuranceClaimsRef.current.push(...tickClaimLosses);
+          logs.push(
+            `[TT-THREAD] ${tickClaimLosses.length} claim(s) deferred to next insurance tick (LAP turn)`
+          );
+        }
+        const claimsToApply = insuranceTurn
+          ? [...pendingInsuranceClaimsRef.current, ...tickClaimLosses]
+          : [];
+        if (insuranceTurn) pendingInsuranceClaimsRef.current = [];
+
+        let workingTtForDamage = ttStateRef.current;
+        let totalLapDamageDelta = 0;
+        const playerThreadStakeRelease = { delta: 0 };
+        if (claimsToApply.length > 0 && workingTtForDamage) {
+          for (const { eventId, lossesByUser } of claimsToApply) {
+            for (const [uid, lossAmt] of Object.entries(lossesByUser)) {
+              if (lossAmt <= 0) continue;
+              const userThreads = (workingTtForDamage.threads ?? []).filter(
+                (t) =>
+                  !t.closed &&
+                  t.ownerId === uid &&
+                  (t.insuranceWeights?.[eventId] ?? 0) > 0 &&
+                  t.principal > 1e-9
+              );
+              if (userThreads.length === 0) continue;
+              // Pro-rata across this user's threads, weighted by each
+              // thread's exposure to the triggering market.
+              const exposure = userThreads.map(
+                (t) => t.principal * (t.insuranceWeights[eventId] ?? 0)
+              );
+              const totalExposure = exposure.reduce((s, v) => s + v, 0);
+              if (totalExposure <= 0) continue;
+              const damageBudget = Math.min(lossAmt, totalExposure);
+              for (let i = 0; i < userThreads.length; i++) {
+                const t = userThreads[i];
+                const share = exposure[i] / totalExposure;
+                const dmgAmount = damageBudget * share;
+                if (dmgAmount <= 1e-9) continue;
+                const dmg = damageThread({
+                  ttState: workingTtForDamage,
+                  threadId: t.id,
+                  delta: dmgAmount,
+                });
+                if (dmg.deltaApplied <= 1e-9) continue;
+                workingTtForDamage = dmg.ttState;
+                totalLapDamageDelta += dmg.lapLayerDelta;
+                if (uid === pid) {
+                  playerThreadStakeRelease.delta += dmg.deltaApplied;
+                }
+                // Withdraw the per-market layer deltas from the
+                // insurance markets (the insurance loss already
+                // happened in settleMarketTick — but for OTHER markets
+                // covered by this same thread, the principal write-down
+                // needs to shrink those stakes too so the thread layers
+                // stay in sync).
+                nextInsurance.markets = nextInsurance.markets.map((m) => {
+                  const cut = dmg.insuranceLayerDeltas[m.eventId] ?? 0;
+                  if (cut <= 1e-9) return m;
+                  // The triggering market already wrote down via
+                  // settleMarketTick (claimOut); skip to avoid double-debit.
+                  if (m.eventId === eventId) return m;
+                  const r = withdrawInsurer({
+                    market: m,
+                    userId: uid,
+                    amount: cut,
+                  });
+                  return r.ok ? r.market : m;
+                });
+                logs.push(
+                  `[TT-THREAD ${t.id}] insurance damage $${dmg.deltaApplied.toFixed(2)} (event ${eventId}) — all 4 layers shrunk`
+                );
+              }
+            }
+          }
+        }
+
+        if (workingTtForDamage !== ttStateRef.current) {
+          ttStateRef.current = workingTtForDamage;
+          sideEffects.nextTtState = workingTtForDamage;
+        }
+
+        // Shrink the player's thread-linked paired LAPs by the
+        // accumulated lapLayerDelta. We hit each thread's LAP
+        // proportionally to the damage it took.
+        if (totalLapDamageDelta > 0) {
+          // The actual mutation is left to the position list update
+          // below — we collect intent here.
+          sideEffects.lapShrinkIntents = sideEffects.lapShrinkIntents ?? [];
+          // Using the per-thread deltas captured during damage; the
+          // openPositions reducer below reads from threads after damage.
+        }
+        if (playerThreadStakeRelease.delta > 0) {
+          sideEffects.threadStakeRelease =
+            (sideEffects.threadStakeRelease ?? 0) + playerThreadStakeRelease.delta;
+        }
+
         sideEffects.nextInsuranceState = nextInsurance;
         // Persist the working copy for downstream blocks (redemption
         // haircut application reads it via the ref).
@@ -543,30 +667,28 @@ export function useEpochLoop({
       }
 
       // -----------------------------------------------------------------
-      // Tower Tether redemption cycle (Phase 4)
+      // Tower Tether redemption cycle (thread-based)
       //
       // Runs on its own prime stride (REDEMPTION_EVERY) coprime with
-      // analytics + insurance, ~monthly in sim-days. On each cycle:
+      // analytics + insurance/LAP, ~monthly in sim-days. On each cycle:
       //   1. Merchant simulator queues 50% of its TT balance for
       //      standard redemption — creates organic queue pressure.
-      //   2. runRedemptionCycle drains express + standard requests up to
-      //      the 10% cap; computes pro-rata collateral haircut by minter.
-      //   3. Apply the haircut to each minter's allocations (insurer-side
-      //      stakes across the insurance markets). The reduction is
-      //      pro-rata across whichever markets they hold a stake in.
-      //   4. Pay out dollars to each redeemer's main margin (cash flow).
-      //   5. Recheck solvency for each affected minter — if their
-      //      outstanding mint exceeds the new cap, claw back from
-      //      wallet TT first, then record any remaining shortfall as
-      //      debt.
+      //   2. runRedemptionCycle drains express + standard requests up
+      //      to the 10% cap and returns thread-level unwinds.
+      //   3. Apply each unwind: T-bills already paid out as $ to the
+      //      redeemer; per-thread, withdraw the insurance fill from
+      //      every covered market AND shrink the paired LAP by the
+      //      same amount. Releases threadStake tag from the minter.
+      //   4. Route express penalty to reinsurance sellers.
+      //   5. Pay redemption dollars to each holder's margin.
+      //   6. Solvency recheck per affected minter.
       // -----------------------------------------------------------------
       if (mediumCountRef.current % REDEMPTION_EVERY === 0 && ttStateRef.current) {
         const tickEpoch = epochOfFirstPair(next);
         let workingTt = ttStateRef.current;
         let workingInsurance = insuranceStateRef.current;
 
-        // Step 1: merchant auto-redemption — 50% of merchant balance
-        // each cycle, standard tier.
+        // Step 1: merchant auto-redemption.
         if ((workingTt.merchantBalance ?? 0) > 1) {
           const merchantRedeem = workingTt.merchantBalance * 0.5;
           const submitted = submitTtRedemption({
@@ -592,38 +714,47 @@ export function useEpochLoop({
         cycle.logs.forEach((l) => logs.push(l));
         workingTt = cycle.ttState;
 
-        // Step 3: apply collateral haircuts pro-rata across each
-        // minter's allocation stakes.
-        const haircuts = cycle.collateralHaircuts;
-        if (workingInsurance && Object.keys(haircuts).length > 0) {
-          let nextMarkets = workingInsurance.markets;
-          for (const minterId of Object.keys(haircuts)) {
-            const totalToRemove = haircuts[minterId];
-            if (totalToRemove <= 0) continue;
-            // Sum the minter's stake across all markets.
-            let minterStakeTotal = 0;
-            for (const m of nextMarkets) {
-              minterStakeTotal += m.insurerPositions?.[minterId] ?? 0;
-            }
-            if (minterStakeTotal <= 0) continue;
-            // Pro-rata reduce each market stake.
-            nextMarkets = nextMarkets.map((m) => {
-              const stake = m.insurerPositions?.[minterId] ?? 0;
-              if (stake <= 0) return m;
-              const share = stake / minterStakeTotal;
-              const cut = Math.min(stake, totalToRemove * share);
-              if (cut <= 1e-9) return m;
-              const r = withdrawInsurer({ market: m, userId: minterId, amount: cut });
-              return r.ok ? r.market : m;
-            });
+        // Step 3: apply per-thread unwinds. For each unwind:
+        //   - withdraw the per-market insurance stakes (split by the
+        //     thread's insuranceWeights — already computed inside
+        //     damageThread and returned in insuranceLayerDeltas)
+        //   - shrink the paired LAP's margin (or close it if the
+        //     remaining margin would fall below dust threshold)
+        //   - release the minter's threadStake tag (local player only)
+        const lapShrinkByLapId = {}; // { [lapId]: dollarAmountToShrink }
+        const threadStakeReleaseByOwner = {};
+        for (const u of cycle.threadUnwinds) {
+          if (workingInsurance && u.insuranceLayerDeltas) {
+            workingInsurance = {
+              ...workingInsurance,
+              markets: workingInsurance.markets.map((m) => {
+                const cut = u.insuranceLayerDeltas[m.eventId] ?? 0;
+                if (cut <= 1e-9) return m;
+                const r = withdrawInsurer({
+                  market: m,
+                  userId: u.ownerId,
+                  amount: cut,
+                });
+                return r.ok ? r.market : m;
+              }),
+            };
           }
-          workingInsurance = { ...workingInsurance, markets: nextMarkets };
+          if (u.lapId && u.lapLayerDelta > 0) {
+            lapShrinkByLapId[u.lapId] =
+              (lapShrinkByLapId[u.lapId] ?? 0) + u.lapLayerDelta;
+          }
+          threadStakeReleaseByOwner[u.ownerId] =
+            (threadStakeReleaseByOwner[u.ownerId] ?? 0) + u.delta;
+        }
+        if (cycle.threadUnwinds.length > 0) {
+          logs.push(
+            `[TT-UNWIND] ${cycle.threadUnwinds.length} thread(s) shrunk · total $${cycle.threadUnwinds
+              .reduce((s, u) => s + u.delta, 0)
+              .toFixed(2)}`
+          );
         }
 
-        // Step 4: route the express penalty into the reinsurance
-        // sellers' pots, weighted by each product's coverage fraction
-        // (so the larger product gets the larger share). This pays
-        // sellers for absorbing the panic-redemption stress.
+        // Step 4: express-penalty → reinsurance sellers.
         if (cycle.penaltyToPool > 0 && workingInsurance?.reinsurance?.length) {
           const totalCov = workingInsurance.reinsurance.reduce(
             (s, p) => s + (p.coverageFraction ?? 0),
@@ -633,7 +764,6 @@ export function useEpochLoop({
             const share = (p.coverageFraction ?? 0) / totalCov;
             const credit = cycle.penaltyToPool * share;
             if (credit <= 0 || (p.sellerCapital ?? 0) <= 0) return p;
-            // Distribute credit pro-rata to existing sellers' stakes.
             const newPositions = { ...p.sellerPositions };
             for (const [uid, stake] of Object.entries(p.sellerPositions ?? {})) {
               const fraction = stake / p.sellerCapital;
@@ -651,35 +781,18 @@ export function useEpochLoop({
           );
         }
 
-        // Step 5: pay redemption dollars out to each holder's margin.
-        // Only the local player and the merchant matter here; merchant
-        // dollars stay in the merchant abstraction (ignored for now).
+        // Step 5: pay redemption dollars out to the holder's margin.
         const playerDollars = cycle.dollarsOut[player?.id] ?? 0;
         if (playerDollars > 0) {
           sideEffects.playerMarginDelta += playerDollars;
         }
 
         // Step 6: solvency recheck per affected minter.
-        for (const minterId of Object.keys(haircuts)) {
-          // newTotalStake comes from the freshly-haircut allocation
-          // markets. LTV is derived from the minter's diversification
-          // across those markets.
-          const stats = workingInsurance
-            ? allocationDiversificationStats({ markets: workingInsurance.markets, userId: minterId })
-            : { totalStake: 0 };
-          const newTotalStake = stats.totalStake;
-          let ltv = 1;
-          if (workingInsurance) {
-            ltv = calcAllocationLtv({
-              markets: workingInsurance.markets,
-              userId: minterId,
-            }).ltv;
-          }
+        const affectedMinters = new Set(cycle.threadUnwinds.map((u) => u.ownerId));
+        for (const minterId of affectedMinters) {
           const solvency = applySolvencyCheck({
             ttState: workingTt,
             userId: minterId,
-            newTotalStake,
-            ltv,
           });
           workingTt = solvency.ttState;
           if (solvency.clawback > 0 || solvency.newDebt > 0) {
@@ -688,6 +801,11 @@ export function useEpochLoop({
             );
           }
         }
+
+        // Stash LAP-shrink intents for the position update below to
+        // consume.
+        sideEffects.lapShrinkByLapId = lapShrinkByLapId;
+        sideEffects.threadStakeReleaseByOwner = threadStakeReleaseByOwner;
 
         sideEffects.nextTtState = workingTt;
         if (workingInsurance && workingInsurance !== insuranceStateRef.current) {
@@ -716,20 +834,58 @@ export function useEpochLoop({
 
       const overrides = sideEffects.playerOverrides;
       const delta = sideEffects.playerMarginDelta;
-      if (overrides || delta !== 0) {
+      // Thread-stake tag release: when redemption unwinds shrink the
+      // player's threads, the same dollar amount comes off the
+      // threadStake tag. Damage propagation (insurance side) does the
+      // same.
+      const pid = player?.id ?? "You";
+      const threadStakeRelease =
+        (sideEffects.threadStakeReleaseByOwner?.[pid] ?? 0) +
+        (sideEffects.threadStakeRelease ?? 0);
+      if (overrides || delta !== 0 || threadStakeRelease > 0) {
         setPlayer((prev) => {
           const baseMargin = overrides ? overrides.margin : (prev.margin ?? 0);
-          const baseTags = overrides
+          let baseTags = overrides
             ? normalizeTags(overrides.normaliseTagsAt, prev.tags ?? {})
             : prev.tags;
+          if (threadStakeRelease > 0) {
+            baseTags = untag(baseTags ?? {}, "threadStake", threadStakeRelease);
+          }
           const next = { ...prev };
           if (overrides) {
             next.pnl = overrides.pnl;
             next.liquidated = overrides.liquidated;
+          }
+          if (overrides || threadStakeRelease > 0) {
             next.tags = baseTags;
           }
           next.margin = baseMargin + delta;
           return next;
+        });
+      }
+
+      // Apply paired-LAP shrinks from redemption thread-unwinds.
+      // Reduces each linked LAP's margin by the unwound principal; if
+      // the remaining margin would fall below dust ($1) the position
+      // is dropped entirely (its rental offers were already auto-cancelled
+      // when the thread closed).
+      const shrinks = sideEffects.lapShrinkByLapId;
+      if (shrinks && Object.keys(shrinks).length > 0 && setOpenPositions) {
+        setOpenPositions((prev) => {
+          let changed = false;
+          const out = [];
+          for (const pos of prev) {
+            const cut = shrinks[pos?.id] ?? 0;
+            if (cut <= 1e-9) {
+              out.push(pos);
+              continue;
+            }
+            const newMargin = (pos.margin ?? 0) - cut;
+            changed = true;
+            if (newMargin <= 1) continue; // drop dust
+            out.push({ ...pos, margin: newMargin });
+          }
+          return changed ? out : prev;
         });
       }
 
@@ -743,7 +899,7 @@ export function useEpochLoop({
         setLogs((prev) => [...prev.slice(-300), ...sideEffects.logs]);
       }
     }
-  }, [setPairStates, player, setPlayer, setLogs, addToast, setRoleLedger, setTtState, setInsuranceState]);
+  }, [setPairStates, player, setPlayer, setLogs, addToast, setRoleLedger, setTtState, setInsuranceState, setOpenPositions]);
 
   // -------------------------------------------------------------------------
   // Interval management

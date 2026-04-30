@@ -3,8 +3,12 @@
 // Capital does not move between floors. It accumulates roles. The same
 // dollar of margin can simultaneously be tagged as:
 //
-//   - poolDeposit    (insurance-market allocation — backs LTV + TT mint)
+//   - poolDeposit    (loose insurance-market allocation, no TT thread)
 //   - auctionMargin  (backing an open LAP position)
+//   - threadStake    (locked into a Tower Tether thread — same dollar
+//                     covers the T-bill, insurance fill, paired LAP,
+//                     and minted TT simultaneously; released only when
+//                     the thread is redeemed or fully damaged)
 //
 // Margin itself changes only through real cash flows: tips, P&L,
 // premiums, payouts. Tagging is a pure claim operation — no margin
@@ -13,16 +17,18 @@
 // Stacking is safe because each role's claim is bounded and the sum
 // of tagged amounts is guarded by `freeMargin`.
 
-export const TAG_KEYS = ["poolDeposit", "auctionMargin"];
+export const TAG_KEYS = ["poolDeposit", "auctionMargin", "threadStake"];
 
 export const TAG_LABELS = {
   poolDeposit: "Pool Collateral",
   auctionMargin: "Auction Margin",
+  threadStake: "TT Thread",
 };
 
 export const TAG_COLORS = {
   poolDeposit: "#a78bfa",
   auctionMargin: "#34d399",
+  threadStake: "#fbbf24",
 };
 
 export function initTags() {

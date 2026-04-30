@@ -5,29 +5,28 @@
 //
 //   - poolDeposit        (Floor 1 — exposed to pool claims, earns pool yield)
 //   - auctionMargin      (Floor 2 — backing an open auction position)
-//   - lendingOffered     (Floor 4 — offered as lending inventory)
-//   - contractCollateral (Floor 4 — backing contract obligations)
+//   - contractCollateral (Floor 4 — backing strip obligations; name
+//                         retained for back-compat after the contract-
+//                         market cut so persisted tags still read.)
 //
-// Margin itself changes only through real cash flows: tips, P&L,
-// contract premiums, pool yield, rental income. Tagging is a pure claim
-// operation — no margin is transferred.
+// Margin itself changes only through real cash flows: tips, P&L, strip
+// premiums, pool yield. Tagging is a pure claim operation — no margin
+// is transferred.
 //
 // Stacking is safe because each floor's claims are bounded and
 // prioritised (see whitepaper §10.1 invariants).
 
-export const TAG_KEYS = ["poolDeposit", "auctionMargin", "lendingOffered", "contractCollateral"];
+export const TAG_KEYS = ["poolDeposit", "auctionMargin", "contractCollateral"];
 
 export const TAG_LABELS = {
   poolDeposit: "Pool Collateral",
   auctionMargin: "Auction Margin",
-  lendingOffered: "Lending Offered",
-  contractCollateral: "Contract Collat.",
+  contractCollateral: "Strip Collateral",
 };
 
 export const TAG_COLORS = {
   poolDeposit: "#a78bfa",
   auctionMargin: "#34d399",
-  lendingOffered: "#fbbf24",
   contractCollateral: "#60a5fa",
 };
 

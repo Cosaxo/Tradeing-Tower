@@ -6,8 +6,6 @@ import { HelpHint } from "./Tooltip.jsx";
 const COLORS = {
   stabilityFee: "#fbbf24",
   stripPremium: "#60a5fa",
-  contractPremium: "#fb923c",
-  rentalIncome: "#34d399",
   routedToBuffer: "#a78bfa",
   routedToPool: "#60a5fa",
   routedToDepositors: "#34d399",
@@ -18,8 +16,6 @@ const COLORS = {
 const SRC_LABELS = {
   stabilityFee: "Stability Fee",
   stripPremium: "Strip Premium",
-  contractPremium: "Contract Premium",
-  rentalIncome: "Rental Income",
 };
 
 const DST_LABELS = {
@@ -135,8 +131,6 @@ export function FeeFlow({ ledger }) {
   const rows = [
     { label: "Stability fee collected", key: "stabilityFee", color: COLORS.stabilityFee },
     { label: "Strip premiums", key: "stripPremium", color: COLORS.stripPremium },
-    { label: "Contract premiums", key: "contractPremium", color: COLORS.contractPremium },
-    { label: "Rental income", key: "rentalIncome", color: COLORS.rentalIncome },
     { label: "Routed to buffer", key: "routedToBuffer", color: COLORS.routedToBuffer },
     { label: "Routed to pool", key: "routedToPool", color: COLORS.routedToPool },
     { label: "Paid to depositors", key: "routedToDepositors", color: COLORS.routedToDepositors },
@@ -144,8 +138,7 @@ export function FeeFlow({ ledger }) {
     { label: "Buffer draws", key: "bufferDraws", color: COLORS.bufferDraws },
   ];
 
-  const totalIn = (ledger.stabilityFee ?? 0) + (ledger.stripPremium ?? 0) +
-                  (ledger.contractPremium ?? 0) + (ledger.rentalIncome ?? 0);
+  const totalIn = (ledger.stabilityFee ?? 0) + (ledger.stripPremium ?? 0);
   const totalOut = (ledger.routedToDepositors ?? 0) + (ledger.claimsPaid ?? 0);
 
   return (
@@ -153,7 +146,7 @@ export function FeeFlow({ ledger }) {
       <div className="flex items-center justify-between">
         <span className="text-xs font-mono text-gray-300 flex items-center">
           Fee Flow
-          <HelpHint text="Where each fee dollar went: stability fee + strip + contract premiums accumulate into pool pendingPremiums; slow-epoch settlement routes the yieldMultiplier-adjusted revenue to claim payouts first and depositors second. Dynamic buffer contributions skim excess yield; buffer draws cover pool shortfalls." />
+          <HelpHint text="Where each fee dollar went: stability fee + strip premiums accumulate into pool pendingPremiums; the pool's own prime-stride settlement (INSURANCE_EVERY) routes the yieldMultiplier-adjusted revenue to claim payouts first and depositors second. Dynamic buffer contributions skim excess yield; buffer draws cover pool shortfalls." />
         </span>
         <span className="text-[10px] font-mono text-gray-500">
           last epoch

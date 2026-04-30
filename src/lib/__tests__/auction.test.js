@@ -81,6 +81,16 @@ describe("runAuction", () => {
     expect(result.matched.length).toBeGreaterThanOrEqual(0);
     expect(result.normWeights.length).toBe(result.longCurve.length);
   });
+  it("short-circuits to an empty result when one side of the book is empty", () => {
+    const onlyLongs = [
+      { id: "A", strategy: "FIXED_LONG", max_lev: 2, base_margin: 1000, tip_tiers: [{ tip: 0.02 }] },
+    ];
+    const result = runAuction(onlyLongs, 0.5, [], 5, { sk: 0, ek: 0 }, 0.02, null, {});
+    expect(result.matched).toEqual([]);
+    expect(result.normWeights).toEqual([]);
+    expect(result.bucketLevs).toEqual([]);
+    expect(result.softClose).toBe(true);
+  });
   it("flags soft-close when imbalance exceeds 0.8", () => {
     const imbalUsers = Array.from({ length: 10 }, (_, i) => ({
       id: `L${i}`,

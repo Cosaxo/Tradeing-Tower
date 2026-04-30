@@ -4,7 +4,6 @@
 
 import { PAIRS } from "../constants/assets.js";
 import { buildNpcs } from "../lib/npcs.js";
-import { initInsurancePool } from "../lib/insurance.js";
 import { MAX_HISTORY } from "../constants/system.js";
 
 export function initPairState(pairKey) {
@@ -47,25 +46,13 @@ export function initPairState(pairKey) {
       yieldVar: 0.0001,
     },
 
-    // Insurance pool.
-    insurancePool: initInsurancePool(),
-
-    // Yield buffer — accumulated excess-yield contributions.
-    yieldBuffer: 0,
-    yieldBufferEpochs: 0,
-
-    // Fee-flow ledger: cumulative flows of each fee category since init.
+    // Fee-flow ledger: per-pair accounting of stability fees collected
+    // from auction settlement. Insurance/reinsurance premiums and
+    // payouts no longer flow through here — they live in the global
+    // insuranceState managed at the App level.
     feeLedger: {
-      stabilityFee: 0,      // collected from RISKY tier settlements
-      stripPremium: 0,      // collected from strip issuance
-      contractPremium: 0,   // collected from imbalance + entropy contracts
-      rentalIncome: 0,      // collected from lending
-      routedToBuffer: 0,    // accumulated yield-buffer contributions
-      routedToPool: 0,      // revenue that became pendingPremiums in the pool
-      routedToDepositors: 0, // net distrib paid out to pool depositors
-      claimsPaid: 0,        // drawn from pool to cover shortfalls
-      bufferDraws: 0,       // drawn from buffer to cover unmet claims
-      lastEpoch: null,      // { stabilityFee, stripPremium, ... } last epoch breakdown
+      stabilityFee: 0,
+      lastEpoch: null,
     },
 
     // Slow-epoch analytics.
@@ -78,22 +65,31 @@ export function initPairState(pairKey) {
     // Event ticks (for chart annotations): { epoch, type, meta }.
     events: [],
 
-    // Lending market.
-    lendingOffers: [], // { id, lenderId, amount, rate, duration }
-    lendingBorrows: [], // { id, borrowerId, lenderId, amount, rate, remaining }
-
-    // Contracts.
-    imbalanceContracts: [],
-    entropyContracts: [],
-    strips: [],
+    // Rental market for paired-LAP legs (Phase 3).
+    rentalOffers: [],
+    rentalBids: [],
+    activeRentals: [],
   };
 }
 
 // Append a price to history respecting the MAX_HISTORY cap.
+//
+// returnHistory is maintained as its own ring buffer so it can hold a full
+// MAX_HISTORY samples rather than being derived from (and thus bounded by)
+// the price window. Previously the derivation collapsed to
+// prices.length - 1 samples — a silent off-by-one for any consumer that
+// expected its own MAX_HISTORY of returns — and rebuilt every tick in O(N).
 export function pushPrice(state, newPrice) {
+  const prevPrice = state.prices[state.prices.length - 1];
   const prices = [...state.prices, newPrice].slice(-MAX_HISTORY);
-  const returnHistory = prices.length > 1
-    ? prices.slice(1).map((p, i) => Math.log(p / prices[i]))
-    : state.returnHistory;
+
+  let returnHistory = state.returnHistory;
+  if (Number.isFinite(prevPrice) && prevPrice > 0 && Number.isFinite(newPrice) && newPrice > 0) {
+    const r = Math.log(newPrice / prevPrice);
+    if (Number.isFinite(r)) {
+      returnHistory = [...state.returnHistory, r].slice(-MAX_HISTORY);
+    }
+  }
+
   return { ...state, prices, returnHistory };
 }

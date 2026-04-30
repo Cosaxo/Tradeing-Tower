@@ -1,5 +1,10 @@
 // Integration test: drive several medium-epoch cycles through the core
 // modules end-to-end and assert that state converges and stays bounded.
+//
+// Phase-5 trimmed loop: price → regime → NPCs → auction → pool settle.
+// Strips removed; insurance markets / reinsurance / TT redemption are
+// covered by their own unit-test suites and exercised in the App-level
+// useEpochLoop integration.
 
 import { describe, it, expect } from "vitest";
 import { ACTIVE_PAIRS } from "../../constants/assets.js";
@@ -11,8 +16,6 @@ import { runAuction } from "../auction.js";
 import { settleDominantPool } from "../pool.js";
 import { applyNpcSettlement, tickNpcRestock, isNpcActive, updateNpcRegime } from "../npcs.js";
 import { generateNpcOrders } from "../npcMarkets.js";
-import { settleImbalanceContracts, settleEntropyContracts } from "../contracts.js";
-import { settleStrips } from "../strips.js";
 import { getEffectiveCap } from "../esma.js";
 
 describe("integration: 10 medium epochs", () => {
@@ -73,36 +76,19 @@ describe("integration: 10 medium epochs", () => {
 
       const npcOrders = generateNpcOrders({
         npcs: state.npcs.filter(isNpcActive),
-        existingOffers: state.lendingOffers,
         longMargin: auction.matched.reduce((s, m) => s + m.margin, 0),
         shortMargin: 0,
         regime: state.regime,
         normWeights: auction.normWeights,
-        avgEntropyMult: 1,
         realizedSigma: state.realizedSigma,
         returnHistory: state.returnHistory,
         epochIndex: epoch,
       });
 
-      state.imbalanceContracts = settleImbalanceContracts(
-        [...state.imbalanceContracts, ...npcOrders.imbalanceBuys],
-        1000,
-        1000
-      ).settled.filter((c) => !c.expired);
-
-      state.entropyContracts = settleEntropyContracts(
-        [...state.entropyContracts, ...npcOrders.entropyBuys],
-        auction.normWeights,
-        1
-      ).settled.filter((c) => !c.expired);
-
-      state.strips = settleStrips(
-        [...state.strips, ...npcOrders.stripBuys],
-        0.01,
-        state.realizedSigma,
-        state.returnHistory,
-        10000
-      ).settled;
+      // Strips removed in Phase 5; rental bids and insurance settlement
+      // are tested separately. Just retain npcOrders.rentalBids for
+      // shape sanity here.
+      void npcOrders;
 
       state.auctionResult = auction;
       state.smileParams = auction.smileParams;

@@ -37,12 +37,19 @@ export function gbmStepMeanReverting(price, mu, sigma, meanLevel, speed = 0.15) 
 }
 
 // Commodity GBM with slow mean-reversion and supply/demand shocks.
+// Shock magnitude is clamped at 3σ so Gaussian tails can't produce
+// implausible ±10σ intraday moves that mass-liquidate the book during
+// otherwise calm regimes.
+const COMMODITY_SHOCK_SIGMA_CAP = 3;
 export function gbmStepCommodity(price, mu, sigma, meanLevel) {
   const noise = boxMuller();
   const speed = 0.03;
   const drift = (speed * (meanLevel - price) * price) / meanLevel + mu * price;
-  const shock =
-    Math.random() < 0.03 ? (Math.random() > 0.5 ? 1 : -1) * sigma * 2 * Math.abs(boxMuller()) : 0;
+  let shock = 0;
+  if (Math.random() < 0.03) {
+    const magnitude = Math.min(COMMODITY_SHOCK_SIGMA_CAP, Math.abs(boxMuller()));
+    shock = (Math.random() > 0.5 ? 1 : -1) * sigma * 2 * magnitude;
+  }
   return Math.max(
     0.001,
     price * Math.exp(drift / price - 0.5 * sigma * sigma + sigma * noise) * (1 + shock)

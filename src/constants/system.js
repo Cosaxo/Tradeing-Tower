@@ -10,9 +10,21 @@ export const GRACE_MS = 800;
 // - Fast   (~1s):  safety monitoring (deterministic barrier checks)
 // - Medium (~6s):  auction + contract settlement
 // - Slow   (~30s): analytics, pool settlement, parameter adaptation (every 5th medium)
+//
+// Insurance settles on its own rarer, prime-stride cadence so depositors
+// see predictable, chunky yield steps instead of a new number every 30s —
+// and the prime stride keeps insurance out of sync with analytics (5·23 =
+// 115 medium ticks ≈ 11.5 min between any alignment).
+//
+// Tower Tether redemption runs on yet another prime stride — much longer
+// (~monthly in sim-days) so the queue creates real liquidity pressure
+// and TT functions like a bank's redemption window. 31 is coprime with
+// both 5 and 23.
 export const FAST_MS = 1000;
 export const MEDIUM_MS = 6000;
 export const SLOW_EVERY = 5;
+export const INSURANCE_EVERY = 23;
+export const REDEMPTION_EVERY = 31;
 
 // History pruning: keep last N snapshots per pair to bound memory growth.
 export const MAX_HISTORY = 200;
@@ -31,13 +43,6 @@ export const POOL_STABILITY_FEE = 0.02; // 2% of tip revenue routed to pool each
 export const POOL_MAX_CLAIM_RATIO = 0.5;
 export const POOL_LOCKUP_EPOCHS = 50;
 export const POOL_DEPTH_MAX = 2.0;
-
-// Imbalance contracts
-export const IMB_MAX_DURATION = 30;
-export const IMB_PAYOUT_BASE = 1000;
-
-// Entropy contracts
-export const ENT_LAMBDA = 0.15;
 
 // Loss strip
 export const STRIP_INSURER_BOOST = 0.12;
@@ -63,39 +68,27 @@ export const ADAPTIVE_LR = 0.005;
 export const ADAPTIVE_MU_SCALE_INIT = 0.7;
 export const ADAPTIVE_SIGMA_SCALE_INIT = 0.12;
 
-// Credit facility — whitepaper §7.4 and Appendix B.
-export const CREDIT_BASE_RISK_BUDGET = 50;
-
-// Performance gates (binary; all must pass for credit eligibility).
-export const CREDIT_GATE_SORTINO = 0.8;
-export const CREDIT_GATE_CALMAR = 0.5;
-export const CREDIT_GATE_MAX_DD = 0.15;
-export const CREDIT_GATE_WIN_RATE = 0.48;
-export const CREDIT_GATE_COMPOSITION = 0.2;
-export const CREDIT_ROLLING_WINDOW = 30;
-
-// Multiplier formula coefficients.
-export const M_BASELINE = 0.5;
-export const M_MAX = 2.5;
-export const COMP_WEIGHT = 0.7;
-export const PERF_WEIGHT = 0.3;
-export const COMP_AMPLITUDE = 2.0;
-export const PERF_AMPLITUDE = 1.0;
-
-// Composition sub-score weights (sum to 1.0).
-export const W_HEDGE = 0.30;
-export const W_CONCENTRATION = 0.25;
-export const W_TAIL = 0.20;
-export const W_DIVERSITY = 0.15;
-export const W_DISCIPLINE = 0.10;
-
-// Tail-coverage specifics.
-export const TAIL_COVERAGE_TARGET = 0.15;
-export const TAIL_HEDGE_THRESHOLD = 0.3;
-
-// Configuration drift that triggers deleveraging schedule.
-export const CREDIT_DRIFT_THRESHOLD = 0.5;
-export const CREDIT_DELEVERAGE_EPOCHS = 5;
-
 // Soft-close boundary: last 20% of each medium epoch is frozen for deterministic clear
 export const SOFT_CLOSE_PCT = 0.8;
+
+// -----------------------------------------------------------------------
+// Tower Tether (TT) — fully-collateralized stablecoin
+// -----------------------------------------------------------------------
+
+// Mint cap = deposit × LTV × MINT_COEFFICIENT. Conservative default;
+// half of LTV-adjusted deposit available as TT.
+export const MINT_COEFFICIENT = 0.5;
+
+// Minimum LTV required to mint at all. Forces diversification before a
+// depositor can extract circulating-stablecoin claims.
+export const MINT_LTV_GATE = 0.6;
+
+// Standard redemption capacity per cycle as a fraction of total TT
+// supply at cycle start. Anything beyond this either waits in queue
+// or pays the express penalty.
+export const STANDARD_REDEMPTION_CAP_PCT = 0.10;
+
+// Express tier penalty rate — fraction of redeemed amount the holder
+// forfeits to skip the queue / clear above the cap. Penalty proceeds
+// flow to the insurance pool (depositors win when others panic).
+export const EXPRESS_PENALTY_RATE = 0.05;

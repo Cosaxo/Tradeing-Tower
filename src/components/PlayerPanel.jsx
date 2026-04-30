@@ -12,8 +12,9 @@ export function PlayerPanel({
   onUpdate,
   activePair,
   cap,
-  creditScore,
-  creditMultiplier = 0,
+  poolLtv = null,
+  availablePoolCredit = 0,
+  deployedPoolCredit = 0,
 }) {
   function field(key, value, min, max, step = 0.1) {
     return (
@@ -51,7 +52,7 @@ export function PlayerPanel({
           <button
             key={p.label}
             onClick={() => onUpdate(p.config)}
-            className="text-[10px] font-mono px-2 py-0.5 rounded border border-gray-700 bg-gray-800 hover:border-indigo-500 hover:text-indigo-300 transition-colors"
+            className="text-[10px] font-mono px-2 py-0.5 rounded border border-gray-700 bg-gray-800 text-gray-300 hover:border-indigo-500 hover:text-indigo-200 hover:bg-gray-700 transition-colors"
           >
             {p.label}
           </button>
@@ -71,8 +72,10 @@ export function PlayerPanel({
           </div>
         </div>
         <div>
-          <div className="text-[10px] text-gray-500">Credit</div>
-          <div className="text-sm font-mono text-indigo-400">{((creditScore ?? 0) * 100).toFixed(0)}%</div>
+          <div className="text-[10px] text-gray-500">LTV</div>
+          <div className="text-sm font-mono text-indigo-400">
+            {(poolLtv?.ltv ?? 0).toFixed(2)}
+          </div>
         </div>
       </div>
 
@@ -91,12 +94,13 @@ export function PlayerPanel({
           <button
             key={s}
             onClick={() => onUpdate({ side: s, strategy: s === "LONG" ? "FIXED_LONG" : "FIXED_SHORT" })}
+            aria-pressed={player.side === s}
             className={`flex-1 text-xs font-mono py-1 rounded border transition-colors ${
               player.side === s
                 ? s === "LONG"
                   ? "border-emerald-500 bg-emerald-950 text-emerald-300"
                   : "border-red-500 bg-red-950 text-red-300"
-                : "border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-500"
+                : "border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-500 hover:bg-gray-700 hover:text-gray-200"
             }`}
           >
             {s}
@@ -134,17 +138,16 @@ export function PlayerPanel({
         </div>
       )}
 
-      {creditMultiplier > 1 && (() => {
-        const deployed = (player.margin ?? 0) * (creditMultiplier - 1);
-        const atFloor = shouldUnwindCredit(player.margin ?? 0, deployed);
+      {(deployedPoolCredit > 0 || availablePoolCredit > 0) && (() => {
+        const atFloor = shouldUnwindCredit(player.margin ?? 0, deployedPoolCredit);
         return (
           <div
             className={`text-[10px] font-mono text-center ${
               atFloor ? "text-red-400 animate-pulse" : "text-indigo-400"
             }`}
           >
-            Credit {creditMultiplier.toFixed(2)}× · effective $
-            {((player.margin ?? 0) * creditMultiplier).toFixed(0)}
+            Pool credit · deployed ${deployedPoolCredit.toFixed(0)} · avail $
+            {availablePoolCredit.toFixed(0)}
             {atFloor && " · HARD FLOOR"}
           </div>
         );

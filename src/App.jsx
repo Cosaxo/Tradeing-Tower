@@ -1,21 +1,36 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { ACTIVE_PAIRS } from "./constants/assets.js";
 import { initPairState } from "./state/pairState.js";
+import { initInsuranceState } from "./state/insuranceState.js";
 import { useEpochLoop } from "./hooks/useEpochLoop.js";
 import { useToast } from "./hooks/useToast.js";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts.js";
 import { usePersistentState } from "./hooks/usePersistentState.js";
-import { assessCreditQualification, calcPairCreditEligibility } from "./lib/credit.js";
+import { calcPairCreditEligibility } from "./lib/credit.js";
 import { calcSystemSolvencyBuffer, propagateShock, applyShockToPositions } from "./lib/stress.js";
 import { calcYieldRouterSuggestions } from "./lib/yieldRouter.js";
+import { calcAllocationLtv, calcAvailableCredit } from "./lib/ltv.js";
+import {
+  setUserAllocation,
+  applyAllocations,
+  allocationDiversificationStats,
+  propagateLapPnl,
+} from "./lib/allocations.js";
+import { postReinsuranceBuyer } from "./lib/reinsurance.js";
+import { makePairedLap, isPairedLap, calcPairedLapClosePnl } from "./lib/pairedLap.js";
+import { publishLegOffer, terminateRental } from "./lib/rentalMarket.js";
+import {
+  initTtState,
+  mintTT,
+  transferTT,
+  submitRedemption,
+  cancelRedemption,
+  mintCapacity,
+} from "./lib/towerTether.js";
 import { getEffectiveCap } from "./lib/esma.js";
-import { initStrip } from "./lib/strips.js";
-import { createOffer, matchBorrowRequest, cancelOffer } from "./lib/lending.js";
 import { initLedger } from "./lib/roleLedger.js";
 import { initTags, tryTag, untag, freeMargin } from "./lib/capitalTags.js";
-import { initGovernance } from "./lib/governance.js";
 import { cx } from "./lib/math.js";
-import { POOL_LOCKUP_EPOCHS } from "./constants/system.js";
 
 import { InstrumentSelector } from "./components/InstrumentSelector.jsx";
 import { PriceChart } from "./components/PriceChart.jsx";
@@ -27,23 +42,48 @@ import { StressPanel } from "./components/StressPanel.jsx";
 import { LogicView } from "./components/LogicView.jsx";
 import { MetricsPanel } from "./components/MetricsPanel.jsx";
 import { NpcPanel } from "./components/NpcPanel.jsx";
-import { ContractDesk } from "./components/ContractDesk.jsx";
-import { StripDesk } from "./components/StripDesk.jsx";
-import { PoolDesk } from "./components/PoolDesk.jsx";
+import { TtDesk } from "./components/TtDesk.jsx";
+import { InsuranceDesk } from "./components/InsuranceDesk.jsx";
+import { GettingStarted } from "./components/GettingStarted.jsx";
 import { TradeHistory } from "./components/TradeHistory.jsx";
 import { SpeedControl } from "./components/SpeedControl.jsx";
 import { CorrelationHeatmap } from "./components/CorrelationHeatmap.jsx";
 import { RegimeTimeline } from "./components/RegimeTimeline.jsx";
-import { LendingDesk } from "./components/LendingDesk.jsx";
 import { NotificationHistory } from "./components/NotificationHistory.jsx";
 import { Tutorial } from "./components/Tutorial.jsx";
 import { FeeFlow } from "./components/FeeFlow.jsx";
 import { RoleLedger } from "./components/RoleLedger.jsx";
-import { GovernancePanel } from "./components/GovernancePanel.jsx";
+
+// Generate a stable id for pool-funded LAPs so position close routes
+// the linkage record correctly. (The pre-Phase-5 makeLapId helper lived
+// in poolLinkage.js, which has been deleted.)
+let _lapCtr = 0;
+function makeLapId() {
+  return `LAP-${Date.now().toString(36)}-${(++_lapCtr).toString(36)}`;
+}
 
 const INITIAL_PAIR_STATES = Object.fromEntries(
   ACTIVE_PAIRS.map((pk) => [pk, initPairState(pk)])
 );
+
+// Small at-a-glance chip used in the header summary line. Clickable
+// when an `onClick` is supplied; otherwise it's just a static label.
+function HeaderChip({ label, value, color, title, onClick }) {
+  const cls = `text-[10px] font-mono px-2 py-0.5 rounded border ${color} ${onClick ? "cursor-pointer hover:brightness-110" : ""}`;
+  return (
+    <span
+      className={cls}
+      title={title}
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onClick={onClick}
+      onKeyDown={onClick ? (e) => (e.key === "Enter" || e.key === " ") && onClick() : undefined}
+    >
+      <span className="text-gray-500 mr-1">{label}</span>
+      {value}
+    </span>
+  );
+}
 
 const INITIAL_PLAYER = {
   id: "You",
@@ -59,7 +99,7 @@ const INITIAL_PLAYER = {
   tags: initTags(), // §10.1 — capital accumulates roles via tags, not transfers
 };
 
-const TABS = ["Chart", "Auction", "Derivatives", "Lending", "Credit", "Stress", "Markets", "Governance", "History", "Log"];
+const TABS = ["Chart", "Auction", "Insurance", "Credit", "Stress", "Markets", "History", "Log"];
 
 export default function App() {
   const [pairStates, setPairStates] = useState(INITIAL_PAIR_STATES);
@@ -71,10 +111,6 @@ export default function App() {
   const [mobileNav, setMobileNav] = useState(null); // 'left' | 'right' | null
   const [shockResults, setShockResults] = useState(null);
   const [openPositions, setOpenPositions, clearPositions] = usePersistentState("tt.positions", []);
-  const [initialPositions, setInitialPositions, clearInitialPositions] = usePersistentState(
-    "tt.initialPositions",
-    []
-  );
   const [equityHistory, setEquityHistory, clearEquity] = usePersistentState(
     "tt.equity",
     [INITIAL_PLAYER.margin]
@@ -84,11 +120,14 @@ export default function App() {
     "tt.roleLedger",
     initLedger()
   );
-  const [governance, setGovernance, clearGovernance] = usePersistentState(
-    "tt.governance",
-    initGovernance()
+  const [ttState, setTtState, clearTt] = usePersistentState(
+    "tt.towerTether",
+    initTtState()
   );
-
+  const [insuranceState, setInsuranceState, clearInsurance] = usePersistentState(
+    "tt.insurance",
+    initInsuranceState()
+  );
   const { toasts, history, addToast, clearHistory } = useToast();
   const [showTutorial, setShowTutorial] = useState(false);
 
@@ -97,6 +136,11 @@ export default function App() {
     setPairStates,
     player,
     setPlayer,
+    openPositions,
+    ttState,
+    setTtState,
+    insuranceState,
+    setInsuranceState,
     setLogs,
     addToast,
     running,
@@ -126,57 +170,73 @@ export default function App() {
   const activePS = pairStates[activePair];
   const { effectiveCap: cap } = getEffectiveCap(activePair, activePS?.realizedSigma ?? 0.02);
 
-  // Derived auction-side statistics.
-  const longMargin = useMemo(
-    () =>
-      (activePS?.auctionResult?.matched ?? [])
-        .filter((m) => m.longId)
-        .reduce((s, m) => s + m.margin, 0),
-    [activePS]
+  // Allocation diversification stats — the new replacement for the
+  // pre-Phase-5 "pool deposit" derivation. The user's collateral lives
+  // distributed across the insurance markets they've allocated into.
+  const allocStats = useMemo(
+    () => allocationDiversificationStats({ markets: insuranceState.markets, userId: player.id }),
+    [insuranceState.markets, player.id]
   );
-  const shortMargin = useMemo(
-    () =>
-      (activePS?.auctionResult?.matched ?? [])
-        .filter((m) => m.shortId)
-        .reduce((s, m) => s + m.margin, 0),
-    [activePS]
-  );
+  // "Pool deposit amount" in the legacy sense → total stake the player
+  // has placed across all insurance markets.
+  const poolDepositAmount = allocStats.totalStake;
 
-  const normWeights = activePS?.auctionResult?.normWeights ?? [];
-  const avgEntropyMult =
-    normWeights.length > 0
-      ? normWeights.reduce((s, w) => s + w, 0) / normWeights.length
-      : 1;
-
-  // Credit assessment driven by actual equity history.
-  const creditAssessment = useMemo(() => {
-    const corrMap = activePS?.correlationMap ?? {};
-    const history = equityHistory.map((e) => ({
-      users: [{ id: "You", margin: e }],
-    }));
-    return assessCreditQualification(
-      history,
-      openPositions,
-      corrMap,
-      activePair,
-      initialPositions
+  // Deployed credit — sum of creditConsumed across pool-linked LAPs.
+  const deployedPoolCredit = useMemo(() => {
+    return openPositions.reduce(
+      (sum, pos) =>
+        pos?.poolLinkage && pos.poolLinkage.depositorId === player.id
+          ? sum + (pos.poolLinkage.creditConsumed ?? 0)
+          : sum,
+      0
     );
-  }, [equityHistory, openPositions, initialPositions, activePair, activePS]);
+  }, [openPositions, player.id]);
 
+  const poolLtvInfo = useMemo(
+    () => calcAllocationLtv({ markets: insuranceState.markets, userId: player.id }),
+    [insuranceState.markets, player.id]
+  );
+  const availablePoolCredit = useMemo(
+    () =>
+      calcAvailableCredit({
+        markets: insuranceState.markets,
+        userId: player.id,
+        deployedCredit: deployedPoolCredit,
+      }),
+    [insuranceState.markets, player.id, deployedPoolCredit]
+  );
+
+  // pairKey → { activeRentals, rentalOffers } slice for the rental UI.
+  const rentalsByPair = useMemo(() => {
+    const out = {};
+    for (const pk of ACTIVE_PAIRS) {
+      const ps = pairStates[pk];
+      if (!ps) continue;
+      out[pk] = {
+        activeRentals: ps.activeRentals ?? [],
+        rentalOffers: ps.rentalOffers ?? [],
+      };
+    }
+    return out;
+  }, [pairStates]);
+
+  // Pool LTV is the only credit signal now (legacy credit assessment cut).
+  // Eligibility remains a per-pair structural check: don't open a third
+  // position on a pair that already holds long+short.
   const creditEligibility = useMemo(
     () =>
       Object.fromEntries(
-        ACTIVE_PAIRS.map((pk) => [
-          pk,
-          calcPairCreditEligibility(pk, creditAssessment.creditScore, openPositions),
-        ])
+        ACTIVE_PAIRS.map((pk) => [pk, calcPairCreditEligibility(pk, openPositions)])
       ),
-    [creditAssessment, openPositions]
+    [openPositions]
   );
 
   const solvency = useMemo(
-    () => calcSystemSolvencyBuffer(pairStates, activePS?.insurancePool?.totalDeposits ?? 0),
-    [pairStates, activePS]
+    // Old per-pair `insurancePool.totalDeposits` is gone; pass 0 as the
+    // fallback insurance pool buffer since solvency is now driven by
+    // open-position margin coverage alone.
+    () => calcSystemSolvencyBuffer(pairStates, 0),
+    [pairStates]
   );
 
   // Circuit breaker: halt the loop when system solvency collapses.
@@ -208,8 +268,10 @@ export default function App() {
         ];
       })
     );
-    return calcYieldRouterSuggestions(states, openPositions, creditAssessment.creditScore);
-  }, [pairStates, openPositions, creditAssessment]);
+    // Yield router uses LTV as the "how confident is this trader" boost,
+    // replacing the old legacy creditScore.
+    return calcYieldRouterSuggestions(states, openPositions, poolLtvInfo?.ltv ?? 0);
+  }, [pairStates, openPositions, poolLtvInfo]);
 
   function handleRunShock() {
     const corrMap = activePS?.correlationMap ?? {};
@@ -226,155 +288,32 @@ export default function App() {
     addToast(`Shock: ${result.liquidated} liq, $${result.systemLoss?.toFixed(0)} loss`, "warning");
   }
 
-  // --- Contract / strip / pool handlers (§10.1 same-capital semantics) ---
+  // --- Allocation handler (§10.1 same-capital semantics) ---
   //
-  // Cash-flow operations (pay premium, receive payout) change `margin`.
-  // Role operations (deposit, open position, post offer) only tag a slice
-  // of margin as serving that role — margin itself is untouched.
-
-  function handleBuyImbalance({ size, direction, strikeImbalance, premium }) {
-    const id = `IMB-${Date.now()}`;
-    const cost = size * premium;
-    // Premium is a real cash flow (paid to insurer).
-    if (cost > player.margin) return;
-    // Collateralise the contract: tag `size` as backing this obligation.
-    const newTags = tryTag(player.margin - cost, player.tags, "contractCollateral", size);
-    if (!newTags) {
-      addToast("Insufficient free margin to collateralise contract", "warning");
+  // The user declares a percentage allocation across insurance markets.
+  // The backing capital is then materialised as insurer-side stakes on
+  // the corresponding markets. Margin is untouched — these stakes serve
+  // the insurer role while the same dollars also back LAP credit and TT
+  // mints (multi-role capital).
+  function handleSetAllocation(marketAllocations) {
+    const r = setUserAllocation(insuranceState.allocations, player.id, marketAllocations);
+    if (!r.ok) {
+      addToast(`Allocation failed: ${r.reason}`, "warning");
       return;
     }
-    setPairStates((prev) => {
-      const ps = prev[activePair];
-      if (!ps) return prev;
-      return {
-        ...prev,
-        [activePair]: {
-          ...ps,
-          imbalanceContracts: [
-            ...ps.imbalanceContracts,
-            { id, buyerId: player.id, size, direction, strikeImbalance, premium },
-          ],
-        },
-      };
+    const totalCapital = Math.max(0, freeMargin(player.margin, player.tags));
+    const applied = applyAllocations({
+      markets: insuranceState.markets,
+      userId: player.id,
+      userAllocation: r.allocations.byUser[player.id],
+      totalCapital,
     });
-    setPlayer((p) => ({ ...p, margin: p.margin - cost, tags: newTags }));
-    addToast(`Imbalance ${direction} · premium $${cost.toFixed(2)}`, "info");
-  }
-
-  function handleBuyEntropy({ size, lockedMult, premium }) {
-    const id = `ENT-${Date.now()}`;
-    const cost = size * premium;
-    if (cost > player.margin) return;
-    const newTags = tryTag(player.margin - cost, player.tags, "contractCollateral", size);
-    if (!newTags) {
-      addToast("Insufficient free margin to collateralise contract", "warning");
-      return;
-    }
-    setPairStates((prev) => {
-      const ps = prev[activePair];
-      if (!ps) return prev;
-      return {
-        ...prev,
-        [activePair]: {
-          ...ps,
-          entropyContracts: [
-            ...ps.entropyContracts,
-            { id, buyerId: player.id, size, lockedMult, premium },
-          ],
-        },
-      };
+    setInsuranceState({
+      ...insuranceState,
+      allocations: r.allocations,
+      markets: applied.markets,
     });
-    setPlayer((p) => ({ ...p, margin: p.margin - cost, tags: newTags }));
-    addToast(`Entropy lock ${lockedMult.toFixed(1)}× · premium $${cost.toFixed(2)}`, "info");
-  }
-
-  function handleBuyStrip(params) {
-    const strip = {
-      ...initStrip({
-        id: `STRIP-${Date.now()}`,
-        ...params,
-        yieldModel: activePS?.yieldModel,
-      }),
-      buyerId: player.id,
-    };
-    const cost = strip.margin * strip.premium;
-    if (cost > player.margin) return;
-    const tagAmount = strip.margin * strip.protectedFraction;
-    const newTags = tryTag(player.margin - cost, player.tags, "contractCollateral", tagAmount);
-    if (!newTags) {
-      addToast("Insufficient free margin to collateralise strip", "warning");
-      return;
-    }
-    setPairStates((prev) => {
-      const ps = prev[activePair];
-      if (!ps) return prev;
-      return { ...prev, [activePair]: { ...ps, strips: [...ps.strips, strip] } };
-    });
-    setPlayer((p) => ({ ...p, margin: p.margin - cost, tags: newTags }));
-    addToast(`Strip ${(strip.protectedFraction * 100).toFixed(0)}% × ${strip.epochs}ep · premium $${cost.toFixed(2)}`, "info");
-  }
-
-  // Pool deposit is a TAG — no margin transfer (§10.1).
-  function handleDeposit(amount) {
-    const newTags = tryTag(player.margin, player.tags, "poolDeposit", amount);
-    if (!newTags) {
-      addToast("Insufficient free margin to tag for pool", "warning");
-      return;
-    }
-    setPairStates((prev) => {
-      const ps = prev[activePair];
-      if (!ps) return prev;
-      const pool = ps.insurancePool;
-      const existing = pool.deposits[player.id] ?? { amount: 0, depositEpoch: ps.epochIndex, lockupRemaining: 0 };
-      return {
-        ...prev,
-        [activePair]: {
-          ...ps,
-          insurancePool: {
-            ...pool,
-            deposits: {
-              ...pool.deposits,
-              [player.id]: {
-                amount: existing.amount + amount,
-                depositEpoch: ps.epochIndex,
-                lockupRemaining: POOL_LOCKUP_EPOCHS,
-              },
-            },
-            totalDeposits: pool.totalDeposits + amount,
-          },
-        },
-      };
-    });
-    setPlayer((p) => ({ ...p, tags: newTags }));
-    addToast(`Tagged $${amount} as pool collateral (margin untouched)`, "info");
-  }
-
-  // Pool withdraw releases the tag — no margin transfer.
-  function handleWithdraw(amount) {
-    setPairStates((prev) => {
-      const ps = prev[activePair];
-      if (!ps) return prev;
-      const pool = ps.insurancePool;
-      const existing = pool.deposits[player.id];
-      if (!existing || existing.lockupRemaining > 0 || existing.amount <= 0) return prev;
-      const take = Math.min(amount, existing.amount);
-      const newDeposits = { ...pool.deposits };
-      if (existing.amount - take <= 0.01) delete newDeposits[player.id];
-      else newDeposits[player.id] = { ...existing, amount: existing.amount - take };
-      return {
-        ...prev,
-        [activePair]: {
-          ...ps,
-          insurancePool: {
-            ...pool,
-            deposits: newDeposits,
-            totalDeposits: Math.max(0, pool.totalDeposits - take),
-          },
-        },
-      };
-    });
-    setPlayer((p) => ({ ...p, tags: untag(p.tags, "poolDeposit", amount) }));
-    addToast(`Released $${amount} pool tag (margin untouched)`, "info");
+    addToast("Allocation updated", "info");
   }
 
   function handleClosePosition(i) {
@@ -383,129 +322,286 @@ export default function App() {
     const ps = pairStates[pos.pairKey];
     const priceNow = ps?.prices?.slice(-1)[0] ?? 1;
     const priceThen = pos.openPrice ?? priceNow;
-    const logRet = Math.log(priceNow / priceThen);
-    const direction = pos.side === "LONG" ? 1 : -1;
-    const pnl = pos.margin * pos.leverage * (Math.exp(direction * logRet) - 1);
+
+    // Two close formulas. Single LAPs use the directional log-return
+    // formula; paired LAPs decompose into long + short legs that
+    // largely cancel, leaving positive gamma. Both close atomically —
+    // a paired LAP can't be half-closed in Phase 2.
+    let pnl;
+    if (isPairedLap(pos)) {
+      const { netPnl } = calcPairedLapClosePnl(pos, priceNow);
+      pnl = netPnl;
+    } else {
+      const logRet = Math.log(priceNow / priceThen);
+      const direction = pos.side === "LONG" ? 1 : -1;
+      pnl = pos.margin * pos.leverage * (Math.exp(direction * logRet) - 1);
+    }
+
+    // Pool-linked LAPs propagate their P&L to the depositor's
+    // allocation stakes. Gains grow the stakes pro-rata; losses shrink
+    // them. (The legacy unlinkLapFromDeposit helper is gone — the new
+    // flow is one-shot and lives in `propagateLapPnl`.)
+    if (pos.poolLinkage && pos.poolLinkage.depositorId === player.id) {
+      const r = propagateLapPnl({
+        markets: insuranceState.markets,
+        userId: player.id,
+        lapPnl: pnl,
+      });
+      setInsuranceState({ ...insuranceState, markets: r.markets });
+    }
+
+    // Paired LAP close: terminate any active rentals on its legs and
+    // drop unmatched offers. Renters get any unspent rental margin
+    // back (added to the owner's accruedOwnerTips for clarity in the
+    // log; refunds to NPC margin happen via the loop on next tick).
+    if (isPairedLap(pos)) {
+      let ownerCreditFromTermination = 0;
+      setPairStates((prev) => {
+        const target = prev[pos.pairKey];
+        if (!target) return prev;
+        const stillActive = [];
+        for (const r of target.activeRentals ?? []) {
+          if (r.pairLapId === pos.id && r.active) {
+            const result = terminateRental(r);
+            if (result) ownerCreditFromTermination += result.finalOwnerCredit;
+          } else {
+            stillActive.push(r);
+          }
+        }
+        const remainingOffers = (target.rentalOffers ?? []).filter(
+          (o) => o.pairLapId !== pos.id
+        );
+        return {
+          ...prev,
+          [pos.pairKey]: {
+            ...target,
+            activeRentals: stillActive,
+            rentalOffers: remainingOffers,
+          },
+        };
+      });
+      if (ownerCreditFromTermination > 0) {
+        setPlayer((p) => ({
+          ...p,
+          margin: (p.margin ?? 0) + ownerCreditFromTermination,
+        }));
+      }
+    }
 
     setOpenPositions((prev) => prev.filter((_, idx) => idx !== i));
     setTradeLog((prev) => [...prev, { ...pos, pnl, closedPrice: priceNow }]);
-    // P&L is a real cash flow; auction-margin tag is released.
+    // P&L is a real cash flow; auction-margin tag is released. Paired
+    // LAPs untag the FULL `pos.margin` (both legs were tagged together
+    // at open time).
     setPlayer((p) => ({
       ...p,
       margin: p.margin + pnl,
       tags: untag(p.tags, "auctionMargin", pos.margin),
     }));
+    const desc = isPairedLap(pos)
+      ? `${pos.pairKey} PAIRED`
+      : `${pos.pairKey} ${pos.side}`;
     addToast(
-      `Closed ${pos.pairKey} ${pos.side}: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`,
+      `Closed ${desc}: ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}${pos.poolLinkage ? " (pool-linked)" : ""}`,
       pnl >= 0 ? "info" : "warning"
     );
   }
 
-  function handleOpenPosition() {
+  function handleOpenPosition(opts = {}) {
+    const { usePoolCredit = false, paired = false } = opts;
     const priceNow = activePS?.prices?.slice(-1)[0] ?? 1;
-    const size = Math.min(1000, freeMargin(player.margin, player.tags) * 0.2);
-    if (size < 100) {
+
+    // For paired LAPs, the user funds BOTH legs — `requiredCapital` is
+    // 2× the displayed size. We size the long-leg at the same default
+    // as a single LAP, so a paired LAP costs twice as much capital.
+    const legSize = Math.min(1000, freeMargin(player.margin, player.tags) * 0.2);
+    if (legSize < 100) {
       addToast("Not enough free margin to open position", "warning");
       return;
     }
-    // Tag `size` as auction collateral — margin is untouched (§10.1).
-    const newTags = tryTag(player.margin, player.tags, "auctionMargin", size);
-    if (!newTags) {
-      addToast("Insufficient free margin", "warning");
-      return;
+    const requiredCapital = paired ? legSize * 2 : legSize;
+
+    // Pool-credit path: verify headroom for the FULL required capital
+    // (both legs if paired). One pool linkage covers the whole paired
+    // LAP — both legs share a single linkage id. The linkage tag now
+    // identifies the position only; the actual collateral lookup runs
+    // through allocations on close (see handleClosePosition).
+    let poolLinkage = null;
+    if (usePoolCredit) {
+      if (availablePoolCredit < requiredCapital) {
+        addToast(
+          `Not enough pool credit: $${availablePoolCredit.toFixed(0)} available, need $${requiredCapital.toFixed(0)}${paired ? " (paired = 2 legs)" : ""}`,
+          "warning"
+        );
+        return;
+      }
+      poolLinkage = {
+        depositorId: player.id,
+        lapId: makeLapId(),
+        pairKey: activePair,
+        creditConsumed: requiredCapital,
+      };
     }
-    const newPos = {
-      pairKey: activePair,
-      side: player.side,
-      leverage: player.leverage,
-      margin: size,
-      openPrice: priceNow,
-    };
+
+    // Direct-path tagging: tag the full required capital once. Paired
+    // LAPs consume 2× a single LAP's capital but share one tag entry
+    // (auction margin is fungible across the legs).
+    let newTags = player.tags;
+    if (!usePoolCredit) {
+      const tagged = tryTag(player.margin, player.tags, "auctionMargin", requiredCapital);
+      if (!tagged) {
+        addToast("Insufficient free margin", "warning");
+        return;
+      }
+      newTags = tagged;
+    }
+
+    const newPos = paired
+      ? makePairedLap({
+          pairKey: activePair,
+          margin: requiredCapital, // total — each leg gets requiredCapital/2
+          leverage: player.leverage,
+          openPrice: priceNow,
+          openedAtEpoch: activePS?.epochIndex ?? 0,
+          poolLinkage,
+        })
+      : {
+          pairKey: activePair,
+          side: player.side,
+          leverage: player.leverage,
+          margin: legSize,
+          openPrice: priceNow,
+          openedAtEpoch: activePS?.epochIndex ?? 0,
+          poolLinkage,
+        };
+
+    // Auto-publish rental offers for both legs of a paired LAP. Owners
+    // can earn tip income when NPCs (or future humans) bid for
+    // directional exposure without paying full LAP capital. Pool
+    // linkage no longer mutates pair state — the linkage tag on the
+    // position itself is the only record needed.
+    if (paired) {
+      setPairStates((prev) => {
+        const target = prev[activePair];
+        if (!target) return prev;
+        const epochNow = target.epochIndex ?? 0;
+        const longOffer = publishLegOffer({
+          pairLapId: newPos.id,
+          legSide: "long",
+          ownerId: player.id,
+          pairKey: activePair,
+          publishedAtEpoch: epochNow,
+        });
+        const shortOffer = publishLegOffer({
+          pairLapId: newPos.id,
+          legSide: "short",
+          ownerId: player.id,
+          pairKey: activePair,
+          publishedAtEpoch: epochNow,
+        });
+        return {
+          ...prev,
+          [activePair]: {
+            ...target,
+            rentalOffers: [...(target.rentalOffers ?? []), longOffer, shortOffer],
+          },
+        };
+      });
+    }
+
     setOpenPositions((prev) => [...prev, newPos]);
-    setInitialPositions((prev) => (prev.length === 0 ? [newPos] : [...prev, newPos]));
-    setPlayer((p) => ({ ...p, tags: newTags }));
-    addToast(`Opened ${activePair} ${player.side} x${player.leverage.toFixed(1)} · $${size.toFixed(0)} tagged`, "info");
+    if (!usePoolCredit) setPlayer((p) => ({ ...p, tags: newTags }));
+    const labelTag = usePoolCredit ? "(pool credit)" : "tagged";
+    const label = paired
+      ? `Opened ${activePair} PAIRED x${player.leverage.toFixed(1)} · $${requiredCapital.toFixed(0)} ${labelTag} · legs auto-listed for rent`
+      : `Opened ${activePair} ${player.side} x${player.leverage.toFixed(1)} · $${legSize.toFixed(0)} ${labelTag}`;
+    addToast(label, "info");
   }
 
-  // --- Lending handlers (§10.1 same-capital semantics) ---
-  function handlePostLendingOffer({ amount, rate, duration }) {
-    const newTags = tryTag(player.margin, player.tags, "lendingOffered", amount);
-    if (!newTags) {
-      addToast("Insufficient free margin to offer", "warning");
+  // --- Tower Tether handlers ----------------------------------------------
+  function handleMintTT(amount) {
+    const result = mintTT({
+      ttState,
+      userId: player.id,
+      amount,
+      totalStake: poolDepositAmount,
+      ltv: poolLtvInfo.ltv,
+    });
+    if (!result.ok) {
+      addToast(`Mint failed: ${result.reason}`, "warning");
       return;
     }
-    const offer = createOffer(player.id, amount, rate, duration);
-    setPairStates((prev) => {
-      const ps = prev[activePair];
-      if (!ps) return prev;
-      return {
-        ...prev,
-        [activePair]: {
-          ...ps,
-          lendingOffers: [...ps.lendingOffers, { ...offer, createdEpoch: ps.epochIndex }],
-        },
-      };
+    setTtState(result.ttState);
+    // Auto-buy reinsurance: face = result.reinsuranceFacePerProduct
+    // on each of the 3 reinsurance products (the 1.5× rule, split
+    // across 3 sleeves). Each product post is independent.
+    setInsuranceState((prev) => {
+      const next = { ...prev };
+      next.reinsurance = prev.reinsurance.map((p) => {
+        const r = postReinsuranceBuyer({
+          product: p,
+          userId: player.id,
+          faceAmount: result.reinsuranceFacePerProduct,
+        });
+        return r.ok ? r.product : p;
+      });
+      return next;
     });
-    setPlayer((p) => ({ ...p, tags: newTags }));
-    addToast(`Tagged $${amount} @ ${(rate * 100).toFixed(3)}% as lending (margin untouched)`, "info");
+    addToast(`Minted ${amount.toFixed(0)} TT (auto-bought reinsurance)`, "info");
   }
 
-  function handleCancelLendingOffer(offerId) {
-    setPairStates((prev) => {
-      const ps = prev[activePair];
-      if (!ps) return prev;
-      const offer = ps.lendingOffers.find((o) => o.id === offerId);
-      if (!offer || offer.lenderId !== player.id) return prev;
-      const release = offer.remaining;
-      if (release > 0) {
-        setPlayer((p) => ({ ...p, tags: untag(p.tags, "lendingOffered", release) }));
-      }
-      return {
-        ...prev,
-        [activePair]: {
-          ...ps,
-          lendingOffers: cancelOffer(ps.lendingOffers, offerId),
-        },
-      };
+  function handleSendToMerchant(amount) {
+    const result = transferTT({
+      ttState,
+      fromId: player.id,
+      toId: "MERCHANT",
+      amount,
     });
-    addToast(`Offer ${offerId} cancelled`, "info");
+    if (!result.ok) {
+      addToast(`Send failed: ${result.reason}`, "warning");
+      return;
+    }
+    setTtState(result.ttState);
+    addToast(`Sent ${amount.toFixed(0)} TT to merchant`, "info");
   }
 
-  function handleBorrow({ amount, maxRate }) {
-    setPairStates((prev) => {
-      const ps = prev[activePair];
-      if (!ps) return prev;
-      const { borrows, updatedOffers, unfilled } = matchBorrowRequest(
-        ps.lendingOffers,
-        player.id,
-        amount,
-        maxRate
-      );
-      if (borrows.length === 0) {
-        addToast("No offers matched — try raising max rate", "warning");
-        return prev;
-      }
-      const filled = amount - unfilled;
-      addToast(`Borrowed $${filled.toFixed(0)} across ${borrows.length} offers`, "info");
-      return {
-        ...prev,
-        [activePair]: {
-          ...ps,
-          lendingOffers: updatedOffers,
-          lendingBorrows: [...ps.lendingBorrows, ...borrows],
-        },
-      };
+  function handleRedeem(amount, express = false) {
+    const result = submitRedemption({
+      ttState,
+      userId: player.id,
+      amount,
+      express,
+      currentEpoch: activePS?.epochIndex ?? 0,
     });
+    if (!result.ok) {
+      addToast(`Redeem failed: ${result.reason}`, "warning");
+      return;
+    }
+    setTtState(result.ttState);
+    addToast(
+      `Queued ${amount.toFixed(0)} TT for redemption (${express ? "EXPRESS — 5% penalty" : "standard"})`,
+      express ? "warning" : "info"
+    );
+  }
+
+  function handleCancelRedemption(requestId) {
+    const result = cancelRedemption({ ttState, requestId });
+    if (!result.ok) {
+      addToast(`Cancel failed: ${result.reason}`, "warning");
+      return;
+    }
+    setTtState(result.ttState);
+    addToast("Redemption cancelled, TT returned to wallet", "info");
   }
 
   function handleResetSession() {
     clearPlayer();
     clearPositions();
-    clearInitialPositions();
     clearEquity();
     clearTrades();
     clearLedger();
-    clearGovernance();
+    clearTt();
+    clearInsurance();
     setPairStates(INITIAL_PAIR_STATES);
     setLogs([]);
     setShockResults(null);
@@ -529,13 +625,11 @@ export default function App() {
     Space: () => setRunning((r) => !r),
     "1": () => setActiveTab("Chart"),
     "2": () => setActiveTab("Auction"),
-    "3": () => setActiveTab("Derivatives"),
-    "4": () => setActiveTab("Lending"),
-    "5": () => setActiveTab("Credit"),
-    "6": () => setActiveTab("Stress"),
-    "7": () => setActiveTab("Markets"),
-    "8": () => setActiveTab("Governance"),
-    "9": () => setActiveTab("History"),
+    "3": () => setActiveTab("Insurance"),
+    "4": () => setActiveTab("Credit"),
+    "5": () => setActiveTab("Stress"),
+    "6": () => setActiveTab("Markets"),
+    "7": () => setActiveTab("History"),
     "0": () => setActiveTab("Log"),
     "+": () => setSpeed((s) => Math.min(5, s * 2)),
     "-": () => setSpeed((s) => Math.max(0.5, s / 2)),
@@ -548,18 +642,67 @@ export default function App() {
       <header className="border-b border-gray-800 px-4 py-2 flex items-center gap-4 flex-wrap">
         <button
           onClick={() => setMobileNav("left")}
-          className="md:hidden text-xs font-mono px-2 py-1 rounded border border-gray-700 text-gray-300"
-          aria-label="Instruments"
+          className="md:hidden text-xs font-mono px-2 py-1 rounded border border-gray-700 bg-gray-800 text-gray-300 hover:bg-gray-700 hover:border-gray-500 transition-colors"
+          aria-label="Open instruments drawer"
         >
           ☰
         </button>
         <span className="font-syne text-lg text-indigo-400 tracking-tight">Trading Tower</span>
-        <span className="text-[10px] font-mono text-gray-600">LAP v2 · ESMA compliant</span>
-        {openPositions.length > 0 && (
-          <span className="text-[10px] font-mono text-emerald-400 px-2 py-0.5 rounded border border-emerald-900 bg-emerald-950">
-            {openPositions.length} open
-          </span>
-        )}
+
+        {/* Compact at-a-glance summary: margin / allocated / TT / positions.
+            Each chip is clickable where useful, and titles give detail on hover. */}
+        <div className="flex items-center gap-1 flex-wrap">
+          <HeaderChip
+            label="Margin"
+            value={`$${(player.margin ?? 0).toFixed(0)}`}
+            color="text-gray-200 border-gray-700 bg-gray-900"
+            title="Your free + tagged capital."
+          />
+          <HeaderChip
+            label="Allocated"
+            value={`$${poolDepositAmount.toFixed(0)}`}
+            color={
+              poolDepositAmount > 0
+                ? "text-amber-300 border-amber-900 bg-amber-950/60"
+                : "text-gray-500 border-gray-800 bg-gray-900"
+            }
+            title="Capital committed across insurance markets."
+            onClick={() => setActiveTab("Insurance")}
+          />
+          <HeaderChip
+            label="LTV"
+            value={(poolLtvInfo?.ltv ?? 0).toFixed(2)}
+            color={
+              (poolLtvInfo?.ltv ?? 0) >= 0.6
+                ? "text-emerald-300 border-emerald-900 bg-emerald-950/60"
+                : "text-gray-400 border-gray-800 bg-gray-900"
+            }
+            title="Allocation diversification → mint capacity factor."
+            onClick={() => setActiveTab("Credit")}
+          />
+          <HeaderChip
+            label="Positions"
+            value={`${openPositions.length}`}
+            color={
+              openPositions.length > 0
+                ? "text-indigo-300 border-indigo-900 bg-indigo-950/60"
+                : "text-gray-500 border-gray-800 bg-gray-900"
+            }
+            title="Open LAPs (single + paired)."
+            onClick={() => setActiveTab("Credit")}
+          />
+          <HeaderChip
+            label="TT"
+            value={`$${(ttState?.balances?.[player.id] ?? 0).toFixed(0)}`}
+            color={
+              (ttState?.balances?.[player.id] ?? 0) > 0
+                ? "text-emerald-200 border-emerald-700 bg-emerald-950"
+                : "text-gray-500 border-gray-800 bg-gray-900"
+            }
+            title={`Tower Tether wallet · outstanding mint $${(ttState?.mintedByUser?.[player.id] ?? 0).toFixed(0)} · queue ${(ttState?.redemptionQueue ?? []).filter((q) => q.userId === player.id).length}`}
+            onClick={() => setActiveTab("Insurance")}
+          />
+        </div>
         <div className="ml-auto flex items-center gap-3">
           <SpeedControl speed={speed} onSpeed={setSpeed} />
           <button
@@ -576,15 +719,16 @@ export default function App() {
           <NotificationHistory history={history} onClear={clearHistory} />
           <button
             onClick={() => setMobileNav("right")}
-            className="md:hidden text-xs font-mono px-2 py-1 rounded border border-indigo-700 text-indigo-300"
-            aria-label="Your Position"
+            className="md:hidden text-xs font-mono px-2 py-1 rounded border border-indigo-700 bg-indigo-950/60 text-indigo-300 hover:bg-indigo-900/60 transition-colors"
+            aria-label="Open position drawer"
           >
             pos
           </button>
           <button
             onClick={handleResetSession}
-            className="text-xs font-mono px-2 py-1 rounded border border-gray-700 text-gray-400 hover:text-gray-200 hover:border-gray-500 transition-colors"
+            className="text-xs font-mono px-2 py-1 rounded border border-gray-700 bg-gray-800 text-gray-400 hover:text-gray-200 hover:bg-gray-700 hover:border-gray-500 transition-colors"
             title="Reset session (R)"
+            aria-label="Reset session"
           >
             reset
           </button>
@@ -621,7 +765,8 @@ export default function App() {
                 <span className="text-xs font-mono text-gray-300">Instruments</span>
                 <button
                   onClick={() => setMobileNav(null)}
-                  className="text-xs font-mono text-gray-500"
+                  className="text-xs font-mono text-gray-500 hover:text-gray-200 px-2 py-0.5 rounded hover:bg-gray-800 transition-colors"
+                  aria-label="Close instrument drawer"
                 >
                   ×
                 </button>
@@ -641,23 +786,38 @@ export default function App() {
         {/* Center: main view */}
         <main className="flex-1 flex flex-col overflow-hidden">
           <div className="flex gap-1 px-3 py-1 border-b border-gray-800 flex-wrap">
-            {TABS.map((t) => (
-              <button
-                key={t}
-                onClick={() => setActiveTab(t)}
-                className={cx(
-                  "text-xs font-mono px-3 py-1 rounded transition-colors",
-                  activeTab === t
-                    ? "bg-indigo-900 text-indigo-200"
-                    : "text-gray-500 hover:text-gray-300"
-                )}
-              >
-                {t}
-              </button>
-            ))}
+            {TABS.map((t) => {
+              const isActive = activeTab === t;
+              return (
+                <button
+                  key={t}
+                  onClick={() => setActiveTab(t)}
+                  aria-current={isActive ? "page" : undefined}
+                  className={cx(
+                    "text-xs font-mono px-3 py-1 rounded transition-colors",
+                    isActive
+                      ? "bg-indigo-900 text-indigo-200"
+                      : "text-gray-400 hover:text-gray-100 hover:bg-gray-800"
+                  )}
+                >
+                  {t}
+                </button>
+              );
+            })}
           </div>
 
           <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-3">
+            {(activeTab === "Insurance" || activeTab === "Credit" || activeTab === "Chart") && (
+              <GettingStarted
+                hasAllocation={poolDepositAmount > 0}
+                hasPosition={openPositions.length > 0}
+                hasMinted={(ttState?.mintedByUser?.[player.id] ?? 0) > 0}
+                hasMerchantSent={(ttState?.merchantBalance ?? 0) > 0}
+                activeTab={activeTab}
+                onJump={(t) => setActiveTab(t)}
+              />
+            )}
+
             {activeTab === "Chart" && (
               <>
                 <PriceChart
@@ -715,11 +875,11 @@ export default function App() {
                     <div>Alpha: {(activePS?.alpha ?? 0.5).toFixed(3)}</div>
                   </div>
                   <div className="rounded border border-gray-800 bg-gray-900 p-2">
-                    <div className="text-[10px] text-gray-500 mb-1">Insurance Pool</div>
-                    <div>Deposits: ${(activePS?.insurancePool?.totalDeposits ?? 0).toFixed(0)}</div>
-                    <div>Yield: {(activePS?.insurancePool?.lastYieldPct ?? 0).toFixed(4)}%</div>
-                    <div>Mult: {(activePS?.insurancePool?.yieldMultiplier ?? 1).toFixed(2)}×</div>
-                    <div>Depth: {(activePS?.insurancePool?.auctionDepthScore ?? 0).toFixed(3)}</div>
+                    <div className="text-[10px] text-gray-500 mb-1">Insurance Allocation</div>
+                    <div>Total stake: ${allocStats.totalStake.toFixed(0)}</div>
+                    <div>Markets: {allocStats.numMarkets}</div>
+                    <div>HHI: {allocStats.hhi.toFixed(2)}</div>
+                    <div>Max weight: {(allocStats.maxWeight * 100).toFixed(0)}%</div>
                   </div>
                 </div>
                 <LeverageCurve
@@ -743,58 +903,47 @@ export default function App() {
               </div>
             )}
 
-            {activeTab === "Derivatives" && (
+            {activeTab === "Insurance" && (
               <>
-                <ContractDesk
-                  longMargin={longMargin}
-                  shortMargin={shortMargin}
-                  normWeights={normWeights}
-                  avgEntropyMult={avgEntropyMult}
-                  playerMargin={player.margin}
-                  onBuyImbalance={handleBuyImbalance}
-                  onBuyEntropy={handleBuyEntropy}
-                  openImbalance={activePS?.imbalanceContracts ?? []}
-                  openEntropy={activePS?.entropyContracts ?? []}
-                />
-                <StripDesk
-                  playerMargin={player.margin}
-                  leverage={player.leverage}
-                  realizedSigma={activePS?.realizedSigma ?? 0.02}
-                  returnHistory={activePS?.returnHistory ?? []}
-                  onBuyStrip={handleBuyStrip}
-                  openStrips={activePS?.strips ?? []}
-                />
-                <PoolDesk
-                  pool={activePS?.insurancePool}
+                <InsuranceDesk
+                  insuranceState={insuranceState}
                   playerId={player.id}
-                  playerMargin={player.margin}
-                  onDeposit={handleDeposit}
-                  onWithdraw={handleWithdraw}
+                  freeMarginToAllocate={freeMargin(player.margin, player.tags)}
+                  poolLtv={poolLtvInfo}
+                  onSetAllocation={handleSetAllocation}
+                />
+                <TtDesk
+                  ttState={ttState}
+                  playerId={player.id}
+                  ltv={poolLtvInfo?.ltv ?? 0}
+                  poolDeposit={poolDepositAmount}
+                  mintCapacityRemaining={mintCapacity({
+                    ttState,
+                    userId: player.id,
+                    totalStake: poolDepositAmount,
+                    ltv: poolLtvInfo?.ltv ?? 0,
+                  })}
+                  onMint={handleMintTT}
+                  onSendToMerchant={handleSendToMerchant}
+                  onRedeem={handleRedeem}
+                  onCancelRedemption={handleCancelRedemption}
                 />
               </>
             )}
 
-            {activeTab === "Lending" && (
-              <LendingDesk
-                playerId={player.id}
-                playerMargin={player.margin}
-                offers={activePS?.lendingOffers ?? []}
-                borrows={activePS?.lendingBorrows ?? []}
-                yieldBuffer={activePS?.yieldBuffer ?? 0}
-                onPostOffer={handlePostLendingOffer}
-                onCancelOffer={handleCancelLendingOffer}
-                onBorrow={handleBorrow}
-              />
-            )}
-
             {activeTab === "Credit" && (
               <>
-                <CreditDesk assessment={creditAssessment} />
+                <CreditDesk poolLtv={poolLtvInfo} />
                 <PortfolioStructurer
                   openPositions={openPositions}
                   creditEligibility={creditEligibility}
                   onOpen={handleOpenPosition}
                   onClose={handleClosePosition}
+                  poolLtv={poolLtvInfo}
+                  availablePoolCredit={availablePoolCredit}
+                  poolDepositAmount={poolDepositAmount}
+                  deployedPoolCredit={deployedPoolCredit}
+                  rentalsByPair={rentalsByPair}
                 />
               </>
             )}
@@ -822,32 +971,6 @@ export default function App() {
               </>
             )}
 
-            {activeTab === "Governance" && (
-              <GovernancePanel
-                governance={governance}
-                setGovernance={setGovernance}
-                playerId={player.id}
-                currentEpoch={activePS?.epochIndex ?? 0}
-                playerContext={{
-                  poolLoyaltyEpochs:
-                    (activePS?.insurancePool?.deposits?.[player.id]?.depositEpoch != null)
-                      ? (activePS?.epochIndex ?? 0) -
-                        (activePS?.insurancePool?.deposits?.[player.id]?.depositEpoch ?? 0)
-                      : 0,
-                  openPositions,
-                  creditQualified: creditAssessment.qualified,
-                  contractsWritten:
-                    (activePS?.imbalanceContracts?.length ?? 0) +
-                    (activePS?.entropyContracts?.length ?? 0) +
-                    (activePS?.strips?.length ?? 0),
-                  lendingOffers: (activePS?.lendingOffers ?? []).filter(
-                    (o) => o.lenderId === player.id && o.active
-                  ).length,
-                  timeInProtocolEpochs: activePS?.epochIndex ?? 0,
-                }}
-              />
-            )}
-
             {activeTab === "History" && <TradeHistory trades={tradeLog} />}
 
             {activeTab === "Log" && (
@@ -868,8 +991,9 @@ export default function App() {
             onUpdate={handlePlayerUpdate}
             activePair={activePair}
             cap={cap}
-            creditScore={creditAssessment.creditScore}
-            creditMultiplier={creditAssessment.multiplier}
+            poolLtv={poolLtvInfo}
+            availablePoolCredit={availablePoolCredit}
+            deployedPoolCredit={deployedPoolCredit}
           />
         </aside>
 
@@ -887,7 +1011,8 @@ export default function App() {
                 <span className="text-xs font-mono text-gray-300">Position</span>
                 <button
                   onClick={() => setMobileNav(null)}
-                  className="text-xs font-mono text-gray-500"
+                  className="text-xs font-mono text-gray-500 hover:text-gray-200 px-2 py-0.5 rounded hover:bg-gray-800 transition-colors"
+                  aria-label="Close position drawer"
                 >
                   ×
                 </button>
@@ -897,8 +1022,9 @@ export default function App() {
                 onUpdate={handlePlayerUpdate}
                 activePair={activePair}
                 cap={cap}
-                creditScore={creditAssessment.creditScore}
-                creditExtension={creditAssessment.leverageExtension}
+                poolLtv={poolLtvInfo}
+                availablePoolCredit={availablePoolCredit}
+                deployedPoolCredit={deployedPoolCredit}
               />
             </aside>
           </div>
@@ -930,7 +1056,7 @@ export default function App() {
       {/* Re-open tutorial button (bottom-left) */}
       <button
         onClick={() => setShowTutorial(true)}
-        className="fixed bottom-4 left-4 z-40 text-[10px] font-mono px-2 py-1 rounded-full border border-gray-700 bg-gray-900 text-gray-400 hover:text-gray-200 hover:border-indigo-500 transition-colors"
+        className="fixed bottom-4 left-4 z-40 text-[10px] font-mono px-3 py-1 rounded-full border border-gray-700 bg-gray-900 text-gray-400 hover:text-gray-100 hover:bg-gray-800 hover:border-indigo-500 transition-colors"
         aria-label="Open tutorial"
       >
         ? tutorial

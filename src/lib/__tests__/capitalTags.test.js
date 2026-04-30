@@ -22,7 +22,7 @@ describe("totalTagged", () => {
     expect(totalTagged({})).toBe(0);
   });
   it("sums all tag slots", () => {
-    const t = { poolDeposit: 100, auctionMargin: 200, lendingOffered: 50 };
+    const t = { poolDeposit: 100, auctionMargin: 200, contractCollateral: 50 };
     expect(totalTagged(t)).toBe(350);
   });
 });

@@ -62,35 +62,3 @@ export function deterministicBarrierAdjustment(priceOld, priceNew, sigma, levera
   return { probTouch, adjustedMargin };
 }
 
-// Lending settlement: lender earns rental rate on lent exposure; borrower
-// takes the price risk.
-export function calcLendingSettlement(lender, borrower, priceOld, priceNew, rentalRate, sigma) {
-  const logRet = Math.log(priceNew / priceOld);
-  const lendedExp = borrower.borrowedExposure || 0;
-  const ownExp = lender.allocatedExposure - lendedExp;
-  const lenderOwnPnl = ownExp * (Math.exp(lender.side === "LONG" ? logRet : -logRet) - 1);
-  const rentalIncome = lendedExp * rentalRate;
-  const lenderNetPnl = lenderOwnPnl + rentalIncome;
-
-  const barrierResult = deterministicBarrierAdjustment(
-    priceOld,
-    priceNew,
-    sigma,
-    lendedExp / Math.max(1, borrower.margin),
-    borrower.margin,
-    borrower.borrowSide || "LONG"
-  );
-  const borrowerGrossPnl =
-    lendedExp * (Math.exp(borrower.borrowSide === "LONG" ? logRet : -logRet) - 1);
-  const borrowerNetPnl =
-    barrierResult.probTouch > 0.5
-      ? barrierResult.adjustedMargin - borrower.margin - rentalIncome
-      : borrowerGrossPnl - rentalIncome;
-
-  return {
-    lenderNetPnl,
-    borrowerNetPnl,
-    rentalIncome,
-    barrierProb: barrierResult.probTouch,
-  };
-}

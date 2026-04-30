@@ -5,23 +5,30 @@
 //  Slow   (every SLOW_EVERY medium ticks): analytics, insurance pool, regime, correlation
 
 import { useEffect, useRef, useCallback } from "react";
-import { FAST_MS, MEDIUM_MS, SLOW_EVERY, GRACE_MS, SOFT_CLOSE_PCT } from "../constants/system.js";
+import { FAST_MS, MEDIUM_MS, SLOW_EVERY, REDEMPTION_EVERY, GRACE_MS, SOFT_CLOSE_PCT } from "../constants/system.js";
 import { priceStep } from "../lib/priceModels.js";
 import { calcRealizedSigma, calcRatioBeta as calcRatioBetaStat, ratioEffectiveSigma } from "../lib/math.js";
 import { detectRegime } from "../lib/regime.js";
 import { updateNpcRegime, applyNpcSettlement, tickNpcRestock, isNpcActive } from "../lib/npcs.js";
 import { runAuction } from "../lib/auction.js";
 import { settleDominantPool, calcRatioBeta, escrowTips } from "../lib/pool.js";
-import { settleImbalanceContracts, settleEntropyContracts } from "../lib/contracts.js";
-import { settleStrips } from "../lib/strips.js";
-import { settleInsurancePool } from "../lib/insurance.js";
-import { updateYieldModel, calcYieldBufferContribution } from "../lib/yieldModel.js";
+import { updateYieldModel } from "../lib/yieldModel.js";
 import { calcCrossMarketCorrelations } from "../lib/correlation.js";
-import { settleLending } from "../lib/lending.js";
 import { generateNpcOrders } from "../lib/npcMarkets.js";
+import { matchRentalAuction, settleRentals } from "../lib/rentalMarket.js";
+import { isPairedLap } from "../lib/pairedLap.js";
+import {
+  runRedemptionCycle,
+  applySolvencyCheck,
+  submitRedemption as submitTtRedemption,
+} from "../lib/towerTether.js";
+import { detectTriggeredEvents } from "../lib/insuranceEvents.js";
+import { settleMarketTick, withdrawInsurer } from "../lib/insuranceMarket.js";
+import { settleReinsuranceTick } from "../lib/reinsurance.js";
+import { calcAllocationLtv } from "../lib/ltv.js";
+import { allocationDiversificationStats } from "../lib/allocations.js";
 import { appendEpochEntry } from "../lib/roleLedger.js";
 import { normalizeTags } from "../lib/capitalTags.js";
-import { checkConservation, formatConservationLog } from "../lib/conservation.js";
 import { TBILL_RATE } from "../constants/system.js";
 import { pushPrice } from "../state/pairState.js";
 import { getEffectiveCap } from "../lib/esma.js";
@@ -32,6 +39,11 @@ export function useEpochLoop({
   setPairStates,    // React setter
   player,           // { id, leverage, margin, side, strategy, minYield, tip_tiers, ... }
   setPlayer,        // React setter
+  openPositions = [], // current player positions — used to look up paired LAPs by id during rental settlement
+  ttState = null,   // Tower Tether global state (mints, balances, queue, etc.)
+  setTtState,       // React setter for TT state
+  insuranceState = null, // global insurance markets + reinsurance + allocations
+  setInsuranceState,     // React setter for insuranceState
   setLogs,          // (fn) => void
   addToast,         // (msg, type) => void
   running,          // boolean
@@ -40,6 +52,30 @@ export function useEpochLoop({
 }) {
   const mediumCountRef = useRef(0);
   const lastPlayerEditRef = useRef(0);
+  // Latest player positions, threaded via ref so the medium-tick
+  // callback doesn't have to recreate on every position change.
+  const openPositionsRef = useRef(openPositions);
+  openPositionsRef.current = openPositions;
+  // Same trick for ttState so the loop can read the latest snapshot
+  // without re-creating on every mint/transfer.
+  const ttStateRef = useRef(ttState);
+  ttStateRef.current = ttState;
+  // And for insuranceState — the medium-tick block reads + writes a
+  // working copy across the per-pair forEach + the redemption-cycle
+  // block, so we need the freshest snapshot each tick.
+  const insuranceStateRef = useRef(insuranceState);
+  insuranceStateRef.current = insuranceState;
+
+  // Helper: pick a representative epoch from the pair-states object.
+  // Used by the TT redemption cycle which is global, not per-pair.
+  function epochOfFirstPair(pairStatesObj) {
+    for (const pk of ACTIVE_PAIRS) {
+      if (pairStatesObj[pk]?.epochIndex != null) {
+        return pairStatesObj[pk].epochIndex;
+      }
+    }
+    return 0;
+  }
 
   // Signal that the player config was just changed.
   const onPlayerEdit = useCallback(() => {
@@ -94,19 +130,14 @@ export function useEpochLoop({
       });
       const corrMap = doSlow ? calcCrossMarketCorrelations(priceHistories) : {};
 
-      // --- Collect all auction results for insurance pool (slow only) ---
-      const allPairAuctions = {};
-
       ACTIVE_PAIRS.forEach((pk) => {
         const ps = prev[pk];
         if (!ps) return;
 
         const { prices, realizedSigma, npcs, regime, yieldModel,
                 smileParams, metaParams, prevSmoothFills, alpha,
-                imbalanceContracts, entropyContracts, strips,
-                insurancePool, epochIndex, yieldBuffer = 0,
-                yieldBufferEpochs = 0, regimeHistory = [],
-                lendingOffers = [], lendingBorrows = [],
+                epochIndex, regimeHistory = [],
+                rentalOffers = [], rentalBids = [], activeRentals = [],
                 feeLedger = {} } = ps;
 
         const priceOld = prices[prices.length - 2] ?? prices[prices.length - 1];
@@ -160,7 +191,6 @@ export function useEpochLoop({
           prevSmoothFills,
           metaParams
         );
-        allPairAuctions[pk] = auctionResult;
 
         // Settle dominant pool.
         const longMargin = auctionResult.matched
@@ -235,9 +265,9 @@ export function useEpochLoop({
               tbill,
               auctionPnl,
               tips,
-              // poolYield + contractPnl + creditChange filled in below as we settle.
+              // poolYield + stripPnl + creditChange filled in below as we settle.
               poolYield: 0,
-              contractPnl: 0,
+              stripPnl: 0,
               creditChange: 0,
             };
 
@@ -255,188 +285,41 @@ export function useEpochLoop({
           }
         }
 
-        // NPC market participation: produce offers + contract purchases + strip buys.
-        const avgEntMultPre =
-          auctionResult.normWeights?.reduce((s, w) => s + w, 0) /
-          Math.max(1, auctionResult.normWeights?.length ?? 1);
+        const pid = player?.id ?? "You";
+
+        // NPC market participation: rental bids on paired-LAP legs.
+        // (Strip buys were removed in Phase 5.)
         const npcOrders = generateNpcOrders({
           npcs: updatedNpcs.filter(isNpcActive),
-          existingOffers: lendingOffers,
           longMargin,
           shortMargin,
           regime: updatedRegime,
           normWeights: auctionResult.normWeights ?? [],
-          avgEntropyMult: avgEntMultPre ?? 1,
           realizedSigma,
           returnHistory: ps.returnHistory,
           epochIndex,
+          pairKey: pk,
+          legNotionalEstimate: 1000,
         });
 
-        // Settle contracts (including the fresh NPC buys).
-        const imbalanceContractsWithNpcs = [
-          ...imbalanceContracts,
-          ...npcOrders.imbalanceBuys,
-        ];
-        const entropyContractsWithNpcs = [
-          ...entropyContracts,
-          ...npcOrders.entropyBuys,
-        ];
-        const { settled: imbalSettled, logs: imbalLogs } =
-          settleImbalanceContracts(imbalanceContractsWithNpcs, longMargin, shortMargin);
-        imbalLogs.forEach((l) => logs.push(l));
-        if (npcOrders.imbalanceBuys.length > 0) {
-          logs.push(`[NPC-IMB] ${npcOrders.imbalanceBuys.length} new buyers`);
-        }
-        // Credit player's share of contract payouts back to margin (Floor 4 §4.10).
-        const pid = player?.id ?? "You";
-        let playerContractPnl = 0;
-        for (const c of imbalSettled) {
-          if (c.buyerId === pid && c.payout) playerContractPnl += c.payout;
-        }
-
-        const { settled: entSettled, logs: entLogs } =
-          settleEntropyContracts(entropyContractsWithNpcs, auctionResult.normWeights, avgEntMultPre ?? 1);
-        entLogs.forEach((l) => logs.push(l));
-        if (npcOrders.entropyBuys.length > 0) {
-          logs.push(`[NPC-ENT] ${npcOrders.entropyBuys.length} new buyers`);
-        }
-        for (const c of entSettled) {
-          if (c.buyerId === pid && c.payout) playerContractPnl += c.payout;
-        }
-
-        // Settle strips (including fresh NPC strip buys).
+        // Auction tip-rate proxy used by the yield model.
         const currentYield = auctionResult.matched.length > 0
           ? auctionResult.matched.reduce((s, m) => s + m.longTip, 0) / auctionResult.matched.length
           : 0;
-        const playerMarginForStrips = player?.activePair === pk ? (player.margin ?? 5000) : 0;
-        const stripsWithNpcs = [...strips, ...npcOrders.stripBuys];
-        const { settled: stripsSettled, totalPremiumCollected, logs: stripsLogs } =
-          settleStrips(stripsWithNpcs, currentYield, realizedSigma, ps.returnHistory, playerMarginForStrips);
-        stripsLogs.forEach((l) => logs.push(l));
-        for (const s of stripsSettled) {
-          if (s.buyerId === pid && s.lastPayout) playerContractPnl += s.lastPayout;
-        }
-
-        // Apply player contract payouts to margin + ledger.
-        if (playerContractPnl !== 0 && player?.activePair === pk) {
-          setPlayer((prev) => ({ ...prev, margin: (prev.margin ?? 0) + playerContractPnl }));
-          if (playerRoleEntry) playerRoleEntry.contractPnl += playerContractPnl;
-        }
-        if (npcOrders.stripBuys.length > 0) {
-          logs.push(`[NPC-STRIP] ${npcOrders.stripBuys.length} new strips`);
-        }
-
-        // Update insurance pool pending premiums.
-        let nextPool = {
-          ...insurancePool,
-          pendingPremiums: insurancePool.pendingPremiums + totalPremiumCollected + stabilityFeeCollected,
-          pendingStabilityFee: 0,
-        };
-
-        // Slow: settle insurance pool + yield model + correlations.
-        let slowLogs = [];
-        let poolFlow = null;
-        if (doSlow) {
-          const playerPid = player?.id ?? "You";
-          const preDeposit = insurancePool.deposits?.[playerPid]?.amount ?? 0;
-          const { pool: settledPool, log, flow } = settleInsurancePool(
-            nextPool, allPairAuctions, epochIndex
-          );
-          nextPool = settledPool;
-          slowLogs = log;
-          poolFlow = flow;
-          // Attribute the player's pool yield slice (Floor 1, §4.10).
-          const postDeposit = settledPool.deposits?.[playerPid]?.amount ?? 0;
-          const delta = postDeposit - preDeposit;
-          if (playerRoleEntry) playerRoleEntry.poolYield = delta;
-        }
 
         const updatedYieldModel = updateYieldModel(yieldModel, currentYield);
 
-        // Yield buffer: skim excess into reserve, draw from reserve on pool shortfall.
-        const bufferContrib = calcYieldBufferContribution(currentYield, yieldBufferEpochs, yieldBuffer);
-        let newYieldBuffer = yieldBuffer + bufferContrib;
-
-        // If pool had unmet claims this epoch, draw from buffer to subsidise.
-        const unmet = nextPool.pendingClaims ?? 0;
-        let bufferDraw = 0;
-        if (unmet > 0 && newYieldBuffer > 0) {
-          bufferDraw = Math.min(unmet, newYieldBuffer);
-          newYieldBuffer -= bufferDraw;
-          nextPool = {
-            ...nextPool,
-            pendingClaims: Math.max(0, unmet - bufferDraw),
-          };
-          logs.push(
-            `[BUFFER DRAW] ${pk}: drew $${bufferDraw.toFixed(2)} to cover pool shortfall (${unmet.toFixed(2)} unmet)`
-          );
-        }
-
-        // Contract premiums collected by the player (imbalance + entropy) flow back via
-        // pool too; for the ledger we approximate the inbound total as the settled
-        // contracts' premiums over their size (since those were paid up-front).
-        const contractPremium =
-          npcOrders.imbalanceBuys.reduce((s, b) => s + b.size * b.premium, 0) +
-          npcOrders.entropyBuys.reduce((s, b) => s + b.size * b.premium, 0);
-
-        // Lending rental income this epoch (re-derive since settleLending's totalRent
-        // is already consumed above).
-        const rentalIncome = lendingBorrows
-          .filter((b) => b.active)
-          .reduce((s, b) => s + b.amount * b.rate, 0);
-
-        // Fee ledger: tally the epoch's flows.
+        // Fee ledger: only stability fee remains as a per-pair inbound
+        // stream after the Phase-5 cut. The (now global) insurance and
+        // reinsurance markets keep their own bookkeeping in
+        // insuranceState; nothing per-pair flows out of the auction.
         const epochFlow = {
           stabilityFee: stabilityFeeCollected,
-          stripPremium: totalPremiumCollected,
-          contractPremium,
-          rentalIncome,
-          routedToBuffer: bufferContrib,
-          routedToPool:
-            stabilityFeeCollected + totalPremiumCollected + contractPremium,
-          routedToDepositors: poolFlow?.netDistrib ?? 0,
-          claimsPaid: poolFlow?.claimsPaid ?? 0,
-          bufferDraws: bufferDraw,
         };
         const newFeeLedger = {
-          stabilityFee: (feeLedger.stabilityFee ?? 0) + epochFlow.stabilityFee,
-          stripPremium: (feeLedger.stripPremium ?? 0) + epochFlow.stripPremium,
-          contractPremium: (feeLedger.contractPremium ?? 0) + epochFlow.contractPremium,
-          rentalIncome: (feeLedger.rentalIncome ?? 0) + epochFlow.rentalIncome,
-          routedToBuffer: (feeLedger.routedToBuffer ?? 0) + epochFlow.routedToBuffer,
-          routedToPool: (feeLedger.routedToPool ?? 0) + epochFlow.routedToPool,
-          routedToDepositors:
-            (feeLedger.routedToDepositors ?? 0) + epochFlow.routedToDepositors,
-          claimsPaid: (feeLedger.claimsPaid ?? 0) + epochFlow.claimsPaid,
-          bufferDraws: (feeLedger.bufferDraws ?? 0) + epochFlow.bufferDraws,
+          stabilityFee: (feeLedger.stabilityFee ?? 0) + stabilityFeeCollected,
           lastEpoch: epochFlow,
         };
-
-        // §9 conservation assertion — verify pool identity each epoch.
-        const tipsEscrowed = auctionResult.matched.reduce(
-          (s, m) => s + (m.margin ?? 0) * ((m.longTip ?? 0) + (m.shortTip ?? 0)),
-          0
-        );
-        const conservation = checkConservation({
-          totalIn:
-            epochFlow.stabilityFee + epochFlow.stripPremium + epochFlow.contractPremium,
-          totalOut: epochFlow.routedToDepositors + epochFlow.claimsPaid,
-          tipsEscrowed,
-          totalPoolDeposit: nextPool.totalDeposits ?? 0,
-        });
-        if (conservation.violated) {
-          logs.push(formatConservationLog(pk, conservation));
-        }
-
-        // Settle lending market (NPC offers added before settlement).
-        const offersWithNpcs = [...lendingOffers, ...npcOrders.offers];
-        const { borrows: settledBorrows, offers: settledOffers, totalRent, logs: lendLogs } =
-          settleLending(lendingBorrows, offersWithNpcs);
-        lendLogs.forEach((l) => logs.push(l));
-        void totalRent;
-        if (npcOrders.offers.length > 0) {
-          logs.push(`[NPC-LEND] ${npcOrders.offers.length} new lending offers`);
-        }
 
         // Event log for annotations.
         const newEvents = [...(ps.events ?? [])];
@@ -451,6 +334,54 @@ export function useEpochLoop({
           newEvents.push({ epoch: epochIndex, type: "liquidation", meta: { count: liqThisEpoch } });
         }
 
+        // -------------------------------------------------------------------
+        // Rental market (Phase 3)
+        //
+        // 1. Settle existing rentals one tick (P&L flows to renter,
+        //    tip flows to owner, defaults / expirations terminate).
+        // 2. Match the order book — owner offers + NPC bids — and append
+        //    new rentals.
+        // -------------------------------------------------------------------
+        const findPairedLap = (id) => {
+          const positions = openPositionsRef.current ?? [];
+          const found = positions.find((p) => isPairedLap(p) && p.id === id);
+          return found ?? null;
+        };
+        const rentalSettle = settleRentals({
+          activeRentals,
+          findPairedLap,
+          priceOld,
+          priceNew,
+          currentEpoch: epochIndex,
+        });
+        rentalSettle.logs.forEach((l) => logs.push(l));
+
+        // Owner-tip income flushed to player margin if the owner is the
+        // local player. (NPC-owned rentals don't exist yet in Phase 3,
+        // so this is the only counterparty handled.)
+        const ownerCredits = rentalSettle.ownerCredits ?? {};
+        const playerOwnerCredit = ownerCredits[pid] ?? 0;
+        if (playerOwnerCredit > 0) {
+          setPlayer((prev) => ({
+            ...prev,
+            margin: (prev.margin ?? 0) + playerOwnerCredit,
+          }));
+        }
+
+        // Match the orderbook against newly-arrived NPC bids.
+        const offersBeforeMatch = rentalOffers;
+        const bidsBeforeMatch = [...rentalBids, ...(npcOrders.rentalBids ?? [])];
+        const rentalMatch = matchRentalAuction({
+          offers: offersBeforeMatch,
+          bids: bidsBeforeMatch,
+          currentEpoch: epochIndex,
+        });
+        rentalMatch.logs.forEach((l) => logs.push(l));
+
+        const nextRentalOffers = rentalMatch.remainingOffers;
+        const nextRentalBids = rentalMatch.remainingBids;
+        const nextActiveRentals = [...rentalSettle.rentals, ...rentalMatch.newRentals];
+
         next[pk] = {
           ...ps,
           npcs: updatedNpcs,
@@ -462,16 +393,11 @@ export function useEpochLoop({
           metaParams: auctionResult.metaParams,
           prevSmoothFills: auctionResult.smoothFills,
           alpha: newAlpha,
-          imbalanceContracts: imbalSettled.filter((c) => !c.expired),
-          entropyContracts: entSettled.filter((c) => !c.expired),
-          strips: stripsSettled,
-          insurancePool: nextPool,
           yieldModel: updatedYieldModel,
-          yieldBuffer: newYieldBuffer,
-          yieldBufferEpochs: yieldBufferEpochs + 1,
           feeLedger: newFeeLedger,
-          lendingBorrows: settledBorrows,
-          lendingOffers: settledOffers,
+          rentalOffers: nextRentalOffers,
+          rentalBids: nextRentalBids,
+          activeRentals: nextActiveRentals,
           epochIndex: epochIndex + 1,
           correlationMap: doSlow ? corrMap : ps.correlationMap,
           currentYield,
@@ -480,13 +406,242 @@ export function useEpochLoop({
           ratioBeta,
         };
 
-        if (slowLogs.length > 0) slowLogs.forEach((l) => logs.push(l));
-
         // Post the player's per-role ledger entry for this epoch.
         if (playerRoleEntry && setRoleLedger) {
           setRoleLedger((prev) => appendEpochEntry(prev, playerRoleEntry));
         }
       });
+
+      // -----------------------------------------------------------------
+      // Global insurance + reinsurance settlement (Phase 5)
+      //
+      // Insurance markets settle every medium tick (no rare-stride
+      // delay; payouts and premium streams are tied to per-tick event
+      // detection). For each market: detect whether its event triggered
+      // given the freshly-updated per-pair state, then settle via
+      // settleMarketTick. Aggregate buyer-side claim outflows into the
+      // reinsurance settlement so a TT-minter who got hit on insurance
+      // recovers the corresponding fraction from reinsurance buyers.
+      //
+      // All cash flows (premium in/out, claim in/out, reinsurance
+      // payouts/seller losses) are aggregated on a per-user basis and
+      // applied to the local player's margin at the end.
+      // -----------------------------------------------------------------
+      if (insuranceStateRef.current && setInsuranceState) {
+        const pid = player?.id ?? "You";
+        const tickEpoch = epochOfFirstPair(next);
+        // Pull the active pair's correlation map as the cross-pair
+        // proxy (the slow-tick recompute already wrote it on the
+        // active pair). Fallback to {} on first-tick.
+        const activePk = player?.activePair ?? ACTIVE_PAIRS[0];
+        const correlationMap = next[activePk]?.correlationMap ?? {};
+        const ctx = {
+          pairStates: next,
+          // No system-solvency input wired into the hook yet; default 1
+          // (high) so the macro detector won't fire spuriously here.
+          solvencyBuffer: 1,
+          correlationMap,
+          currentEpoch: tickEpoch,
+        };
+        const triggered = detectTriggeredEvents(ctx);
+
+        let nextInsurance = { ...insuranceStateRef.current };
+        const buyerLossesByUser = {};
+        const playerCashChanges = {};
+
+        nextInsurance.markets = nextInsurance.markets.map((m) => {
+          const eventTriggered = triggered.includes(m.eventId);
+          const r = settleMarketTick({
+            market: m,
+            eventTriggered,
+            currentEpoch: tickEpoch,
+          });
+          r.logs.forEach((l) => logs.push(l));
+          for (const [uid, v] of Object.entries(r.premiumIn)) {
+            playerCashChanges[uid] = (playerCashChanges[uid] ?? 0) + v;
+          }
+          for (const [uid, v] of Object.entries(r.premiumOut)) {
+            playerCashChanges[uid] = (playerCashChanges[uid] ?? 0) - v;
+          }
+          for (const [uid, v] of Object.entries(r.claimIn)) {
+            playerCashChanges[uid] = (playerCashChanges[uid] ?? 0) + v;
+          }
+          for (const [uid, v] of Object.entries(r.claimOut)) {
+            playerCashChanges[uid] = (playerCashChanges[uid] ?? 0) - v;
+            buyerLossesByUser[uid] = (buyerLossesByUser[uid] ?? 0) + v;
+          }
+          return r.market;
+        });
+
+        nextInsurance.reinsurance = nextInsurance.reinsurance.map((p) => {
+          const r = settleReinsuranceTick({
+            product: p,
+            buyerLossesByUser,
+            currentEpoch: tickEpoch,
+          });
+          r.logs.forEach((l) => logs.push(l));
+          for (const [uid, v] of Object.entries(r.payouts)) {
+            playerCashChanges[uid] = (playerCashChanges[uid] ?? 0) + v;
+          }
+          for (const [uid, v] of Object.entries(r.sellerLosses)) {
+            playerCashChanges[uid] = (playerCashChanges[uid] ?? 0) - v;
+          }
+          for (const [uid, v] of Object.entries(r.premiumIn)) {
+            playerCashChanges[uid] = (playerCashChanges[uid] ?? 0) + v;
+          }
+          for (const [uid, v] of Object.entries(r.premiumOut)) {
+            playerCashChanges[uid] = (playerCashChanges[uid] ?? 0) - v;
+          }
+          return r.product;
+        });
+
+        setInsuranceState(nextInsurance);
+        // Persist the working copy for downstream blocks (redemption
+        // haircut application reads it via the ref).
+        insuranceStateRef.current = nextInsurance;
+
+        const playerNet = playerCashChanges[pid] ?? 0;
+        if (playerNet !== 0) {
+          setPlayer((prev) => ({ ...prev, margin: (prev.margin ?? 0) + playerNet }));
+        }
+      }
+
+      // -----------------------------------------------------------------
+      // Tower Tether redemption cycle (Phase 4)
+      //
+      // Runs on its own prime stride (REDEMPTION_EVERY) coprime with
+      // analytics + insurance, ~monthly in sim-days. On each cycle:
+      //   1. Merchant simulator queues 50% of its TT balance for
+      //      standard redemption — creates organic queue pressure.
+      //   2. runRedemptionCycle drains express + standard requests up to
+      //      the 10% cap; computes pro-rata collateral haircut by minter.
+      //   3. Apply the haircut to each minter's allocations (insurer-side
+      //      stakes across the insurance markets). The reduction is
+      //      pro-rata across whichever markets they hold a stake in.
+      //   4. Pay out dollars to each redeemer's main margin (cash flow).
+      //   5. Recheck solvency for each affected minter — if their
+      //      outstanding mint exceeds the new cap, claw back from
+      //      wallet TT first, then record any remaining shortfall as
+      //      debt.
+      // -----------------------------------------------------------------
+      if (mediumCountRef.current % REDEMPTION_EVERY === 0 && setTtState && ttStateRef.current) {
+        const tickEpoch = epochOfFirstPair(next);
+        let workingTt = ttStateRef.current;
+        let workingInsurance = insuranceStateRef.current;
+
+        // Step 1: merchant auto-redemption — 50% of merchant balance
+        // each cycle, standard tier.
+        if ((workingTt.merchantBalance ?? 0) > 1) {
+          const merchantRedeem = workingTt.merchantBalance * 0.5;
+          const submitted = submitTtRedemption({
+            ttState: workingTt,
+            userId: "MERCHANT",
+            amount: merchantRedeem,
+            express: false,
+            currentEpoch: tickEpoch,
+          });
+          if (submitted.ok) {
+            workingTt = submitted.ttState;
+            logs.push(
+              `[MERCHANT] queued ${merchantRedeem.toFixed(2)} TT for redemption`
+            );
+          }
+        }
+
+        // Step 2: drain the queue.
+        const cycle = runRedemptionCycle({
+          ttState: workingTt,
+          currentEpoch: tickEpoch,
+        });
+        cycle.logs.forEach((l) => logs.push(l));
+        workingTt = cycle.ttState;
+
+        // Step 3: apply collateral haircuts pro-rata across each
+        // minter's allocation stakes.
+        const haircuts = cycle.collateralHaircuts;
+        if (workingInsurance && Object.keys(haircuts).length > 0) {
+          let nextMarkets = workingInsurance.markets;
+          for (const minterId of Object.keys(haircuts)) {
+            const totalToRemove = haircuts[minterId];
+            if (totalToRemove <= 0) continue;
+            // Sum the minter's stake across all markets.
+            let minterStakeTotal = 0;
+            for (const m of nextMarkets) {
+              minterStakeTotal += m.insurerPositions?.[minterId] ?? 0;
+            }
+            if (minterStakeTotal <= 0) continue;
+            // Pro-rata reduce each market stake.
+            nextMarkets = nextMarkets.map((m) => {
+              const stake = m.insurerPositions?.[minterId] ?? 0;
+              if (stake <= 0) return m;
+              const share = stake / minterStakeTotal;
+              const cut = Math.min(stake, totalToRemove * share);
+              if (cut <= 1e-9) return m;
+              const r = withdrawInsurer({ market: m, userId: minterId, amount: cut });
+              return r.ok ? r.market : m;
+            });
+          }
+          workingInsurance = { ...workingInsurance, markets: nextMarkets };
+        }
+
+        // Step 4: route the express penalty. The new system has no
+        // single "pool" target for this; ideally it would feed the
+        // reinsurance sellers. For now we just log and drop it —
+        // distributing across products requires a clean injection
+        // helper we don't have yet.
+        if (cycle.penaltyToPool > 0) {
+          logs.push(
+            `[TT-PENALTY] $${cycle.penaltyToPool.toFixed(2)} express penalty (no target — see Phase 5 backlog)`
+          );
+        }
+
+        // Step 5: pay redemption dollars out to each holder's margin.
+        // Only the local player and the merchant matter here; merchant
+        // dollars stay in the merchant abstraction (ignored for now).
+        const playerDollars = cycle.dollarsOut[player?.id] ?? 0;
+        if (playerDollars > 0) {
+          setPlayer((prev) => ({
+            ...prev,
+            margin: (prev.margin ?? 0) + playerDollars,
+          }));
+        }
+
+        // Step 6: solvency recheck per affected minter.
+        for (const minterId of Object.keys(haircuts)) {
+          // newTotalStake comes from the freshly-haircut allocation
+          // markets. LTV is derived from the minter's diversification
+          // across those markets.
+          const stats = workingInsurance
+            ? allocationDiversificationStats({ markets: workingInsurance.markets, userId: minterId })
+            : { totalStake: 0 };
+          const newTotalStake = stats.totalStake;
+          let ltv = 1;
+          if (workingInsurance) {
+            ltv = calcAllocationLtv({
+              markets: workingInsurance.markets,
+              userId: minterId,
+            }).ltv;
+          }
+          const solvency = applySolvencyCheck({
+            ttState: workingTt,
+            userId: minterId,
+            newTotalStake,
+            ltv,
+          });
+          workingTt = solvency.ttState;
+          if (solvency.clawback > 0 || solvency.newDebt > 0) {
+            logs.push(
+              `[TT-SOLVENCY] ${minterId} clawback ${solvency.clawback.toFixed(2)} TT, debt +${solvency.newDebt.toFixed(2)}`
+            );
+          }
+        }
+
+        setTtState(workingTt);
+        if (workingInsurance && workingInsurance !== insuranceStateRef.current) {
+          setInsuranceState(workingInsurance);
+          insuranceStateRef.current = workingInsurance;
+        }
+      }
 
       if (logs.length > 0) {
         setLogs((prev) => [...prev.slice(-300), ...logs]);
@@ -494,7 +649,7 @@ export function useEpochLoop({
 
       return next;
     });
-  }, [setPairStates, player, setPlayer, setLogs, addToast, setRoleLedger]);
+  }, [setPairStates, player, setPlayer, setLogs, addToast, setRoleLedger, setTtState, setInsuranceState]);
 
   // -------------------------------------------------------------------------
   // Interval management

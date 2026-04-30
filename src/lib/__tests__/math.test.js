@@ -66,6 +66,14 @@ describe("sortino / winRate / maxDrawdown", () => {
     }));
     expect(calcMaxDrawdown(history)).toBeCloseTo(0.4, 2);
   });
+  it("maxDrawdown returns a finite number even on zero-equity history", () => {
+    const history = [0, 0, 0].map((m) => ({
+      users: [{ id: "You", margin: m }],
+    }));
+    const dd = calcMaxDrawdown(history);
+    expect(Number.isFinite(dd)).toBe(true);
+    expect(dd).toBe(0);
+  });
 });
 
 describe("calcRatioBeta (ratio-correlated vol)", () => {

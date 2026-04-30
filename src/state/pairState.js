@@ -4,7 +4,6 @@
 
 import { PAIRS } from "../constants/assets.js";
 import { buildNpcs } from "../lib/npcs.js";
-import { initInsurancePool } from "../lib/insurance.js";
 import { MAX_HISTORY } from "../constants/system.js";
 
 export function initPairState(pairKey) {
@@ -47,23 +46,13 @@ export function initPairState(pairKey) {
       yieldVar: 0.0001,
     },
 
-    // Insurance pool.
-    insurancePool: initInsurancePool(),
-
-    // Yield buffer — accumulated excess-yield contributions.
-    yieldBuffer: 0,
-    yieldBufferEpochs: 0,
-
-    // Fee-flow ledger: cumulative flows of each fee category since init.
+    // Fee-flow ledger: per-pair accounting of stability fees collected
+    // from auction settlement. Insurance/reinsurance premiums and
+    // payouts no longer flow through here — they live in the global
+    // insuranceState managed at the App level.
     feeLedger: {
-      stabilityFee: 0,      // collected from RISKY tier settlements
-      stripPremium: 0,      // collected from strip issuance
-      routedToBuffer: 0,    // accumulated yield-buffer contributions
-      routedToPool: 0,      // revenue that became pendingPremiums in the pool
-      routedToDepositors: 0, // net distrib paid out to pool depositors
-      claimsPaid: 0,        // drawn from pool to cover shortfalls
-      bufferDraws: 0,       // drawn from buffer to cover unmet claims
-      lastEpoch: null,      // { stabilityFee, stripPremium, ... } last epoch breakdown
+      stabilityFee: 0,
+      lastEpoch: null,
     },
 
     // Slow-epoch analytics.
@@ -76,13 +65,7 @@ export function initPairState(pairKey) {
     // Event ticks (for chart annotations): { epoch, type, meta }.
     events: [],
 
-    // Loss strips — the only remaining user-sold risk-transfer product.
-    strips: [],
-
     // Rental market for paired-LAP legs (Phase 3).
-    // Owners publish offers when they open a paired LAP; renters (NPCs
-    // for now, humans later) submit bids; matched leases live in
-    // activeRentals and settle each medium tick.
     rentalOffers: [],
     rentalBids: [],
     activeRentals: [],

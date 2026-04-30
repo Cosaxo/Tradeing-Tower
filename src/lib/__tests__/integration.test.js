@@ -1,8 +1,10 @@
 // Integration test: drive several medium-epoch cycles through the core
 // modules end-to-end and assert that state converges and stays bounded.
 //
-// Post-cut (contracts + lending markets removed), the loop is:
-// price → regime → NPCs → auction → pool settle → NPC strip orders → strips.
+// Phase-5 trimmed loop: price → regime → NPCs → auction → pool settle.
+// Strips removed; insurance markets / reinsurance / TT redemption are
+// covered by their own unit-test suites and exercised in the App-level
+// useEpochLoop integration.
 
 import { describe, it, expect } from "vitest";
 import { ACTIVE_PAIRS } from "../../constants/assets.js";
@@ -14,7 +16,6 @@ import { runAuction } from "../auction.js";
 import { settleDominantPool } from "../pool.js";
 import { applyNpcSettlement, tickNpcRestock, isNpcActive, updateNpcRegime } from "../npcs.js";
 import { generateNpcOrders } from "../npcMarkets.js";
-import { settleStrips } from "../strips.js";
 import { getEffectiveCap } from "../esma.js";
 
 describe("integration: 10 medium epochs", () => {
@@ -84,13 +85,10 @@ describe("integration: 10 medium epochs", () => {
         epochIndex: epoch,
       });
 
-      state.strips = settleStrips(
-        [...state.strips, ...npcOrders.stripBuys],
-        0.01,
-        state.realizedSigma,
-        state.returnHistory,
-        10000
-      ).settled;
+      // Strips removed in Phase 5; rental bids and insurance settlement
+      // are tested separately. Just retain npcOrders.rentalBids for
+      // shape sanity here.
+      void npcOrders;
 
       state.auctionResult = auction;
       state.smileParams = auction.smileParams;

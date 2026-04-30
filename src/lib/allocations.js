@@ -193,7 +193,9 @@ export function allocationDiversificationStats({ markets, userId }) {
   const hhi = weights.reduce((s, w) => s + w * w, 0);
   const maxWeight = Math.max(...weights);
   // Normalised Shannon over the actual market count in the registry.
-  const totalMarkets = Math.max(1, markets.length);
+  // Math.log(1) = 0 → division by zero; floor at 2 in the divisor so a
+  // single-market registry still produces a finite (zero) shannonNorm.
+  const totalMarkets = Math.max(2, markets.length);
   const shannon = weights.reduce((s, w) => (w > 0 ? s - w * Math.log(w) : s), 0);
   const shannonNorm = shannon / Math.log(totalMarkets);
   return {

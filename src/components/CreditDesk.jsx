@@ -1,21 +1,18 @@
 // LTV Desk — replaces the previous performance-gates Credit Desk.
 //
-// Now renders the same information that drives pool credit: the LTV
-// number, its breakdown, and the structural stats it's derived from.
-// The legacy parallel multiplier is gone; pool LTV is the only credit
-// signal.
+// Phase 5: LTV is now derived from the user's allocation across
+// insurance markets (not from their LAP portfolio). The breakdown
+// terms map onto the new components: concentration, diversity, breadth.
 import { HelpHint } from "./Tooltip.jsx";
 import {
   POOL_LTV_FLOOR,
   POOL_LTV_CEILING,
-  POOL_LTV_TAIL_COVERAGE_TARGET,
 } from "../lib/ltv.js";
 
 const COMPONENTS = [
-  { label: "Concentration (1 − HHI)", key: "concentrationComponent" },
-  { label: "Diversity (Shannon)", key: "diversityComponent" },
-  { label: "Tail coverage", key: "tailComponent" },
-  { label: "Leverage discipline", key: "disciplineComponent" },
+  { label: "Concentration (1 − HHI)", key: "concentration" },
+  { label: "Diversity (Shannon)", key: "diversity" },
+  { label: "Breadth (markets covered)", key: "breadth" },
 ];
 
 function ltvColor(ltv) {
@@ -37,7 +34,7 @@ export function CreditDesk({ poolLtv }) {
           LTV Desk
           <HelpHint
             width={300}
-            text={`Pool deposit LTV — the fraction of your deposit you can extract as pool-backed credit. Floor ${POOL_LTV_FLOOR.toFixed(2)} (untested or single concentrated position), ceiling ${POOL_LTV_CEILING.toFixed(2)} (broadly diversified, tail-hedged, low-leverage book). Five additive terms: concentration (1−HHI), asset-class diversity, tail coverage (≥${POOL_LTV_TAIL_COVERAGE_TARGET * 100}% in hedgeChar > 0.3 assets), leverage discipline, minus a max-weight penalty if any single position exceeds 50%.`}
+            text={`Allocation LTV — the fraction of your insurance-market stake you can extract as pool-backed credit. Floor ${POOL_LTV_FLOOR.toFixed(2)} (untested or single concentrated allocation), ceiling ${POOL_LTV_CEILING.toFixed(2)} (broadly diversified across many distinct event markets). Three additive terms: concentration (1−HHI on stake share), Shannon diversity, breadth (markets touched / total registry), minus a max-weight penalty if any single market > 50%.`}
           />
         </span>
         <span
@@ -50,7 +47,7 @@ export function CreditDesk({ poolLtv }) {
 
       <div className="flex items-center gap-4">
         <div className="text-center">
-          <div className="text-[10px] text-gray-500 font-mono">Pool LTV</div>
+          <div className="text-[10px] text-gray-500 font-mono">Allocation LTV</div>
           <div className="text-2xl font-mono" style={{ color: c }}>
             {ltv.toFixed(2)}
           </div>
@@ -59,28 +56,28 @@ export function CreditDesk({ poolLtv }) {
           </div>
         </div>
         <div className="text-center">
-          <div className="text-[10px] text-gray-500 font-mono">Positions</div>
-          <div className="text-xl font-mono text-gray-200">{stats.numPositions}</div>
+          <div className="text-[10px] text-gray-500 font-mono">Markets</div>
+          <div className="text-xl font-mono text-gray-200">{stats.numMarkets ?? 0}</div>
           <div className="text-[9px] font-mono text-gray-600">
-            {stats.numAssetClasses} class{stats.numAssetClasses === 1 ? "" : "es"}
+            stake ${(stats.totalStake ?? 0).toFixed(0)}
           </div>
         </div>
         <div className="text-center">
           <div className="text-[10px] text-gray-500 font-mono">HHI</div>
           <div className="text-xl font-mono text-indigo-300">
-            {stats.hhi.toFixed(2)}
+            {(stats.hhi ?? 1).toFixed(2)}
           </div>
           <div className="text-[9px] font-mono text-gray-600">
-            max {(stats.maxWeight * 100).toFixed(0)}%
+            max {((stats.maxWeight ?? 1) * 100).toFixed(0)}%
           </div>
         </div>
         <div className="text-center">
-          <div className="text-[10px] text-gray-500 font-mono">Tail</div>
+          <div className="text-[10px] text-gray-500 font-mono">Shannon</div>
           <div className="text-xl font-mono text-gray-200">
-            {(stats.tailFraction * 100).toFixed(0)}%
+            {(stats.shannonNorm ?? 0).toFixed(2)}
           </div>
           <div className="text-[9px] font-mono text-gray-600">
-            target {(POOL_LTV_TAIL_COVERAGE_TARGET * 100).toFixed(0)}%
+            normalised
           </div>
         </div>
       </div>

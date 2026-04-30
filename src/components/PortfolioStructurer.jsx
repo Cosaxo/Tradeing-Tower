@@ -69,9 +69,9 @@ export function PortfolioStructurer({
           </div>
           {poolLtv?.stats && (
             <div className="text-[10px] font-mono text-gray-500">
-              {poolLtv.stats.numPositions} pos · {poolLtv.stats.numAssetClasses} classes · HHI{" "}
-              {poolLtv.stats.hhi.toFixed(2)} · max{" "}
-              {(poolLtv.stats.maxWeight * 100).toFixed(0)}%
+              {poolLtv.stats.numMarkets ?? 0} markets · HHI{" "}
+              {(poolLtv.stats.hhi ?? 1).toFixed(2)} · max{" "}
+              {((poolLtv.stats.maxWeight ?? 1) * 100).toFixed(0)}%
             </div>
           )}
         </div>

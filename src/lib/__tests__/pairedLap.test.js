@@ -129,69 +129,9 @@ describe("hasActiveRental", () => {
   });
 });
 
-// Cross-module sanity checks: paired LAPs must compose cleanly with the
-// existing position-list consumers (LTV, pool linkage).
-
-import { calcPoolLtv } from "../ltv.js";
-import { linkLapToDeposit, unlinkLapFromDeposit } from "../poolLinkage.js";
-import { initInsurancePool } from "../insurance.js";
-
-describe("paired LAP × LTV", () => {
-  it("a paired LAP appears in calcPoolLtv as one position", () => {
-    const single = { pairKey: "BTCUSD", margin: 1000, leverage: 2 };
-    const paired = makePairedLap({
-      pairKey: "BTCUSD",
-      margin: 2000, // 2× a single LAP's margin (both legs)
-      leverage: 2,
-      openPrice: 100,
-    });
-    const ltvSingle = calcPoolLtv([single]);
-    const ltvPaired = calcPoolLtv([paired]);
-    expect(ltvSingle.stats.numPositions).toBe(1);
-    expect(ltvPaired.stats.numPositions).toBe(1);
-    // Both single and paired have HHI = 1 (one pair). Paired isn't yet
-    // rewarded for delta-neutrality in LTV — that's a later refinement.
-    expect(ltvPaired.stats.hhi).toBeCloseTo(1, 3);
-  });
-
-  it("a diversified book of paired LAPs gets a high LTV like one of single LAPs", () => {
-    const positions = [
-      makePairedLap({ pairKey: "BTCUSD", margin: 200, leverage: 1, openPrice: 100 }),
-      makePairedLap({ pairKey: "EURUSD", margin: 200, leverage: 1, openPrice: 100 }),
-      makePairedLap({ pairKey: "SPX500", margin: 200, leverage: 1, openPrice: 100 }),
-      makePairedLap({ pairKey: "GOLD", margin: 200, leverage: 1, openPrice: 100 }),
-      makePairedLap({ pairKey: "OIL", margin: 200, leverage: 1, openPrice: 100 }),
-    ];
-    const { ltv } = calcPoolLtv(positions);
-    expect(ltv).toBeGreaterThan(0.80);
-  });
-});
-
-describe("paired LAP × pool linkage", () => {
-  it("a single linkage covers the whole paired LAP (both legs)", () => {
-    const lapId = "PLAP-test-link";
-    const paired = makePairedLap({
-      pairKey: "BTCUSD",
-      margin: 2000,
-      leverage: 2,
-      openPrice: 100,
-      id: lapId,
-      poolLinkage: { depositorId: "You", lapId, pairKey: "BTCUSD", creditConsumed: 2000 },
-    });
-
-    let pool = initInsurancePool();
-    pool.deposits = {
-      You: { amount: 5000, depositEpoch: 0, lockupRemaining: 0, linkedLaps: [], deployedCredit: 0 },
-    };
-    pool.totalDeposits = 5000;
-
-    pool = linkLapToDeposit(pool, "You", lapId, paired.margin);
-    expect(pool.deposits.You.deployedCredit).toBe(2000);
-    expect(pool.deposits.You.linkedLaps).toHaveLength(1);
-
-    // Unlink with no realized loss (clean close).
-    pool = unlinkLapFromDeposit(pool, "You", lapId, 0);
-    expect(pool.deposits.You.deployedCredit).toBe(0);
-    expect(pool.deposits.You.linkedLaps).toHaveLength(0);
-  });
-});
+// (Cross-module pairings with the legacy pool linkage were removed in
+// Phase 5 when the per-pair insurance pool was replaced by the
+// allocation system. The paired-LAP primitive itself is unchanged
+// and continues to integrate with the new collateral mechanics via
+// allocations.js / propagateLapPnl in App.jsx — covered by the
+// allocations test suite.)

@@ -1,45 +1,15 @@
-// NPC market-making — strips + rental-leg bidding.
+// NPC market-making — rental-leg bidding only.
 //
-// After the contract / lending / governance cuts the only remaining
-// NPC products are:
-//
-//   - Loss strips: "Hedger" (conservative) and "yield_farmer" buy in
-//     HIGH_VOL / CRASH regimes when risk transfer is most useful.
-//   - Rental bids: directional NPCs (aggressive_long, contrarian) bid
-//     on paired-LAP legs to get cheap directional exposure without
-//     paying full LAP capital.
+// After the Phase-5 cut of strips and the per-pair insurance pool,
+// directional NPCs (aggressive_long, contrarian, yield_chaser) bid on
+// paired-LAP legs to get cheap directional exposure without paying
+// full LAP capital. Other behaviors don't actively trade in v1.
 
-import { initStrip } from "./strips.js";
 import { placeRentalBid, RENTAL_MARGIN_FRACTION } from "./rentalMarket.js";
 
 let idCounter = 0;
-const uid = (prefix) => `${prefix}-${++idCounter}`;
-
-// ---------------------------------------------------------------------------
-// Loss strips
-// ---------------------------------------------------------------------------
-
-// Should `npc` buy a strip this epoch?
-export function npcStripTick(npc, regime, realizedSigma, returnHistory) {
-  if (npc.behavior !== "conservative_long" && npc.behavior !== "yield_farmer") return null;
-  if (regime?.key !== "HIGH_VOL" && regime?.key !== "CRASH") return null;
-
-  const leverage = Math.max(1, npc.max_lev ?? 2);
-  const margin = Math.round((npc.base_margin ?? 1000) * 0.15);
-  const threshold = 0.2;
-  const protectedFraction = 0.5;
-
-  return initStrip({
-    id: uid("NPC-STRIP"),
-    leverage,
-    margin,
-    epochs: 8,
-    realizedSigma,
-    threshold,
-    protectedFraction,
-    returnHistory,
-  });
-}
+const _uid = (prefix) => `${prefix}-${++idCounter}`;
+void _uid; // reserved for future product types
 
 // ---------------------------------------------------------------------------
 // Rental bidding
@@ -92,32 +62,28 @@ export function npcRentalBidTick(npc, pairKey, regime, currentEpoch, legNotional
 // ---------------------------------------------------------------------------
 
 // Produce all NPC orders for one medium epoch on a pair.
-// Returns { stripBuys, rentalBids }.
+// Returns { rentalBids } (strips were removed in Phase 5).
 export function generateNpcOrders({
   npcs,
   regime,
-  realizedSigma,
-  returnHistory,
   pairKey,
   epochIndex,
   legNotionalEstimate = 1000,
   // unused but retained for call-site stability:
+  realizedSigma: _realizedSigma,
+  returnHistory: _returnHistory,
   longMargin: _longMargin,
   shortMargin: _shortMargin,
   normWeights: _normWeights,
 }) {
-  const stripBuys = [];
   const rentalBids = [];
 
   for (const npc of npcs) {
-    const strip = npcStripTick(npc, regime, realizedSigma, returnHistory);
-    if (strip) stripBuys.push(strip);
-
     if (pairKey) {
       const bid = npcRentalBidTick(npc, pairKey, regime, epochIndex, legNotionalEstimate);
       if (bid) rentalBids.push(bid);
     }
   }
 
-  return { stripBuys, rentalBids };
+  return { rentalBids };
 }

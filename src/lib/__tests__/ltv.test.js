@@ -1,164 +1,199 @@
 import { describe, it, expect } from "vitest";
 import {
-  calcPoolLtv,
-  calcAvailablePoolCredit,
+  calcAllocationLtv,
+  calcAvailableCredit,
   isOverCreditBudget,
   POOL_LTV_FLOOR,
   POOL_LTV_CEILING,
 } from "../ltv.js";
+import { makeInsuranceMarket } from "../insuranceMarket.js";
+import { applyAllocations } from "../allocations.js";
 
-describe("calcPoolLtv", () => {
-  it("returns the floor for an empty book — untested diversification", () => {
-    const { ltv } = calcPoolLtv([]);
-    expect(ltv).toBe(POOL_LTV_FLOOR);
+function makeMarkets(eventIds) {
+  return eventIds.map((eventId) =>
+    makeInsuranceMarket({ eventId, pairKey: null, category: "macro" })
+  );
+}
+
+describe("calcAllocationLtv", () => {
+  it("returns the floor when user has no allocation", () => {
+    const markets = makeMarkets(["E1", "E2", "E3"]);
+    const r = calcAllocationLtv({ markets, userId: "Alice" });
+    expect(r.ltv).toBe(POOL_LTV_FLOOR);
   });
 
-  it("stays near the floor for a single concentrated position", () => {
-    const { ltv } = calcPoolLtv([
-      { pairKey: "BTCUSD", margin: 1000, leverage: 2 },
-    ]);
-    expect(ltv).toBe(POOL_LTV_FLOOR);
+  it("stays at the floor for a single concentrated allocation", () => {
+    let markets = makeMarkets(["E1", "E2"]);
+    markets = applyAllocations({
+      markets,
+      userId: "A",
+      userAllocation: { allocations: { [markets[0].id]: 1.0 } },
+      totalCapital: 1000,
+    }).markets;
+    const r = calcAllocationLtv({ markets, userId: "A" });
+    // hhi=1, maxWeight=1, breadth=1/2=0.5, diversity=0
+    // concentration component = 0; max-weight penalty = 0.20 × (0.5/0.5) = 0.20
+    // breadth = 0.20 × 0.5 = 0.10
+    // raw = 0.30 + 0 + 0 + 0.10 - 0.20 = 0.20 → floored to 0.30
+    expect(r.ltv).toBe(POOL_LTV_FLOOR);
   });
 
-  it("rewards 3 balanced positions across distinct classes", () => {
-    const { ltv, stats } = calcPoolLtv([
-      { pairKey: "BTCUSD", margin: 333, leverage: 1 },
-      { pairKey: "EURUSD", margin: 333, leverage: 1 },
-      { pairKey: "SPX500", margin: 334, leverage: 1 },
-    ]);
-    expect(stats.numAssetClasses).toBe(3);
-    expect(ltv).toBeGreaterThan(0.55);
-    expect(ltv).toBeLessThan(POOL_LTV_CEILING);
+  it("rises with even allocation across multiple markets", () => {
+    let markets = makeMarkets(["E1", "E2", "E3", "E4"]);
+    markets = applyAllocations({
+      markets,
+      userId: "A",
+      userAllocation: {
+        allocations: {
+          [markets[0].id]: 0.25,
+          [markets[1].id]: 0.25,
+          [markets[2].id]: 0.25,
+          [markets[3].id]: 0.25,
+        },
+      },
+      totalCapital: 1000,
+    }).markets;
+    const r = calcAllocationLtv({ markets, userId: "A" });
+    expect(r.ltv).toBeGreaterThan(0.7);
+    expect(r.ltv).toBeLessThanOrEqual(POOL_LTV_CEILING);
   });
 
-  it("approaches the ceiling for a broadly diversified, tail-hedged, low-leverage book", () => {
-    const { ltv, stats } = calcPoolLtv([
-      { pairKey: "BTCUSD", margin: 200, leverage: 1 },
-      { pairKey: "EURUSD", margin: 200, leverage: 1 },
-      { pairKey: "SPX500", margin: 200, leverage: 1 },
-      { pairKey: "GOLD",   margin: 200, leverage: 1 },
-      { pairKey: "OIL",    margin: 200, leverage: 1 },
-    ]);
-    expect(stats.numAssetClasses).toBeGreaterThanOrEqual(4);
-    // Shannon is normalised against the full asset-class pool (11 classes),
-    // so 5 evenly-spread classes hit ~0.83 — high but not at the ceiling.
-    // The ceiling itself requires more class spread, lower max-weight, etc.
-    expect(ltv).toBeGreaterThan(0.80);
-    expect(ltv).toBeLessThanOrEqual(POOL_LTV_CEILING);
+  it("approaches the ceiling for a perfectly broad allocation", () => {
+    const ids = ["E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8"];
+    let markets = makeMarkets(ids);
+    const allocs = {};
+    for (const m of markets) allocs[m.id] = 1 / ids.length;
+    markets = applyAllocations({
+      markets,
+      userId: "A",
+      userAllocation: { allocations: allocs },
+      totalCapital: 8000,
+    }).markets;
+    const r = calcAllocationLtv({ markets, userId: "A" });
+    expect(r.ltv).toBeCloseTo(POOL_LTV_CEILING, 1);
   });
 
-  it("penalises a portfolio dominated by one oversized position", () => {
-    const balanced = calcPoolLtv([
-      { pairKey: "BTCUSD", margin: 500, leverage: 1 },
-      { pairKey: "EURUSD", margin: 500, leverage: 1 },
-    ]).ltv;
-    const dominated = calcPoolLtv([
-      { pairKey: "BTCUSD", margin: 900, leverage: 1 },
-      { pairKey: "EURUSD", margin: 100, leverage: 1 },
-    ]).ltv;
-    expect(dominated).toBeLessThan(balanced);
+  it("penalises a portfolio with one >50% allocation", () => {
+    let markets = makeMarkets(["E1", "E2", "E3", "E4"]);
+    markets = applyAllocations({
+      markets,
+      userId: "A",
+      userAllocation: {
+        allocations: {
+          [markets[0].id]: 0.7,
+          [markets[1].id]: 0.1,
+          [markets[2].id]: 0.1,
+          [markets[3].id]: 0.1,
+        },
+      },
+      totalCapital: 1000,
+    }).markets;
+    const r = calcAllocationLtv({ markets, userId: "A" });
+    expect(r.breakdown.maxWeightPenalty).toBeGreaterThan(0);
+    expect(r.ltv).toBeLessThan(POOL_LTV_CEILING);
   });
 
-  it("rewards tail-hedge coverage (e.g. GOLD)", () => {
-    const noHedge = calcPoolLtv([
-      { pairKey: "BTCUSD", margin: 500, leverage: 1 },
-      { pairKey: "EURUSD", margin: 500, leverage: 1 },
-    ]);
-    const hedged = calcPoolLtv([
-      { pairKey: "BTCUSD", margin: 425, leverage: 1 },
-      { pairKey: "EURUSD", margin: 425, leverage: 1 },
-      { pairKey: "GOLD",   margin: 150, leverage: 1 }, // 15% target
-    ]);
-    expect(hedged.stats.tailFraction).toBeCloseTo(0.15, 2);
-    expect(hedged.ltv).toBeGreaterThan(noHedge.ltv);
-  });
-
-  it("rewards leverage discipline (low leverage relative to ESMA cap)", () => {
-    const highLev = calcPoolLtv([
-      { pairKey: "BTCUSD", margin: 500, leverage: 2 }, // BTC ESMA cap = 2 → at cap
-      { pairKey: "EURUSD", margin: 500, leverage: 30 }, // EURUSD ESMA cap = 30 → at cap
-    ]);
-    const lowLev = calcPoolLtv([
-      { pairKey: "BTCUSD", margin: 500, leverage: 1 },
-      { pairKey: "EURUSD", margin: 500, leverage: 5 },
-    ]);
-    expect(lowLev.ltv).toBeGreaterThan(highLev.ltv);
-  });
-
-  it("LTV stays inside [floor, ceiling] for any book", () => {
+  it("LTV stays in [floor, ceiling] for any allocation", () => {
+    const markets = makeMarkets(["E1", "E2"]);
     const samples = [
       [],
-      [{ pairKey: "BTCUSD", margin: 100, leverage: 2 }],
-      [
-        { pairKey: "BTCUSD", margin: 100, leverage: 1 },
-        { pairKey: "EURUSD", margin: 100, leverage: 1 },
-        { pairKey: "SPX500", margin: 100, leverage: 1 },
-        { pairKey: "GOLD",   margin: 100, leverage: 1 },
-        { pairKey: "OIL",    margin: 100, leverage: 1 },
-        { pairKey: "TSLA",   margin: 100, leverage: 1 },
-      ],
+      applyAllocations({
+        markets,
+        userId: "A",
+        userAllocation: { allocations: { [markets[0].id]: 1 } },
+        totalCapital: 100,
+      }).markets,
     ];
-    for (const positions of samples) {
-      const { ltv } = calcPoolLtv(positions);
-      expect(ltv).toBeGreaterThanOrEqual(POOL_LTV_FLOOR);
-      expect(ltv).toBeLessThanOrEqual(POOL_LTV_CEILING);
+    for (const ms of samples) {
+      const r = calcAllocationLtv({ markets: ms, userId: "A" });
+      expect(r.ltv).toBeGreaterThanOrEqual(POOL_LTV_FLOOR);
+      expect(r.ltv).toBeLessThanOrEqual(POOL_LTV_CEILING);
     }
   });
 
-  it("breakdown is exposed for UI consumption", () => {
-    const { breakdown } = calcPoolLtv([
-      { pairKey: "BTCUSD", margin: 300, leverage: 1 },
-      { pairKey: "EURUSD", margin: 300, leverage: 1 },
-      { pairKey: "SPX500", margin: 400, leverage: 1 },
-    ]);
-    expect(breakdown).toHaveProperty("floor");
-    expect(breakdown).toHaveProperty("concentrationComponent");
-    expect(breakdown).toHaveProperty("diversityComponent");
-    expect(breakdown).toHaveProperty("tailComponent");
-    expect(breakdown).toHaveProperty("disciplineComponent");
-    expect(breakdown).toHaveProperty("maxWeightPenalty");
+  it("breakdown is exposed for UI", () => {
+    let markets = makeMarkets(["E1", "E2", "E3"]);
+    markets = applyAllocations({
+      markets,
+      userId: "A",
+      userAllocation: {
+        allocations: {
+          [markets[0].id]: 0.4,
+          [markets[1].id]: 0.4,
+          [markets[2].id]: 0.2,
+        },
+      },
+      totalCapital: 1000,
+    }).markets;
+    const r = calcAllocationLtv({ markets, userId: "A" });
+    expect(r.breakdown).toHaveProperty("floor");
+    expect(r.breakdown).toHaveProperty("concentration");
+    expect(r.breakdown).toHaveProperty("diversity");
+    expect(r.breakdown).toHaveProperty("breadth");
+    expect(r.breakdown).toHaveProperty("maxWeightPenalty");
   });
 });
 
-describe("calcAvailablePoolCredit", () => {
-  it("returns 0 for a nil deposit", () => {
-    expect(calcAvailablePoolCredit(0, [])).toBe(0);
+describe("calcAvailableCredit", () => {
+  it("returns 0 when user has no stake", () => {
+    const markets = makeMarkets(["E1"]);
+    expect(calcAvailableCredit({ markets, userId: "X" })).toBe(0);
   });
 
-  it("scales with deposit × LTV minus already-deployed credit", () => {
-    const positions = [
-      { pairKey: "BTCUSD", margin: 300, leverage: 1 },
-      { pairKey: "EURUSD", margin: 300, leverage: 1 },
-      { pairKey: "SPX500", margin: 400, leverage: 1 },
-    ];
-    const { ltv } = calcPoolLtv(positions);
-    const available = calcAvailablePoolCredit(1000, positions, 200);
-    expect(available).toBeCloseTo(1000 * ltv - 200, 2);
+  it("equals stake × LTV when no credit deployed", () => {
+    let markets = makeMarkets(["E1", "E2", "E3", "E4"]);
+    markets = applyAllocations({
+      markets,
+      userId: "A",
+      userAllocation: {
+        allocations: Object.fromEntries(markets.map((m) => [m.id, 0.25])),
+      },
+      totalCapital: 1000,
+    }).markets;
+    const { ltv, stats } = calcAllocationLtv({ markets, userId: "A" });
+    const expected = stats.totalStake * ltv;
+    expect(calcAvailableCredit({ markets, userId: "A" })).toBeCloseTo(expected);
   });
 
-  it("never goes negative — over-budget reports 0 available", () => {
-    const positions = [{ pairKey: "BTCUSD", margin: 1000, leverage: 1 }];
-    const available = calcAvailablePoolCredit(1000, positions, 10000);
-    expect(available).toBe(0);
+  it("never goes negative", () => {
+    let markets = makeMarkets(["E1"]);
+    markets = applyAllocations({
+      markets,
+      userId: "A",
+      userAllocation: { allocations: { [markets[0].id]: 1 } },
+      totalCapital: 100,
+    }).markets;
+    expect(
+      calcAvailableCredit({ markets, userId: "A", deployedCredit: 1e6 })
+    ).toBe(0);
   });
 });
 
 describe("isOverCreditBudget", () => {
-  it("is false when no credit is deployed", () => {
-    expect(isOverCreditBudget(1000, [], 0)).toBe(false);
+  it("is false when nothing is deployed", () => {
+    expect(
+      isOverCreditBudget({
+        markets: makeMarkets(["E1"]),
+        userId: "A",
+        deployedCredit: 0,
+      })
+    ).toBe(false);
   });
 
-  it("is true when deployed credit exceeds deposit × LTV", () => {
-    const positions = [{ pairKey: "BTCUSD", margin: 1000, leverage: 1 }];
-    expect(isOverCreditBudget(1000, positions, 500)).toBe(true);
-  });
-
-  it("is false for a diversified book within budget", () => {
-    const positions = [
-      { pairKey: "BTCUSD", margin: 300, leverage: 1 },
-      { pairKey: "EURUSD", margin: 300, leverage: 1 },
-      { pairKey: "SPX500", margin: 400, leverage: 1 },
-    ];
-    expect(isOverCreditBudget(1000, positions, 400)).toBe(false);
+  it("is true when deployed credit exceeds stake × LTV", () => {
+    let markets = makeMarkets(["E1"]);
+    markets = applyAllocations({
+      markets,
+      userId: "A",
+      userAllocation: { allocations: { [markets[0].id]: 1 } },
+      totalCapital: 100,
+    }).markets;
+    expect(
+      isOverCreditBudget({
+        markets,
+        userId: "A",
+        deployedCredit: 1000,
+      })
+    ).toBe(true);
   });
 });

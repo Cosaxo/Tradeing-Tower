@@ -102,32 +102,6 @@ export function calcAllocationLtv({ markets = [], userId, marketsTotal = null })
   };
 }
 
-// Backwards-compatible alias used by older callers (CreditDesk, App.jsx,
-// PortfolioStructurer). Takes positions for legacy interface but routes
-// to the allocation-based version when given markets+userId.
-export function calcPoolLtv(positions = []) {
-  // Legacy positional invocation — return floor-only result so older
-  // callers don't crash. New code should use calcAllocationLtv.
-  void positions;
-  return {
-    ltv: POOL_LTV_FLOOR,
-    breakdown: {
-      floor: POOL_LTV_FLOOR,
-      concentration: 0,
-      diversity: 0,
-      breadth: 0,
-      maxWeightPenalty: 0,
-    },
-    stats: {
-      numMarkets: 0,
-      hhi: 1,
-      maxWeight: 1,
-      shannonNorm: 0,
-      totalStake: 0,
-    },
-  };
-}
-
 // Available credit budget = totalStake × LTV − already-deployed.
 export function calcAvailableCredit({
   markets,

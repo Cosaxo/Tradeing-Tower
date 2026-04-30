@@ -7,7 +7,6 @@ import {
   getEntropyMultForUser,
   adaptMetaParams,
   runAuction,
-  timeWeightedYieldMult,
 } from "../auction.js";
 
 describe("geodesicWeight", () => {
@@ -111,8 +110,3 @@ describe("runAuction", () => {
   });
 });
 
-describe("timeWeightedYieldMult re-export", () => {
-  it("is available from auction.js", () => {
-    expect(typeof timeWeightedYieldMult).toBe("function");
-  });
-});

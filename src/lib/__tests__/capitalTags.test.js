@@ -22,8 +22,8 @@ describe("totalTagged", () => {
     expect(totalTagged({})).toBe(0);
   });
   it("sums all tag slots", () => {
-    const t = { poolDeposit: 100, auctionMargin: 200, contractCollateral: 50 };
-    expect(totalTagged(t)).toBe(350);
+    const t = { poolDeposit: 100, auctionMargin: 200 };
+    expect(totalTagged(t)).toBe(300);
   });
 });
 
@@ -46,11 +46,10 @@ describe("tryTag", () => {
     const t = tryTag(5000, initTags(), "poolDeposit", 1000);
     expect(t.poolDeposit).toBe(1000);
   });
-  it("stacks tags on the same margin (§10.1 core invariant)", () => {
+  it("stacks tags on the same margin (same-capital invariant)", () => {
     let t = initTags();
     t = tryTag(5000, t, "poolDeposit", 2000);
-    t = tryTag(5000, t, "auctionMargin", 2000);
-    t = tryTag(5000, t, "contractCollateral", 1000);
+    t = tryTag(5000, t, "auctionMargin", 3000);
     expect(totalTagged(t)).toBe(5000);
     expect(freeMargin(5000, t)).toBe(0);
   });

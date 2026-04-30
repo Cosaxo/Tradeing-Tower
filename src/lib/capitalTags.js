@@ -1,33 +1,28 @@
-// Same-capital principle — whitepaper §10.1.
+// Same-capital principle.
 //
 // Capital does not move between floors. It accumulates roles. The same
 // dollar of margin can simultaneously be tagged as:
 //
-//   - poolDeposit        (Floor 1 — exposed to pool claims, earns pool yield)
-//   - auctionMargin      (Floor 2 — backing an open auction position)
-//   - contractCollateral (Floor 4 — backing strip obligations; name
-//                         retained for back-compat after the contract-
-//                         market cut so persisted tags still read.)
+//   - poolDeposit    (insurance-market allocation — backs LTV + TT mint)
+//   - auctionMargin  (backing an open LAP position)
 //
-// Margin itself changes only through real cash flows: tips, P&L, strip
-// premiums, pool yield. Tagging is a pure claim operation — no margin
+// Margin itself changes only through real cash flows: tips, P&L,
+// premiums, payouts. Tagging is a pure claim operation — no margin
 // is transferred.
 //
-// Stacking is safe because each floor's claims are bounded and
-// prioritised (see whitepaper §10.1 invariants).
+// Stacking is safe because each role's claim is bounded and the sum
+// of tagged amounts is guarded by `freeMargin`.
 
-export const TAG_KEYS = ["poolDeposit", "auctionMargin", "contractCollateral"];
+export const TAG_KEYS = ["poolDeposit", "auctionMargin"];
 
 export const TAG_LABELS = {
   poolDeposit: "Pool Collateral",
   auctionMargin: "Auction Margin",
-  contractCollateral: "Strip Collateral",
 };
 
 export const TAG_COLORS = {
   poolDeposit: "#a78bfa",
   auctionMargin: "#34d399",
-  contractCollateral: "#60a5fa",
 };
 
 export function initTags() {

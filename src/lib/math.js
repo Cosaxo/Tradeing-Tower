@@ -23,13 +23,6 @@ export function sortino(returns, target = 0) {
   return dev > 0 ? (mean - target) / dev : 0;
 }
 
-export function calcVolatility(returns) {
-  if (!returns || returns.length < 2) return 0;
-  const mean = returns.reduce((s, r) => s + r, 0) / returns.length;
-  const variance = returns.reduce((s, r) => s + (r - mean) ** 2, 0) / returns.length;
-  return Math.sqrt(variance);
-}
-
 export function calcCalmar(returns, maxDD) {
   if (!returns || !returns.length) return null;
   if (!Number.isFinite(maxDD) || maxDD === 0) return null;
@@ -78,11 +71,6 @@ export function calcCorrelation(a, b) {
   const da = Math.sqrt(ax.reduce((s, v) => s + (v - ma) ** 2, 0));
   const db = Math.sqrt(bx.reduce((s, v) => s + (v - mb) ** 2, 0));
   return da * db > 0 ? num / (da * db) : 0;
-}
-
-// Loyalty multiplier: caps at 1.4x after 20 epochs.
-export function timeWeightedYieldMult(epochsHeld) {
-  return 1 + 0.4 * Math.min(Math.max(0, epochsHeld), 20) / 20;
 }
 
 // Realized volatility: rolling std of last N log price returns.

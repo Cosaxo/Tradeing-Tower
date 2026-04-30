@@ -6,9 +6,6 @@
 // distribution self-calibrates to the actual order flow.
 
 import { ENTROPY_BETA, ENTROPY_EPS, ADAPTIVE_LR, SOFT_CLOSE_PCT, SUB_UNIT_STEPS } from "../constants/system.js";
-import { timeWeightedYieldMult } from "./math.js";
-
-export { timeWeightedYieldMult };
 
 // ---------------------------------------------------------------------------
 // Geodesic weight

@@ -56,31 +56,33 @@ export function InsuranceDesk({
   const overAllocated = draftSum > 1.0001;
 
   // Look up the registry entry for each market so we can show the label.
-  const eventByMarketId = useMemo(() => {
+  // Keyed by eventId (the stable identifier) instead of the runtime
+  // market.id.
+  const eventByEventId = useMemo(() => {
     const out = {};
-    for (const m of markets) {
-      const ev = STANDARD_EVENTS.find((e) => e.id === m.eventId);
-      if (ev) out[m.id] = ev;
-    }
+    for (const ev of STANDARD_EVENTS) out[ev.id] = ev;
     return out;
-  }, [markets]);
+  }, []);
 
   const grouped = useMemo(() => {
     const out = { "pair-price": [], macro: [] };
     for (const m of markets) {
-      const ev = eventByMarketId[m.id];
+      const ev = eventByEventId[m.eventId];
       if (!ev) continue;
       out[ev.category]?.push({ market: m, event: ev });
     }
     return out;
-  }, [markets, eventByMarketId]);
+  }, [markets, eventByEventId]);
 
-  function setSlider(marketId, pct) {
-    setDraft((prev) => ({ ...prev, [marketId]: pct }));
+  // Slider state is keyed by the stable eventId, not the runtime
+  // market.id. That's the same key shape the persisted allocation uses
+  // (see allocations.js comment).
+  function setSlider(eventId, pct) {
+    setDraft((prev) => ({ ...prev, [eventId]: pct }));
   }
-  function clearSlider(marketId) {
+  function clearSlider(eventId) {
     setDraft((prev) => {
-      const { [marketId]: _omit, ...rest } = prev;
+      const { [eventId]: _omit, ...rest } = prev;
       return rest;
     });
   }
@@ -88,7 +90,7 @@ export function InsuranceDesk({
     const n = markets.length;
     if (n === 0) return;
     const equal = 1 / n;
-    setDraft(Object.fromEntries(markets.map((m) => [m.id, equal])));
+    setDraft(Object.fromEntries(markets.map((m) => [m.eventId, equal])));
   }
   function clearAll() {
     setDraft({});
@@ -168,14 +170,14 @@ export function InsuranceDesk({
         <Section title="Per-pair price events" color={COLOR_PAIR_PRICE}>
           {grouped["pair-price"].map(({ market, event }) => (
             <MarketRow
-              key={market.id}
+              key={market.eventId}
               market={market}
               event={event}
-              draftPct={draft[market.id] ?? 0}
+              draftPct={draft[market.eventId] ?? 0}
               userStake={market.insurerPositions?.[playerId] ?? 0}
               freeMargin={freeMarginToAllocate}
-              onChange={(v) => setSlider(market.id, v)}
-              onClear={() => clearSlider(market.id)}
+              onChange={(v) => setSlider(market.eventId, v)}
+              onClear={() => clearSlider(market.eventId)}
               accent={COLOR_PAIR_PRICE}
             />
           ))}
@@ -187,14 +189,14 @@ export function InsuranceDesk({
         <Section title="Macro events" color={COLOR_MACRO}>
           {grouped["macro"].map(({ market, event }) => (
             <MarketRow
-              key={market.id}
+              key={market.eventId}
               market={market}
               event={event}
-              draftPct={draft[market.id] ?? 0}
+              draftPct={draft[market.eventId] ?? 0}
               userStake={market.insurerPositions?.[playerId] ?? 0}
               freeMargin={freeMarginToAllocate}
-              onChange={(v) => setSlider(market.id, v)}
-              onClear={() => clearSlider(market.id)}
+              onChange={(v) => setSlider(market.eventId, v)}
+              onClear={() => clearSlider(market.eventId)}
               accent={COLOR_MACRO}
             />
           ))}

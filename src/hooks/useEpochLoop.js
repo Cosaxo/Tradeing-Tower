@@ -35,7 +35,7 @@ import { getEffectiveCap } from "../lib/esma.js";
 import { ACTIVE_PAIRS } from "../constants/assets.js";
 
 export function useEpochLoop({
-  pairStates: _pairStates, // reserved for future read-only access
+  pairStates,       // current pairStates snapshot — used as the input to each tick
   setPairStates,    // React setter
   player,           // { id, leverage, margin, side, strategy, minYield, tip_tiers, ... }
   setPlayer,        // React setter
@@ -52,17 +52,22 @@ export function useEpochLoop({
 }) {
   const mediumCountRef = useRef(0);
   const lastPlayerEditRef = useRef(0);
-  // Latest player positions, threaded via ref so the medium-tick
-  // callback doesn't have to recreate on every position change.
+  // Tick boundary clock for soft-close — tracks when the current
+  // medium epoch began so soft-close measures against the tick window,
+  // not the user's last-edit timestamp.
+  const lastMediumTickRef = useRef(0);
+  // External state mirrored into refs so the tick can read the freshest
+  // snapshot synchronously without React's render cycle. Crucially, the
+  // tick body operates on these refs and calls setters with concrete
+  // values (or pure updaters) AT THE END — never inside another
+  // setState's updater. That isolates side effects from React 18
+  // StrictMode's dev-mode double-invocation of state updaters.
+  const pairStatesRef = useRef(pairStates);
+  pairStatesRef.current = pairStates;
   const openPositionsRef = useRef(openPositions);
   openPositionsRef.current = openPositions;
-  // Same trick for ttState so the loop can read the latest snapshot
-  // without re-creating on every mint/transfer.
   const ttStateRef = useRef(ttState);
   ttStateRef.current = ttState;
-  // And for insuranceState — the medium-tick block reads + writes a
-  // working copy across the per-pair forEach + the redemption-cycle
-  // block, so we need the freshest snapshot each tick.
   const insuranceStateRef = useRef(insuranceState);
   insuranceStateRef.current = insuranceState;
 
@@ -107,20 +112,45 @@ export function useEpochLoop({
   // -------------------------------------------------------------------------
   const mediumTick = useCallback(() => {
     const now = Date.now();
-    // Soft-close (§2.2): bids amended within the last SOFT_CLOSE_PCT of the epoch
-    // are frozen out. GRACE_MS handles per-edit settling; soft-close handles the
-    // intra-epoch bid-freeze window.
-    const gracePeriod = now - lastPlayerEditRef.current < GRACE_MS;
+    // Soft-close: the last (1 − SOFT_CLOSE_PCT) of each medium epoch
+    // freezes bids edited inside the freeze window. The window is
+    // measured against the medium-tick boundary, NOT against the
+    // user's last edit. GRACE_MS still gives a separate
+    // "config-just-changed" grace period at the very end.
     const softCloseWindowMs = MEDIUM_MS * (1 - SOFT_CLOSE_PCT);
-    const timeSinceLastEdit = now - lastPlayerEditRef.current;
-    const inSoftClose =
-      timeSinceLastEdit < softCloseWindowMs && timeSinceLastEdit >= GRACE_MS;
-    const bidsFrozen = gracePeriod || inSoftClose;
+    const timeSinceLastTick = now - lastMediumTickRef.current;
+    const timeIntoEpoch = lastMediumTickRef.current === 0
+      ? 0
+      : Math.max(0, MEDIUM_MS - (timeSinceLastTick % MEDIUM_MS));
+    // We're in the soft-close window if the time remaining in this
+    // epoch is less than softCloseWindowMs AND the player just edited
+    // (their most recent edit landed during the freeze window).
+    const editAge = now - lastPlayerEditRef.current;
+    const inFreezeWindow = timeIntoEpoch < softCloseWindowMs;
+    const editedInsideFreeze = editAge < softCloseWindowMs;
+    const gracePeriod = editAge < GRACE_MS;
+    const bidsFrozen = gracePeriod || (inFreezeWindow && editedInsideFreeze);
+    lastMediumTickRef.current = now;
     mediumCountRef.current += 1;
     const doSlow = mediumCountRef.current % SLOW_EVERY === 0;
 
-    setPairStates((prev) => {
-      const logs = [];
+    // Side-effect collector. Replaces the old pattern of calling other
+    // setters from inside the setPairStates updater (which made every
+    // side effect fire twice in StrictMode dev). All accumulators are
+    // drained ONCE after the pure compute phase finishes.
+    const sideEffects = {
+      logs: [],
+      playerOverrides: null,    // absolute set from per-pair player settle
+      playerMarginDelta: 0,     // accumulated cash flows added on top
+      roleEntries: [],
+      nextTtState: null,
+      nextInsuranceState: null,
+      toasts: [],
+    };
+
+    {
+      const prev = pairStatesRef.current;
+      const logs = sideEffects.logs;
       const next = { ...prev };
 
       // Collect all price histories for cross-market correlation (slow only).
@@ -159,9 +189,14 @@ export function useEpochLoop({
           updateNpcRegime(npc, prices.slice(-20), updatedRegime, null, yieldModel)
         );
         const restockedNpcs = tickNpcRestock(regimeUpdatedNpcs);
-        const justRestocked = restockedNpcs.filter(
-          (n, i) => (regimeUpdatedNpcs[i].restockRemaining ?? 0) === 1 && (n.restockRemaining ?? 0) === 0
-        );
+        // Detect "just restocked" by id-matching against the pre-tick
+        // snapshot (regimeUpdatedNpcs). Index-aligned compare would
+        // silently misclassify if anything reorders the NPC array.
+        const preById = new Map(regimeUpdatedNpcs.map((n) => [n.id, n]));
+        const justRestocked = restockedNpcs.filter((n) => {
+          const pre = preById.get(n.id);
+          return (pre?.restockRemaining ?? 0) === 1 && (n.restockRemaining ?? 0) === 0;
+        });
         justRestocked.forEach((n) => logs.push(`[NPC] ${n.id} restocked to $${n.base_margin}`));
 
         // Only NPCs with margin + not in cooldown participate in the auction.
@@ -231,9 +266,12 @@ export function useEpochLoop({
 
         // Write NPC settlement margins back — track liquidations + schedule restock.
         const updatedNpcs = applyNpcSettlement(restockedNpcs, settledUsers);
-        const deadThisEpoch = updatedNpcs.filter(
-          (n, i) => (restockedNpcs[i].current_margin ?? restockedNpcs[i].base_margin) > 0 && n.current_margin === 0
-        );
+        const settledById = new Map(restockedNpcs.map((n) => [n.id, n]));
+        const deadThisEpoch = updatedNpcs.filter((n) => {
+          const pre = settledById.get(n.id);
+          const preMargin = pre?.current_margin ?? pre?.base_margin ?? 0;
+          return preMargin > 0 && n.current_margin === 0;
+        });
         deadThisEpoch.forEach((n) =>
           logs.push(`[NPC] ${n.id} liquidated — restock in ${n.restockRemaining} epochs`)
         );
@@ -271,16 +309,17 @@ export function useEpochLoop({
               creditChange: 0,
             };
 
-            setPlayer((prev) => ({
-              ...prev,
+            // Absolute reset of player state from this pair's settlement.
+            // Combined with playerMarginDelta (rental tips, insurance flows,
+            // redemption dollars) below at apply time.
+            sideEffects.playerOverrides = {
               margin: playerSettled.margin,
               pnl: playerSettled.pnl ?? 0,
               liquidated: playerSettled.liquidated,
-              // If margin fell below tagged total, shrink tags proportionally (§10.1).
-              tags: normalizeTags(playerSettled.margin, prev.tags ?? {}),
-            }));
+              normaliseTagsAt: playerSettled.margin,
+            };
             if (playerSettled.liquidated) {
-              addToast(`Liquidated on ${pk}!`, "error");
+              sideEffects.toasts.push([`Liquidated on ${pk}!`, "error"]);
             }
           }
         }
@@ -362,10 +401,7 @@ export function useEpochLoop({
         const ownerCredits = rentalSettle.ownerCredits ?? {};
         const playerOwnerCredit = ownerCredits[pid] ?? 0;
         if (playerOwnerCredit > 0) {
-          setPlayer((prev) => ({
-            ...prev,
-            margin: (prev.margin ?? 0) + playerOwnerCredit,
-          }));
+          sideEffects.playerMarginDelta += playerOwnerCredit;
         }
 
         // Match the orderbook against newly-arrived NPC bids.
@@ -407,8 +443,8 @@ export function useEpochLoop({
         };
 
         // Post the player's per-role ledger entry for this epoch.
-        if (playerRoleEntry && setRoleLedger) {
-          setRoleLedger((prev) => appendEpochEntry(prev, playerRoleEntry));
+        if (playerRoleEntry) {
+          sideEffects.roleEntries.push(playerRoleEntry);
         }
       });
 
@@ -427,7 +463,7 @@ export function useEpochLoop({
       // payouts/seller losses) are aggregated on a per-user basis and
       // applied to the local player's margin at the end.
       // -----------------------------------------------------------------
-      if (insuranceStateRef.current && setInsuranceState) {
+      if (insuranceStateRef.current) {
         const pid = player?.id ?? "You";
         const tickEpoch = epochOfFirstPair(next);
         // Pull the active pair's correlation map as the cross-pair
@@ -495,14 +531,14 @@ export function useEpochLoop({
           return r.product;
         });
 
-        setInsuranceState(nextInsurance);
+        sideEffects.nextInsuranceState = nextInsurance;
         // Persist the working copy for downstream blocks (redemption
         // haircut application reads it via the ref).
         insuranceStateRef.current = nextInsurance;
 
         const playerNet = playerCashChanges[pid] ?? 0;
         if (playerNet !== 0) {
-          setPlayer((prev) => ({ ...prev, margin: (prev.margin ?? 0) + playerNet }));
+          sideEffects.playerMarginDelta += playerNet;
         }
       }
 
@@ -524,7 +560,7 @@ export function useEpochLoop({
       //      wallet TT first, then record any remaining shortfall as
       //      debt.
       // -----------------------------------------------------------------
-      if (mediumCountRef.current % REDEMPTION_EVERY === 0 && setTtState && ttStateRef.current) {
+      if (mediumCountRef.current % REDEMPTION_EVERY === 0 && ttStateRef.current) {
         const tickEpoch = epochOfFirstPair(next);
         let workingTt = ttStateRef.current;
         let workingInsurance = insuranceStateRef.current;
@@ -584,14 +620,34 @@ export function useEpochLoop({
           workingInsurance = { ...workingInsurance, markets: nextMarkets };
         }
 
-        // Step 4: route the express penalty. The new system has no
-        // single "pool" target for this; ideally it would feed the
-        // reinsurance sellers. For now we just log and drop it —
-        // distributing across products requires a clean injection
-        // helper we don't have yet.
-        if (cycle.penaltyToPool > 0) {
+        // Step 4: route the express penalty into the reinsurance
+        // sellers' pots, weighted by each product's coverage fraction
+        // (so the larger product gets the larger share). This pays
+        // sellers for absorbing the panic-redemption stress.
+        if (cycle.penaltyToPool > 0 && workingInsurance?.reinsurance?.length) {
+          const totalCov = workingInsurance.reinsurance.reduce(
+            (s, p) => s + (p.coverageFraction ?? 0),
+            0
+          ) || 1;
+          const splitProducts = workingInsurance.reinsurance.map((p) => {
+            const share = (p.coverageFraction ?? 0) / totalCov;
+            const credit = cycle.penaltyToPool * share;
+            if (credit <= 0 || (p.sellerCapital ?? 0) <= 0) return p;
+            // Distribute credit pro-rata to existing sellers' stakes.
+            const newPositions = { ...p.sellerPositions };
+            for (const [uid, stake] of Object.entries(p.sellerPositions ?? {})) {
+              const fraction = stake / p.sellerCapital;
+              newPositions[uid] = stake + credit * fraction;
+            }
+            return {
+              ...p,
+              sellerPositions: newPositions,
+              sellerCapital: (p.sellerCapital ?? 0) + credit,
+            };
+          });
+          workingInsurance = { ...workingInsurance, reinsurance: splitProducts };
           logs.push(
-            `[TT-PENALTY] $${cycle.penaltyToPool.toFixed(2)} express penalty (no target — see Phase 5 backlog)`
+            `[TT-PENALTY] $${cycle.penaltyToPool.toFixed(2)} routed to reinsurance sellers (split by coverageFraction)`
           );
         }
 
@@ -600,10 +656,7 @@ export function useEpochLoop({
         // dollars stay in the merchant abstraction (ignored for now).
         const playerDollars = cycle.dollarsOut[player?.id] ?? 0;
         if (playerDollars > 0) {
-          setPlayer((prev) => ({
-            ...prev,
-            margin: (prev.margin ?? 0) + playerDollars,
-          }));
+          sideEffects.playerMarginDelta += playerDollars;
         }
 
         // Step 6: solvency recheck per affected minter.
@@ -636,19 +689,60 @@ export function useEpochLoop({
           }
         }
 
-        setTtState(workingTt);
+        sideEffects.nextTtState = workingTt;
         if (workingInsurance && workingInsurance !== insuranceStateRef.current) {
-          setInsuranceState(workingInsurance);
+          sideEffects.nextInsuranceState = workingInsurance;
           insuranceStateRef.current = workingInsurance;
         }
       }
 
-      if (logs.length > 0) {
-        setLogs((prev) => [...prev.slice(-300), ...logs]);
+      // ---- Apply phase ----------------------------------------------------
+      // All setters run exactly once here, AFTER the pure compute above.
+      // No setter ever runs from inside another setter's updater, so React
+      // 18 StrictMode dev-mode double-invocation can't double our side
+      // effects. Updaters that remain in function form below are pure
+      // (depend only on their `prev` argument) so doubling is harmless.
+      setPairStates(next);
+      pairStatesRef.current = next;
+
+      if (sideEffects.nextTtState) {
+        setTtState(sideEffects.nextTtState);
+        ttStateRef.current = sideEffects.nextTtState;
+      }
+      if (sideEffects.nextInsuranceState) {
+        setInsuranceState(sideEffects.nextInsuranceState);
+        insuranceStateRef.current = sideEffects.nextInsuranceState;
       }
 
-      return next;
-    });
+      const overrides = sideEffects.playerOverrides;
+      const delta = sideEffects.playerMarginDelta;
+      if (overrides || delta !== 0) {
+        setPlayer((prev) => {
+          const baseMargin = overrides ? overrides.margin : (prev.margin ?? 0);
+          const baseTags = overrides
+            ? normalizeTags(overrides.normaliseTagsAt, prev.tags ?? {})
+            : prev.tags;
+          const next = { ...prev };
+          if (overrides) {
+            next.pnl = overrides.pnl;
+            next.liquidated = overrides.liquidated;
+            next.tags = baseTags;
+          }
+          next.margin = baseMargin + delta;
+          return next;
+        });
+      }
+
+      for (const entry of sideEffects.roleEntries) {
+        setRoleLedger((prev) => appendEpochEntry(prev, entry));
+      }
+
+      for (const [msg, kind] of sideEffects.toasts) addToast(msg, kind);
+
+      if (sideEffects.logs.length > 0) {
+        setLogs((prev) => [...prev.slice(-300), ...sideEffects.logs]);
+      }
+    }
   }, [setPairStates, player, setPlayer, setLogs, addToast, setRoleLedger, setTtState, setInsuranceState]);
 
   // -------------------------------------------------------------------------

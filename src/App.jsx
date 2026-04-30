@@ -102,7 +102,14 @@ const INITIAL_PLAYER = {
 const TABS = ["Chart", "Auction", "Insurance", "Credit", "Stress", "Markets", "History", "Log"];
 
 export default function App() {
-  const [pairStates, setPairStates] = useState(INITIAL_PAIR_STATES);
+  // pairStates is persisted so epoch counters, price history, and
+  // regime context survive a reload. Without this, openPositions
+  // would carry an `openedAtEpoch` that referred to a counter that
+  // had been reset to 0 — making the field meaningless.
+  const [pairStates, setPairStates, clearPairStates] = usePersistentState(
+    "tt.pairStates",
+    INITIAL_PAIR_STATES
+  );
   const [player, setPlayer, clearPlayer] = usePersistentState("tt.player", INITIAL_PLAYER);
   const [logs, setLogs] = useState([]);
   const [running, setRunning] = useState(false);
@@ -602,7 +609,7 @@ export default function App() {
     clearLedger();
     clearTt();
     clearInsurance();
-    setPairStates(INITIAL_PAIR_STATES);
+    clearPairStates();
     setLogs([]);
     setShockResults(null);
     addToast("Session reset", "info");
@@ -618,7 +625,13 @@ export default function App() {
       }));
       onPlayerEdit();
       addToast(`Router: switch to ${s.pairKey} ${s.action}`, "info");
+      return;
     }
+    // Defensive: surface unrecognized actions instead of silently
+    // swallowing the click. The router can in principle emit other
+    // actions (CLOSE_*, REBALANCE, etc.) — when it does, we'll see
+    // it here rather than a dead button.
+    addToast(`Router: action "${s.action}" not yet implemented`, "warning");
   }
 
   useKeyboardShortcuts({

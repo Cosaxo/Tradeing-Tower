@@ -27,7 +27,7 @@ describe("calcAllocationLtv", () => {
     markets = applyAllocations({
       markets,
       userId: "A",
-      userAllocation: { allocations: { [markets[0].id]: 1.0 } },
+      userAllocation: { allocations: { [markets[0].eventId]: 1.0 } },
       totalCapital: 1000,
     }).markets;
     const r = calcAllocationLtv({ markets, userId: "A" });
@@ -45,10 +45,10 @@ describe("calcAllocationLtv", () => {
       userId: "A",
       userAllocation: {
         allocations: {
-          [markets[0].id]: 0.25,
-          [markets[1].id]: 0.25,
-          [markets[2].id]: 0.25,
-          [markets[3].id]: 0.25,
+          [markets[0].eventId]: 0.25,
+          [markets[1].eventId]: 0.25,
+          [markets[2].eventId]: 0.25,
+          [markets[3].eventId]: 0.25,
         },
       },
       totalCapital: 1000,
@@ -62,7 +62,7 @@ describe("calcAllocationLtv", () => {
     const ids = ["E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8"];
     let markets = makeMarkets(ids);
     const allocs = {};
-    for (const m of markets) allocs[m.id] = 1 / ids.length;
+    for (const m of markets) allocs[m.eventId] = 1 / ids.length;
     markets = applyAllocations({
       markets,
       userId: "A",
@@ -80,10 +80,10 @@ describe("calcAllocationLtv", () => {
       userId: "A",
       userAllocation: {
         allocations: {
-          [markets[0].id]: 0.7,
-          [markets[1].id]: 0.1,
-          [markets[2].id]: 0.1,
-          [markets[3].id]: 0.1,
+          [markets[0].eventId]: 0.7,
+          [markets[1].eventId]: 0.1,
+          [markets[2].eventId]: 0.1,
+          [markets[3].eventId]: 0.1,
         },
       },
       totalCapital: 1000,
@@ -100,7 +100,7 @@ describe("calcAllocationLtv", () => {
       applyAllocations({
         markets,
         userId: "A",
-        userAllocation: { allocations: { [markets[0].id]: 1 } },
+        userAllocation: { allocations: { [markets[0].eventId]: 1 } },
         totalCapital: 100,
       }).markets,
     ];
@@ -118,9 +118,9 @@ describe("calcAllocationLtv", () => {
       userId: "A",
       userAllocation: {
         allocations: {
-          [markets[0].id]: 0.4,
-          [markets[1].id]: 0.4,
-          [markets[2].id]: 0.2,
+          [markets[0].eventId]: 0.4,
+          [markets[1].eventId]: 0.4,
+          [markets[2].eventId]: 0.2,
         },
       },
       totalCapital: 1000,
@@ -146,7 +146,7 @@ describe("calcAvailableCredit", () => {
       markets,
       userId: "A",
       userAllocation: {
-        allocations: Object.fromEntries(markets.map((m) => [m.id, 0.25])),
+        allocations: Object.fromEntries(markets.map((m) => [m.eventId, 0.25])),
       },
       totalCapital: 1000,
     }).markets;
@@ -160,7 +160,7 @@ describe("calcAvailableCredit", () => {
     markets = applyAllocations({
       markets,
       userId: "A",
-      userAllocation: { allocations: { [markets[0].id]: 1 } },
+      userAllocation: { allocations: { [markets[0].eventId]: 1 } },
       totalCapital: 100,
     }).markets;
     expect(
@@ -185,7 +185,7 @@ describe("isOverCreditBudget", () => {
     markets = applyAllocations({
       markets,
       userId: "A",
-      userAllocation: { allocations: { [markets[0].id]: 1 } },
+      userAllocation: { allocations: { [markets[0].eventId]: 1 } },
       totalCapital: 100,
     }).markets;
     expect(

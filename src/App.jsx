@@ -43,6 +43,8 @@ import { LogicView } from "./components/LogicView.jsx";
 import { MetricsPanel } from "./components/MetricsPanel.jsx";
 import { NpcPanel } from "./components/NpcPanel.jsx";
 import { TtDesk } from "./components/TtDesk.jsx";
+import { InsuranceDesk } from "./components/InsuranceDesk.jsx";
+import { GettingStarted } from "./components/GettingStarted.jsx";
 import { TradeHistory } from "./components/TradeHistory.jsx";
 import { SpeedControl } from "./components/SpeedControl.jsx";
 import { CorrelationHeatmap } from "./components/CorrelationHeatmap.jsx";
@@ -64,6 +66,25 @@ const INITIAL_PAIR_STATES = Object.fromEntries(
   ACTIVE_PAIRS.map((pk) => [pk, initPairState(pk)])
 );
 
+// Small at-a-glance chip used in the header summary line. Clickable
+// when an `onClick` is supplied; otherwise it's just a static label.
+function HeaderChip({ label, value, color, title, onClick }) {
+  const cls = `text-[10px] font-mono px-2 py-0.5 rounded border ${color} ${onClick ? "cursor-pointer hover:brightness-110" : ""}`;
+  return (
+    <span
+      className={cls}
+      title={title}
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onClick={onClick}
+      onKeyDown={onClick ? (e) => (e.key === "Enter" || e.key === " ") && onClick() : undefined}
+    >
+      <span className="text-gray-500 mr-1">{label}</span>
+      {value}
+    </span>
+  );
+}
+
 const INITIAL_PLAYER = {
   id: "You",
   activePair: ACTIVE_PAIRS[0],
@@ -78,7 +99,7 @@ const INITIAL_PLAYER = {
   tags: initTags(), // §10.1 — capital accumulates roles via tags, not transfers
 };
 
-const TABS = ["Chart", "Auction", "Pool", "Credit", "Stress", "Markets", "History", "Log"];
+const TABS = ["Chart", "Auction", "Insurance", "Credit", "Stress", "Markets", "History", "Log"];
 
 export default function App() {
   const [pairStates, setPairStates] = useState(INITIAL_PAIR_STATES);
@@ -274,7 +295,6 @@ export default function App() {
   // the corresponding markets. Margin is untouched — these stakes serve
   // the insurer role while the same dollars also back LAP credit and TT
   // mints (multi-role capital).
-  // eslint-disable-next-line no-unused-vars
   function handleSetAllocation(marketAllocations) {
     const r = setUserAllocation(insuranceState.allocations, player.id, marketAllocations);
     if (!r.ok) {
@@ -605,7 +625,7 @@ export default function App() {
     Space: () => setRunning((r) => !r),
     "1": () => setActiveTab("Chart"),
     "2": () => setActiveTab("Auction"),
-    "3": () => setActiveTab("Pool"),
+    "3": () => setActiveTab("Insurance"),
     "4": () => setActiveTab("Credit"),
     "5": () => setActiveTab("Stress"),
     "6": () => setActiveTab("Markets"),
@@ -628,20 +648,61 @@ export default function App() {
           ☰
         </button>
         <span className="font-syne text-lg text-indigo-400 tracking-tight">Trading Tower</span>
-        <span className="text-[10px] font-mono text-gray-600">LAP v2 · ESMA compliant</span>
-        {openPositions.length > 0 && (
-          <span className="text-[10px] font-mono text-emerald-400 px-2 py-0.5 rounded border border-emerald-900 bg-emerald-950">
-            {openPositions.length} open
-          </span>
-        )}
-        {(ttState?.balances?.[player.id] ?? 0) > 0 && (
-          <span
-            className="text-[10px] font-mono text-emerald-200 px-2 py-0.5 rounded border border-emerald-700 bg-emerald-950"
-            title={`Outstanding mint $${(ttState?.mintedByUser?.[player.id] ?? 0).toFixed(0)} · Queue ${(ttState?.redemptionQueue ?? []).filter((q) => q.userId === player.id).length}`}
-          >
-            ${(ttState?.balances?.[player.id] ?? 0).toFixed(0)} TT
-          </span>
-        )}
+
+        {/* Compact at-a-glance summary: margin / allocated / TT / positions.
+            Each chip is clickable where useful, and titles give detail on hover. */}
+        <div className="flex items-center gap-1 flex-wrap">
+          <HeaderChip
+            label="Margin"
+            value={`$${(player.margin ?? 0).toFixed(0)}`}
+            color="text-gray-200 border-gray-700 bg-gray-900"
+            title="Your free + tagged capital."
+          />
+          <HeaderChip
+            label="Allocated"
+            value={`$${poolDepositAmount.toFixed(0)}`}
+            color={
+              poolDepositAmount > 0
+                ? "text-amber-300 border-amber-900 bg-amber-950/60"
+                : "text-gray-500 border-gray-800 bg-gray-900"
+            }
+            title="Capital committed across insurance markets."
+            onClick={() => setActiveTab("Insurance")}
+          />
+          <HeaderChip
+            label="LTV"
+            value={(poolLtvInfo?.ltv ?? 0).toFixed(2)}
+            color={
+              (poolLtvInfo?.ltv ?? 0) >= 0.6
+                ? "text-emerald-300 border-emerald-900 bg-emerald-950/60"
+                : "text-gray-400 border-gray-800 bg-gray-900"
+            }
+            title="Allocation diversification → mint capacity factor."
+            onClick={() => setActiveTab("Credit")}
+          />
+          <HeaderChip
+            label="Positions"
+            value={`${openPositions.length}`}
+            color={
+              openPositions.length > 0
+                ? "text-indigo-300 border-indigo-900 bg-indigo-950/60"
+                : "text-gray-500 border-gray-800 bg-gray-900"
+            }
+            title="Open LAPs (single + paired)."
+            onClick={() => setActiveTab("Credit")}
+          />
+          <HeaderChip
+            label="TT"
+            value={`$${(ttState?.balances?.[player.id] ?? 0).toFixed(0)}`}
+            color={
+              (ttState?.balances?.[player.id] ?? 0) > 0
+                ? "text-emerald-200 border-emerald-700 bg-emerald-950"
+                : "text-gray-500 border-gray-800 bg-gray-900"
+            }
+            title={`Tower Tether wallet · outstanding mint $${(ttState?.mintedByUser?.[player.id] ?? 0).toFixed(0)} · queue ${(ttState?.redemptionQueue ?? []).filter((q) => q.userId === player.id).length}`}
+            onClick={() => setActiveTab("Insurance")}
+          />
+        </div>
         <div className="ml-auto flex items-center gap-3">
           <SpeedControl speed={speed} onSpeed={setSpeed} />
           <button
@@ -746,6 +807,17 @@ export default function App() {
           </div>
 
           <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-3">
+            {(activeTab === "Insurance" || activeTab === "Credit" || activeTab === "Chart") && (
+              <GettingStarted
+                hasAllocation={poolDepositAmount > 0}
+                hasPosition={openPositions.length > 0}
+                hasMinted={(ttState?.mintedByUser?.[player.id] ?? 0) > 0}
+                hasMerchantSent={(ttState?.merchantBalance ?? 0) > 0}
+                activeTab={activeTab}
+                onJump={(t) => setActiveTab(t)}
+              />
+            )}
+
             {activeTab === "Chart" && (
               <>
                 <PriceChart
@@ -831,11 +903,15 @@ export default function App() {
               </div>
             )}
 
-            {activeTab === "Pool" && (
+            {activeTab === "Insurance" && (
               <>
-                <div className="text-xs font-mono text-gray-500 p-3 border border-gray-700 rounded">
-                  Insurance markets desk — coming in next UI pass
-                </div>
+                <InsuranceDesk
+                  insuranceState={insuranceState}
+                  playerId={player.id}
+                  freeMarginToAllocate={freeMargin(player.margin, player.tags)}
+                  poolLtv={poolLtvInfo}
+                  onSetAllocation={handleSetAllocation}
+                />
                 <TtDesk
                   ttState={ttState}
                   playerId={player.id}

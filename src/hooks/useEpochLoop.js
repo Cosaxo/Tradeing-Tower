@@ -484,6 +484,67 @@ export function useEpochLoop({
           sideEffects.playerMarginDelta += playerOwnerCreditAfterThreads;
         }
 
+        // ---- LAP→thread damage propagation (rental defaults) -----------
+        // Each rental default surfaces an unrecovered loss the renter
+        // couldn't pay (their posted collateral was wiped). For
+        // thread-linked LAPs, this loss damages the thread per the
+        // 4-layer invariant: principal + insurance fills + paired LAP
+        // + ttFace all shrink by the same amount. For non-thread LAPs,
+        // the underlying LAP just shrinks by the deficit (no thread to
+        // propagate into).
+        //
+        // Epoch-separation invariant: insurance damage is gated by tick
+        // parity (odd ticks). LAP damage from rental defaults is rare
+        // and runs every tick — so on a tick where insurance ALSO
+        // produces thread damage, insurance defers (already wired in
+        // the global block via pendingInsuranceClaimsRef).
+        const lapDeficits = rentalSettle.lapDeficitsByLapId ?? {};
+        for (const [lapId, deficit] of Object.entries(lapDeficits)) {
+          if (deficit <= 1e-9) continue;
+          const lap = findPairedLap(lapId);
+          if (!lap) {
+            // LAP gone — record the loss as direct margin shrink intent
+            // anyway (caller may have already removed the position).
+            lapMarginAddByLapId[lapId] =
+              (lapMarginAddByLapId[lapId] ?? 0) - deficit;
+            continue;
+          }
+          // Always shrink the LAP itself (deficit is real LAP margin
+          // loss whether or not it's thread-linked).
+          lapMarginAddByLapId[lapId] =
+            (lapMarginAddByLapId[lapId] ?? 0) - deficit;
+
+          // Thread-linked: propagate to the other 3 layers.
+          if (!lap.threadId || !workingTtRunning) continue;
+          const thread = (workingTtRunning.threads ?? []).find(
+            (t) => t.id === lap.threadId
+          );
+          if (!thread || thread.closed) continue;
+          const dmg = damageThread({
+            ttState: workingTtRunning,
+            threadId: thread.id,
+            delta: deficit,
+          });
+          if (dmg.deltaApplied <= 1e-9) continue;
+          workingTtRunning = dmg.ttState;
+          // Withdraw insurer-side stakes pro-rata across the thread's
+          // covered markets.
+          for (const [eventId, cut] of Object.entries(dmg.insuranceLayerDeltas)) {
+            if (cut <= 1e-9) continue;
+            insurerAddsByMarket[eventId] = insurerAddsByMarket[eventId] ?? {};
+            insurerAddsByMarket[eventId][thread.ownerId] =
+              (insurerAddsByMarket[eventId][thread.ownerId] ?? 0) - cut;
+          }
+          // Release the player's threadStake tag if this is their thread.
+          if (thread.ownerId === pid) {
+            sideEffects.threadStakeRelease =
+              (sideEffects.threadStakeRelease ?? 0) + dmg.deltaApplied;
+          }
+          logs.push(
+            `[TT-THREAD DMG] ${thread.id} −$${dmg.deltaApplied.toFixed(2)} (rental default on layer-3 LAP ${lapId} → all 4 layers shrink)`
+          );
+        }
+
         // Match the orderbook against newly-arrived NPC bids.
         const offersBeforeMatch = rentalOffers;
         const bidsBeforeMatch = [...rentalBids, ...(npcOrders.rentalBids ?? [])];
@@ -529,10 +590,15 @@ export function useEpochLoop({
       });
 
       // -----------------------------------------------------------------
-      // Apply thread-growth insurer-side stake adds to the insurance
-      // markets before the settlement block runs. The newly-deployed
-      // dollars start earning premium income from the very next
-      // settle tick.
+      // Apply thread-side insurer stake adjustments to the insurance
+      // markets before the settlement block runs.
+      //
+      // Positive amounts (rental-tip growth): postInsurer — newly
+      //   deployed dollars start earning premium income from the very
+      //   next settle tick.
+      // Negative amounts (rental-default damage): withdrawInsurer —
+      //   the thread layer-2 fill shrinks pro-rata to the LAP loss
+      //   that just propagated through damageThread.
       // -----------------------------------------------------------------
       if (Object.keys(insurerAddsByMarket).length > 0 && insuranceStateRef.current) {
         let workingIns = insuranceStateRef.current;
@@ -543,9 +609,18 @@ export function useEpochLoop({
             if (!adds) return m;
             let nextMarket = m;
             for (const [uid, amount] of Object.entries(adds)) {
-              if (amount <= 1e-9) continue;
-              const r = postInsurer({ market: nextMarket, userId: uid, amount });
-              if (r.ok) nextMarket = r.market;
+              if (Math.abs(amount) <= 1e-9) continue;
+              if (amount > 0) {
+                const r = postInsurer({ market: nextMarket, userId: uid, amount });
+                if (r.ok) nextMarket = r.market;
+              } else {
+                const r = withdrawInsurer({
+                  market: nextMarket,
+                  userId: uid,
+                  amount: -amount,
+                });
+                if (r.ok) nextMarket = r.market;
+              }
             }
             return nextMarket;
           }),

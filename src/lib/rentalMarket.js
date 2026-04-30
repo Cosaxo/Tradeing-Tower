@@ -221,6 +221,11 @@ export function matchRentalAuction({
 //   - accruedOwnerTips += tipFee              (owner accrues — flushed on close)
 //   - If rentalMargin <= 0:    DEFAULT — terminate, owner keeps accrued tips,
 //                              leg reverts unrented, renter loses posted margin.
+//                              The shortfall (|rentalMargin| beyond 0) is the
+//                              LAP's UNRECOVERED LOSS — surfaced in
+//                              lapDeficitsByLapId so the caller can shrink
+//                              the underlying LAP margin (and propagate
+//                              through damageThread for thread-linked LAPs).
 //   - Else if currentEpoch >= expiresAtEpoch: EXPIRE — terminate cleanly,
 //                              renter recovers (rentalMargin) + tip stream
 //                              already paid.
@@ -233,11 +238,15 @@ export function matchRentalAuction({
 //   currentEpoch
 //
 // Returns:
-//   { rentals, terminated, ownerCredits, defaultedRenters, logs }
+//   { rentals, terminated, ownerCredits, defaultedRenters, lapDeficitsByLapId, logs }
 //   - rentals: still-active rentals (terminated ones removed)
 //   - terminated: { rental, reason: "expired" | "default", finalRenterMargin }
 //   - ownerCredits: { [ownerId]: totalTipsThisTick } — caller flushes to margin
 //   - defaultedRenters: [renterId, ...] — caller may want to log
+//   - lapDeficitsByLapId: { [pairLapId]: $unrecoveredLoss } — leg P&L
+//                          beyond what the renter's margin could cover.
+//                          Caller shrinks LAP.margin by this amount and,
+//                          for thread-linked LAPs, calls damageThread.
 export function settleRentals({
   activeRentals = [],
   findPairedLap,
@@ -249,6 +258,7 @@ export function settleRentals({
   const terminated = [];
   const ownerCredits = {};
   const defaultedRenters = [];
+  const lapDeficitsByLapId = {};
   const logs = [];
 
   if (!activeRentals.length || !Number.isFinite(priceOld) || !Number.isFinite(priceNew)) {
@@ -257,6 +267,7 @@ export function settleRentals({
       terminated,
       ownerCredits,
       defaultedRenters,
+      lapDeficitsByLapId,
       logs,
     };
   }
@@ -266,6 +277,7 @@ export function settleRentals({
       terminated,
       ownerCredits,
       defaultedRenters,
+      lapDeficitsByLapId,
       logs,
     };
   }
@@ -298,18 +310,28 @@ export function settleRentals({
     let accruedOwnerTips = (r.accruedOwnerTips ?? 0) + tipFee;
 
     if (newRenterMargin <= 0) {
-      // Default. Renter's last bit of margin contributes whatever's
-      // recoverable; the protocol absorbs any shortfall.
+      // Default. Renter's posted margin is exhausted; everything beyond
+      // 0 is the LAP's UNRECOVERED LOSS — leg P&L the renter couldn't
+      // pay. The protocol used to absorb this silently; we now surface
+      // it so the caller can shrink the LAP's underlying margin and
+      // (for thread-linked LAPs) propagate through damageThread.
       const recovered = Math.max(0, newRenterMargin); // 0 in practice
+      const lapDeficit = Math.max(0, -newRenterMargin);
+      if (lapDeficit > 0) {
+        lapDeficitsByLapId[r.pairLapId] =
+          (lapDeficitsByLapId[r.pairLapId] ?? 0) + lapDeficit;
+      }
       ownerCredits[r.ownerId] = (ownerCredits[r.ownerId] ?? 0) + accruedOwnerTips;
       terminated.push({
         rental: { ...r, rentalMargin: 0, accruedOwnerTips, active: false },
         reason: "default",
         finalRenterMargin: recovered,
+        lapDeficit,
       });
       defaultedRenters.push(r.renterId);
       logs.push(
-        `[RENT-DEFAULT] ${r.id} ${r.renterId} blew through margin — leg reverts to owner ${r.ownerId}`
+        `[RENT-DEFAULT] ${r.id} ${r.renterId} blew through margin — leg reverts to owner ${r.ownerId}` +
+          (lapDeficit > 0 ? ` (LAP deficit $${lapDeficit.toFixed(2)})` : "")
       );
       continue;
     }
@@ -357,6 +379,7 @@ export function settleRentals({
     terminated,
     ownerCredits,
     defaultedRenters,
+    lapDeficitsByLapId,
     logs,
   };
 }

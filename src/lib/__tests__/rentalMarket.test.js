@@ -230,6 +230,34 @@ describe("settleRentals", () => {
     expect(result.ownerCredits.You).toBeGreaterThanOrEqual(0);
   });
 
+  it("default surfaces lapDeficit = unrecovered loss beyond renter margin", () => {
+    // rentalMargin = 50, expected leg loss ≈ -100 → deficit ≈ 50 + tipFee.
+    // (renter margin reduced by tipFee=5 first, then leg loss eats the
+    // rest; deficit = -newRenterMargin = ~55.)
+    const r = makeRental({ rentalMargin: 50 });
+    const result = settleRentals({
+      activeRentals: [r],
+      findPairedLap,
+      priceOld: 100,
+      priceNew: 90,
+      currentEpoch: 2,
+    });
+    expect(result.lapDeficitsByLapId["PLAP-1"]).toBeGreaterThan(40);
+    expect(result.terminated[0].lapDeficit).toBeGreaterThan(40);
+  });
+
+  it("non-default ticks emit no lapDeficit", () => {
+    const r = makeRental();
+    const result = settleRentals({
+      activeRentals: [r],
+      findPairedLap,
+      priceOld: 100,
+      priceNew: 100,
+      currentEpoch: 2,
+    });
+    expect(result.lapDeficitsByLapId).toEqual({});
+  });
+
   it("epoch >= expiresAtEpoch ⇒ EXPIRE cleanly", () => {
     const r = makeRental({ expiresAtEpoch: 2 });
     const result = settleRentals({

@@ -292,6 +292,84 @@ export function damageThread({ ttState, threadId, delta }) {
 }
 
 // ---------------------------------------------------------------------------
+// Growth propagation
+// ---------------------------------------------------------------------------
+
+// Apply a gain to a single thread. Principal grows; layers 1, 2, and 3
+// fatten by the same amount. Layer 4 (ttFace) is INTENTIONALLY not
+// touched — TT supply only expands on a deliberate mint event, never
+// from passive yield. The buffer (principal - ttFace) acts as
+// over-collateralisation: subsequent damage eats the buffer before
+// ttFace starts shrinking.
+//
+// Returns:
+//   {
+//     ttState,                      // thread.principal incremented
+//     gainApplied,                  // actual amount written up
+//     insuranceLayerAdds,           // { [eventId]: amountToPostAsInsurer }
+//     lapLayerAdd,                  // amount to add to the paired LAP's margin
+//   }
+//
+// The caller (epoch loop) is responsible for:
+//   - posting the additional insurer stakes via postInsurer
+//   - bumping the paired-LAP's margin (notional grows, leverage stays)
+//
+// T-bill is the principal itself, so no separate caller action is
+// needed for layer 1.
+export function growThread({ ttState, threadId, gain }) {
+  if (!Number.isFinite(gain) || gain <= 0) {
+    return {
+      ttState,
+      gainApplied: 0,
+      insuranceLayerAdds: {},
+      lapLayerAdd: 0,
+    };
+  }
+  const threads = ttState.threads ?? [];
+  const idx = threads.findIndex((t) => t.id === threadId);
+  if (idx < 0) {
+    return {
+      ttState,
+      gainApplied: 0,
+      insuranceLayerAdds: {},
+      lapLayerAdd: 0,
+    };
+  }
+  const t = threads[idx];
+  if (t.closed) {
+    return {
+      ttState,
+      gainApplied: 0,
+      insuranceLayerAdds: {},
+      lapLayerAdd: 0,
+    };
+  }
+  const insuranceLayerAdds = {};
+  for (const [eventId, w] of Object.entries(t.insuranceWeights ?? {})) {
+    insuranceLayerAdds[eventId] = gain * w;
+  }
+  const updatedThread = {
+    ...t,
+    principal: t.principal + gain,
+    // ttFace UNCHANGED — gains never auto-mint TT.
+  };
+  const newThreads = threads.map((x, i) => (i === idx ? updatedThread : x));
+  return {
+    ttState: { ...ttState, threads: newThreads },
+    gainApplied: gain,
+    insuranceLayerAdds,
+    lapLayerAdd: gain,
+  };
+}
+
+// Look up the active thread that backs a given paired-LAP id. Used by
+// the epoch loop to route LAP-side gains/losses back to thread layers.
+export function findThreadByLapId(ttState, lapId) {
+  if (!lapId) return null;
+  return activeThreads(ttState).find((t) => t.lapId === lapId) ?? null;
+}
+
+// ---------------------------------------------------------------------------
 // TT transfer / redemption queue
 // ---------------------------------------------------------------------------
 

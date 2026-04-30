@@ -617,8 +617,6 @@ export default function App() {
       poolLinkage: null,
       id: lapId,
     });
-    pairedLap.threadLinked = true; // marker for close-handler
-
     // 5. Open the thread record in TT state. This 1:1-mints the TT
     //    into the user's wallet.
     const opened = openThread({
@@ -634,6 +632,10 @@ export default function App() {
       addToast(`Mint failed: ${opened.reason}`, "warning");
       return;
     }
+    // Bind the LAP back to the thread so the epoch loop can route
+    // rental tips through growThread (and damage through damageThread).
+    pairedLap.threadId = opened.thread.id;
+    pairedLap.threadLinked = true;
 
     // 6. Auto-publish rental offers for both legs of the paired LAP.
     setPairStates((prev) => {

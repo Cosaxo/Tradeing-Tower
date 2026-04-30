@@ -21,10 +21,11 @@ import {
   runRedemptionCycle,
   applySolvencyCheck,
   damageThread,
+  growThread,
   submitRedemption as submitTtRedemption,
 } from "../lib/towerTether.js";
 import { detectTriggeredEvents } from "../lib/insuranceEvents.js";
-import { settleMarketTick, withdrawInsurer } from "../lib/insuranceMarket.js";
+import { settleMarketTick, withdrawInsurer, postInsurer } from "../lib/insuranceMarket.js";
 import { settleReinsuranceTick } from "../lib/reinsurance.js";
 import { appendEpochEntry } from "../lib/roleLedger.js";
 import { normalizeTags, untag } from "../lib/capitalTags.js";
@@ -160,6 +161,20 @@ export function useEpochLoop({
       const prev = pairStatesRef.current;
       const logs = sideEffects.logs;
       const next = { ...prev };
+
+      // Working TT state for thread growth/damage. The per-pair block
+      // mutates this incrementally as rental tips compound into threads;
+      // the global blocks below also mutate it. We persist the final
+      // version into sideEffects at the apply phase.
+      let workingTtRunning = ttStateRef.current;
+      // Aggregated insurer-stake adds resulting from thread growth this
+      // tick. Applied to insuranceState before the global insurance
+      // settlement runs so premium streams account for the new size.
+      // Shape: { [eventId]: { [ownerId]: dollarAmount } }
+      const insurerAddsByMarket = {};
+      // LAP-margin top-ups from thread growth, accumulated for the
+      // apply phase. Shape: { [lapId]: dollarAmount }
+      const lapMarginAddByLapId = {};
 
       // Collect all price histories for cross-market correlation (slow only).
       const priceHistories = {};
@@ -403,13 +418,70 @@ export function useEpochLoop({
         });
         rentalSettle.logs.forEach((l) => logs.push(l));
 
-        // Owner-tip income flushed to player margin if the owner is the
-        // local player. (NPC-owned rentals don't exist yet in Phase 3,
-        // so this is the only counterparty handled.)
+        // Owner-tip income. For ordinary (non-thread) paired LAPs, tips
+        // flush to the player's wallet margin. For THREAD-LINKED paired
+        // LAPs (the layer-3 of a TT thread), tips compound into the
+        // thread instead — principal + layers 1/2/3 grow by the tip
+        // amount, but ttFace stays put. That's the user's decision: no
+        // auto-mint at layer 4, but auto-deploy across the other three.
+        //
+        // To split the thread-linked share from the wallet share, we
+        // re-derive the per-LAP tip for this tick. The settleRentals
+        // accrual is `tipRate × legNotional` per active rental — we
+        // sum that across all rentals owned by the player, then route
+        // the thread-linked portion via growThread.
         const ownerCredits = rentalSettle.ownerCredits ?? {};
-        const playerOwnerCredit = ownerCredits[pid] ?? 0;
-        if (playerOwnerCredit > 0) {
-          sideEffects.playerMarginDelta += playerOwnerCredit;
+        const playerTotalTip = ownerCredits[pid] ?? 0;
+
+        // Per-LAP tip attribution (this-tick income). Pre-settlement
+        // values match settleRentals' per-rental tipFee.
+        const tipByLapId = {};
+        for (const r of activeRentals) {
+          if (!r.active) continue;
+          const lap = findPairedLap(r.pairLapId);
+          if (!lap || lap.ownerId !== undefined && lap.ownerId !== pid) continue;
+          const legNotional = ((lap.margin ?? 0) / 2) * (lap.leverage ?? 1);
+          tipByLapId[r.pairLapId] =
+            (tipByLapId[r.pairLapId] ?? 0) + r.tipRate * legNotional;
+        }
+
+        let threadLinkedShare = 0;
+        for (const [lapId, tip] of Object.entries(tipByLapId)) {
+          if (tip <= 1e-9) continue;
+          const lap = findPairedLap(lapId);
+          if (!lap?.threadId || !workingTtRunning) continue;
+          const thread = (workingTtRunning.threads ?? []).find(
+            (t) => t.id === lap.threadId
+          );
+          if (!thread || thread.closed || thread.ownerId !== pid) continue;
+          const grown = growThread({
+            ttState: workingTtRunning,
+            threadId: thread.id,
+            gain: tip,
+          });
+          if (grown.gainApplied <= 1e-9) continue;
+          workingTtRunning = grown.ttState;
+          threadLinkedShare += grown.gainApplied;
+          // Insurer-side stake adds — applied to markets in the
+          // post-forEach reconciliation below.
+          for (const [eventId, add] of Object.entries(grown.insuranceLayerAdds)) {
+            if (add <= 1e-9) continue;
+            insurerAddsByMarket[eventId] = insurerAddsByMarket[eventId] ?? {};
+            insurerAddsByMarket[eventId][thread.ownerId] =
+              (insurerAddsByMarket[eventId][thread.ownerId] ?? 0) + add;
+          }
+          if (grown.lapLayerAdd > 0) {
+            lapMarginAddByLapId[lapId] =
+              (lapMarginAddByLapId[lapId] ?? 0) + grown.lapLayerAdd;
+          }
+          logs.push(
+            `[TT-THREAD GROW] ${thread.id} +$${grown.gainApplied.toFixed(2)} (rental tips → layers 1/2/3, ttFace fixed)`
+          );
+        }
+
+        const playerOwnerCreditAfterThreads = playerTotalTip - threadLinkedShare;
+        if (playerOwnerCreditAfterThreads > 0) {
+          sideEffects.playerMarginDelta += playerOwnerCreditAfterThreads;
         }
 
         // Match the orderbook against newly-arrived NPC bids.
@@ -455,6 +527,38 @@ export function useEpochLoop({
           sideEffects.roleEntries.push(playerRoleEntry);
         }
       });
+
+      // -----------------------------------------------------------------
+      // Apply thread-growth insurer-side stake adds to the insurance
+      // markets before the settlement block runs. The newly-deployed
+      // dollars start earning premium income from the very next
+      // settle tick.
+      // -----------------------------------------------------------------
+      if (Object.keys(insurerAddsByMarket).length > 0 && insuranceStateRef.current) {
+        let workingIns = insuranceStateRef.current;
+        workingIns = {
+          ...workingIns,
+          markets: workingIns.markets.map((m) => {
+            const adds = insurerAddsByMarket[m.eventId];
+            if (!adds) return m;
+            let nextMarket = m;
+            for (const [uid, amount] of Object.entries(adds)) {
+              if (amount <= 1e-9) continue;
+              const r = postInsurer({ market: nextMarket, userId: uid, amount });
+              if (r.ok) nextMarket = r.market;
+            }
+            return nextMarket;
+          }),
+        };
+        insuranceStateRef.current = workingIns;
+        sideEffects.nextInsuranceState = workingIns;
+      }
+      // Persist the running TT state from any growThread mutations
+      // before the global blocks below read it.
+      if (workingTtRunning !== ttStateRef.current) {
+        ttStateRef.current = workingTtRunning;
+        sideEffects.nextTtState = workingTtRunning;
+      }
 
       // -----------------------------------------------------------------
       // Global insurance + reinsurance settlement (Phase 5)
@@ -864,25 +968,33 @@ export function useEpochLoop({
         });
       }
 
-      // Apply paired-LAP shrinks from redemption thread-unwinds.
-      // Reduces each linked LAP's margin by the unwound principal; if
-      // the remaining margin would fall below dust ($1) the position
-      // is dropped entirely (its rental offers were already auto-cancelled
-      // when the thread closed).
-      const shrinks = sideEffects.lapShrinkByLapId;
-      if (shrinks && Object.keys(shrinks).length > 0 && setOpenPositions) {
+      // Apply paired-LAP shrinks from redemption thread-unwinds AND
+      // paired-LAP grows from thread tip compounding. Net the two
+      // first so a LAP that both shrank and grew this tick gets a
+      // single margin update.
+      const shrinks = sideEffects.lapShrinkByLapId ?? {};
+      const grows = lapMarginAddByLapId;
+      const lapDeltas = {};
+      for (const [lapId, cut] of Object.entries(shrinks)) {
+        lapDeltas[lapId] = (lapDeltas[lapId] ?? 0) - cut;
+      }
+      for (const [lapId, add] of Object.entries(grows)) {
+        lapDeltas[lapId] = (lapDeltas[lapId] ?? 0) + add;
+      }
+      const lapDeltaIds = Object.keys(lapDeltas);
+      if (lapDeltaIds.length > 0 && setOpenPositions) {
         setOpenPositions((prev) => {
           let changed = false;
           const out = [];
           for (const pos of prev) {
-            const cut = shrinks[pos?.id] ?? 0;
-            if (cut <= 1e-9) {
+            const d = lapDeltas[pos?.id] ?? 0;
+            if (Math.abs(d) <= 1e-9) {
               out.push(pos);
               continue;
             }
-            const newMargin = (pos.margin ?? 0) - cut;
+            const newMargin = (pos.margin ?? 0) + d;
             changed = true;
-            if (newMargin <= 1) continue; // drop dust
+            if (newMargin <= 1) continue; // drop dust on full unwind
             out.push({ ...pos, margin: newMargin });
           }
           return changed ? out : prev;

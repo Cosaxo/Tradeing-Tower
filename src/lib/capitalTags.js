@@ -9,6 +9,9 @@
 //                     covers the T-bill, insurance fill, paired LAP,
 //                     and minted TT simultaneously; released only when
 //                     the thread is redeemed or fully damaged)
+//   - bBookStake     (deposited as B-book underwriter capital — earns
+//                     B-classified user tip flow + absorbs their
+//                     directional P&L)
 //
 // Margin itself changes only through real cash flows: tips, P&L,
 // premiums, payouts. Tagging is a pure claim operation — no margin
@@ -17,18 +20,20 @@
 // Stacking is safe because each role's claim is bounded and the sum
 // of tagged amounts is guarded by `freeMargin`.
 
-export const TAG_KEYS = ["poolDeposit", "auctionMargin", "threadStake"];
+export const TAG_KEYS = ["poolDeposit", "auctionMargin", "threadStake", "bBookStake"];
 
 export const TAG_LABELS = {
   poolDeposit: "Pool Collateral",
   auctionMargin: "Auction Margin",
   threadStake: "TT Thread",
+  bBookStake: "B-book Underwriter",
 };
 
 export const TAG_COLORS = {
   poolDeposit: "#a78bfa",
   auctionMargin: "#34d399",
   threadStake: "#fbbf24",
+  bBookStake: "#f472b6",
 };
 
 export function initTags() {

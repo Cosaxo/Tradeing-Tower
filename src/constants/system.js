@@ -28,10 +28,6 @@ export const MAX_HISTORY = 200;
 export const INSURANCE_K = 3.0;
 export const EPOCH_DT_DAYS = 1 / 365;
 
-// Auction sub-unit cascade — fractional leverage steps used when the
-// best long/short bid sizes differ.
-export const SUB_UNIT_STEPS = [0.75, 0.5, 0.25];
-
 // Entropy weighting (auction yield distribution)
 export const ENTROPY_BETA = 0.3;
 export const ENTROPY_EPS = 0.05;
@@ -61,3 +57,19 @@ export const STANDARD_REDEMPTION_CAP_PCT = 0.10;
 // forfeits to skip the queue / clear above the cap. Routed to
 // reinsurance sellers via the epoch loop.
 export const EXPRESS_PENALTY_RATE = 0.05;
+
+// -----------------------------------------------------------------------
+// B-book pool — opt-in counterparty for B-classified user flow
+// -----------------------------------------------------------------------
+
+// Maximum total active notional the pool can underwrite, expressed as
+// a multiple of the pool's underwriter stake. 1.5× means underwriters
+// can be on the hook for up to 150% of their staked capital in user
+// notional outstanding at any time. New contracts are refused once
+// this is breached — protects underwriters from blow-up.
+export const BBOOK_MAX_NOTIONAL_RATIO = 1.5;
+
+// Lockup period (in medium ticks) before an underwriter can withdraw
+// their deposit. Stops them from fleeing mid-loss. Mirrors the
+// reinsurance lockup design.
+export const BBOOK_LOCKUP_EPOCHS = 100;

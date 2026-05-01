@@ -28,6 +28,19 @@ import {
   cancelRedemption,
   totalThreadPrincipal,
 } from "./lib/towerTether.js";
+import {
+  initBBookState,
+  depositUnderwriter,
+  withdrawUnderwriter,
+  openContract as openBBookContract,
+  closeContract as closeBBookContract,
+} from "./lib/bBookPool.js";
+import {
+  initClassifierState,
+  recordClose as recordClassifierClose,
+  getUserStats as getClassifierStats,
+  routeFor,
+} from "./lib/userClassifier.js";
 import { getEffectiveCap } from "./lib/esma.js";
 import { initLedger } from "./lib/roleLedger.js";
 import { initTags, tryTag, untag, freeMargin } from "./lib/capitalTags.js";
@@ -45,6 +58,8 @@ import { MetricsPanel } from "./components/MetricsPanel.jsx";
 import { NpcPanel } from "./components/NpcPanel.jsx";
 import { TtDesk } from "./components/TtDesk.jsx";
 import { InsuranceDesk } from "./components/InsuranceDesk.jsx";
+import { BBookDesk } from "./components/BBookDesk.jsx";
+import { LapPayoffCurve } from "./components/LapPayoffCurve.jsx";
 import { GettingStarted } from "./components/GettingStarted.jsx";
 import { TradeHistory } from "./components/TradeHistory.jsx";
 import { SpeedControl } from "./components/SpeedControl.jsx";
@@ -100,7 +115,7 @@ const INITIAL_PLAYER = {
   tags: initTags(), // §10.1 — capital accumulates roles via tags, not transfers
 };
 
-const TABS = ["Chart", "Auction", "Insurance", "Credit", "Stress", "Markets", "History", "Log"];
+const TABS = ["Chart", "Auction", "Insurance", "Credit", "B-book", "Stress", "Markets", "History", "Log"];
 
 export default function App() {
   // pairStates is persisted so epoch counters, price history, and
@@ -136,6 +151,14 @@ export default function App() {
     "tt.insurance",
     initInsuranceState()
   );
+  const [bBookState, setBBookState, clearBBook] = usePersistentState(
+    "tt.bBook",
+    initBBookState()
+  );
+  const [classifierState, setClassifierState, clearClassifier] = usePersistentState(
+    "tt.classifier",
+    initClassifierState()
+  );
   const { toasts, history, addToast, clearHistory } = useToast();
   const [showTutorial, setShowTutorial] = useState(false);
 
@@ -150,6 +173,10 @@ export default function App() {
     setTtState,
     insuranceState,
     setInsuranceState,
+    bBookState,
+    setBBookState,
+    classifierState,
+    setClassifierState,
     setLogs,
     addToast,
     running,
@@ -339,6 +366,45 @@ export default function App() {
     const priceNow = ps?.prices?.slice(-1)[0] ?? 1;
     const priceThen = pos.openPrice ?? priceNow;
 
+    // B-book contract: settles through the pool, not the auction. The
+    // user takes their P&L from the pool's stake (or pays into it on
+    // a loss). Underwriters share P&L pro-rata.
+    if (pos.type === "bbook" && pos.bBookContractId) {
+      const closed = closeBBookContract({
+        state: bBookState,
+        contractId: pos.bBookContractId,
+        currentPrice: priceNow,
+      });
+      if (closed.ok) {
+        setBBookState(closed.state);
+        setOpenPositions((prev) => prev.filter((_, idx) => idx !== i));
+        setTradeLog((prev) => [
+          ...prev,
+          { ...pos, pnl: closed.userPnl, closedPrice: priceNow },
+        ]);
+        setPlayer((p) => ({
+          ...p,
+          margin: p.margin + closed.userPnl,
+          tags: untag(p.tags ?? {}, "auctionMargin", pos.margin),
+        }));
+        // Classifier records this close — affects future routing.
+        setClassifierState((prev) =>
+          recordClassifierClose(prev, player.id, {
+            pnl: closed.userPnl,
+            marginAtOpen: pos.margin,
+            closedAtEpoch: ps?.epochIndex ?? 0,
+          })
+        );
+        addToast(
+          `Closed ${pos.pairKey} ${pos.side} (B-book): ${closed.userPnl >= 0 ? "+" : ""}$${closed.userPnl.toFixed(2)}`,
+          closed.userPnl >= 0 ? "info" : "warning"
+        );
+      } else {
+        addToast(`B-book close failed: ${closed.reason}`, "warning");
+      }
+      return;
+    }
+
     // Two close formulas. Single LAPs use the directional log-return
     // formula; paired LAPs decompose into long + short legs that
     // largely cancel, leaving positive gamma. Both close atomically —
@@ -414,6 +480,14 @@ export default function App() {
       margin: p.margin + pnl,
       tags: untag(p.tags, "auctionMargin", pos.margin),
     }));
+    // Classifier records this close — affects future A/B routing.
+    setClassifierState((prev) =>
+      recordClassifierClose(prev, player.id, {
+        pnl,
+        marginAtOpen: pos.margin,
+        closedAtEpoch: ps?.epochIndex ?? 0,
+      })
+    );
     const desc = isPairedLap(pos)
       ? `${pos.pairKey} PAIRED`
       : `${pos.pairKey} ${pos.side}`;
@@ -472,6 +546,38 @@ export default function App() {
       newTags = tagged;
     }
 
+    // B-book routing decision. Only single (directional) LAPs route
+    // via the pool — paired LAPs are delta-neutral so the pool has no
+    // directional exposure to take. Pool-credit LAPs are also excluded
+    // (separate collateral semantics). Falls back to peer (A) flow if
+    // pool is over capacity or empty.
+    let bBookContract = null;
+    if (!paired && !usePoolCredit) {
+      const route = routeFor({
+        state: classifierState,
+        userId: player.id,
+        positionMargin: legSize,
+      });
+      if (route === "B") {
+        const opened = openBBookContract({
+          state: bBookState,
+          userId: player.id,
+          pairKey: activePair,
+          side: player.side,
+          leverage: player.leverage,
+          margin: legSize,
+          openPrice: priceNow,
+          currentEpoch: activePS?.epochIndex ?? 0,
+        });
+        if (opened.ok) {
+          bBookContract = opened.contract;
+          setBBookState(opened.state);
+        }
+        // If pool refused (capacity / empty), silently fall back to
+        // the peer-matched LAP path so user isn't blocked.
+      }
+    }
+
     const newPos = paired
       ? makePairedLap({
           pairKey: activePair,
@@ -481,6 +587,18 @@ export default function App() {
           openedAtEpoch: activePS?.epochIndex ?? 0,
           poolLinkage,
         })
+      : bBookContract
+      ? {
+          type: "bbook",
+          bBookContractId: bBookContract.id,
+          pairKey: activePair,
+          side: player.side,
+          leverage: player.leverage,
+          margin: legSize,
+          openPrice: priceNow,
+          openedAtEpoch: activePS?.epochIndex ?? 0,
+          poolLinkage: null,
+        }
       : {
           pairKey: activePair,
           side: player.side,
@@ -527,7 +645,11 @@ export default function App() {
 
     setOpenPositions((prev) => [...prev, newPos]);
     if (!usePoolCredit) setPlayer((p) => ({ ...p, tags: newTags }));
-    const labelTag = usePoolCredit ? "(pool credit)" : "tagged";
+    const labelTag = usePoolCredit
+      ? "(pool credit)"
+      : bBookContract
+      ? "(B-book)"
+      : "tagged";
     const label = paired
       ? `Opened ${activePair} PAIRED x${player.leverage.toFixed(1)} · $${requiredCapital.toFixed(0)} ${labelTag} · legs auto-listed for rent`
       : `Opened ${activePair} ${player.side} x${player.leverage.toFixed(1)} · $${legSize.toFixed(0)} ${labelTag}`;
@@ -720,6 +842,68 @@ export default function App() {
     addToast("Redemption cancelled, TT returned to wallet", "info");
   }
 
+  // --- B-book underwriter handlers ----------------------------------------
+  function handleBBookDeposit(amount) {
+    if (!Number.isFinite(amount) || amount <= 0) {
+      addToast("Deposit must be positive", "warning");
+      return;
+    }
+    const free = freeMargin(player.margin, player.tags);
+    if (amount > free + 1e-6) {
+      addToast(
+        `Not enough free margin: $${free.toFixed(0)} available, need $${amount.toFixed(0)}`,
+        "warning"
+      );
+      return;
+    }
+    const newTags = tryTag(player.margin, player.tags, "bBookStake", amount);
+    if (!newTags) {
+      addToast("Insufficient free margin (tag check)", "warning");
+      return;
+    }
+    const epoch = activePS?.epochIndex ?? 0;
+    const r = depositUnderwriter({
+      state: bBookState,
+      uid: player.id,
+      amount,
+      currentEpoch: epoch,
+    });
+    if (!r.ok) {
+      addToast(`Deposit failed: ${r.reason}`, "warning");
+      return;
+    }
+    setBBookState(r.state);
+    setPlayer((p) => ({ ...p, tags: newTags }));
+    addToast(
+      `Staked $${amount.toFixed(0)} as B-book underwriter (locked ${(activePS?.epochIndex ?? 0)} → ${epoch + 100})`,
+      "info"
+    );
+  }
+
+  function handleBBookWithdraw(amount) {
+    if (!Number.isFinite(amount) || amount <= 0) {
+      addToast("Withdraw must be positive", "warning");
+      return;
+    }
+    const epoch = activePS?.epochIndex ?? 0;
+    const r = withdrawUnderwriter({
+      state: bBookState,
+      uid: player.id,
+      amount,
+      currentEpoch: epoch,
+    });
+    if (!r.ok) {
+      addToast(`Withdraw failed: ${r.reason}`, "warning");
+      return;
+    }
+    setBBookState(r.state);
+    setPlayer((p) => ({
+      ...p,
+      tags: untag(p.tags ?? {}, "bBookStake", amount),
+    }));
+    addToast(`Withdrew $${amount.toFixed(0)} from B-book pool`, "info");
+  }
+
   function handleResetSession() {
     clearPlayer();
     clearPositions();
@@ -728,6 +912,8 @@ export default function App() {
     clearLedger();
     clearTt();
     clearInsurance();
+    clearBBook();
+    clearClassifier();
     clearPairStates();
     setLogs([]);
     setShockResults(null);
@@ -759,9 +945,10 @@ export default function App() {
     "2": () => setActiveTab("Auction"),
     "3": () => setActiveTab("Insurance"),
     "4": () => setActiveTab("Credit"),
-    "5": () => setActiveTab("Stress"),
-    "6": () => setActiveTab("Markets"),
-    "7": () => setActiveTab("History"),
+    "5": () => setActiveTab("B-book"),
+    "6": () => setActiveTab("Stress"),
+    "7": () => setActiveTab("Markets"),
+    "8": () => setActiveTab("History"),
     "0": () => setActiveTab("Log"),
     "+": () => setSpeed((s) => Math.min(5, s * 2)),
     "-": () => setSpeed((s) => Math.max(0.5, s / 2)),
@@ -1071,7 +1258,37 @@ export default function App() {
                   deployedPoolCredit={deployedPoolCredit}
                   rentalsByPair={rentalsByPair}
                 />
+                {openPositions.length > 0 && (
+                  <div className="flex flex-col gap-2">
+                    <span className="text-[10px] font-mono text-gray-500 uppercase">
+                      Position payoff curves
+                    </span>
+                    {openPositions.slice(0, 4).map((pos, idx) => (
+                      <LapPayoffCurve
+                        key={pos.id ?? idx}
+                        position={pos}
+                        currentPrice={pairStates[pos.pairKey]?.prices?.slice(-1)[0]}
+                        label={
+                          pos.type === "bbook"
+                            ? `${pos.pairKey} ${pos.side} (B-book)`
+                            : null
+                        }
+                      />
+                    ))}
+                  </div>
+                )}
               </>
+            )}
+
+            {activeTab === "B-book" && (
+              <BBookDesk
+                bBookState={bBookState}
+                playerId={player.id}
+                freeMargin={freeMargin(player.margin, player.tags)}
+                currentEpoch={activePS?.epochIndex ?? 0}
+                onDeposit={handleBBookDeposit}
+                onWithdraw={handleBBookWithdraw}
+              />
             )}
 
             {activeTab === "Stress" && (
@@ -1120,6 +1337,7 @@ export default function App() {
             poolLtv={poolLtvInfo}
             availablePoolCredit={availablePoolCredit}
             deployedPoolCredit={deployedPoolCredit}
+            classifierStats={getClassifierStats(classifierState, player.id)}
           />
         </aside>
 
@@ -1151,6 +1369,7 @@ export default function App() {
                 poolLtv={poolLtvInfo}
                 availablePoolCredit={availablePoolCredit}
                 deployedPoolCredit={deployedPoolCredit}
+                classifierStats={getClassifierStats(classifierState, player.id)}
               />
             </aside>
           </div>

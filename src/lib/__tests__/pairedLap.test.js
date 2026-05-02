@@ -124,7 +124,7 @@ describe("hasActiveRental", () => {
 
   it("is true if either leg shows a renter (Phase-3 forward-compat)", () => {
     const p = makePairedLap({ pairKey: "BTCUSD", margin: 1000, leverage: 2, openPrice: 100 });
-    p.legs.long.rentedTo = "NPC-Whale";
+    p.legs.long.rentedTo = "RENTER-B";
     expect(hasActiveRental(p)).toBe(true);
   });
 });

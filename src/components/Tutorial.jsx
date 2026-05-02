@@ -5,7 +5,7 @@ const STEPS = [
   {
     title: "Welcome to Trading Tower",
     body:
-      "An ESMA-compliant leveraged auction simulator. Prices tick every second, auctions clear every ~6s, and analytics refresh every ~30s. You play a trader alongside 5 NPCs with distinct strategies.",
+      "An ESMA-compliant leveraged-auction clearinghouse. Prices tick every second, auctions clear every ~6s, and analytics refresh every ~30s. Counterparty flow is supplied by the configured order-flow adapter; with no adapter wired, only your own bids enter the book.",
   },
   {
     title: "Geodesic Distribution",

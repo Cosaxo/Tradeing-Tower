@@ -1,20 +1,24 @@
 // Three-tier epoch loop.
 //
 //  Fast   (FAST_MS  ≈ 1 s): advance prices, safety barrier check per pair
-//  Medium (MEDIUM_MS ≈ 6 s): run auctions, settle pools, update NPCs, contracts
+//  Medium (MEDIUM_MS ≈ 6 s): run auctions, settle pools, contracts, rentals
 //  Slow   (every SLOW_EVERY medium ticks): analytics, insurance pool, regime, correlation
+//
+// Counterparty flow comes from an OrderFlowAdapter (see src/lib/orderFlow.js).
+// With the default NULL adapter the auction sees only the local player's bid
+// and clears nothing — production deployments wire in a real participant
+// feed, broker connector, or tape replay.
 
 import { useEffect, useRef, useCallback } from "react";
 import { FAST_MS, MEDIUM_MS, SLOW_EVERY, REDEMPTION_EVERY, GRACE_MS, SOFT_CLOSE_PCT } from "../constants/system.js";
 import { priceStep } from "../lib/priceModels.js";
 import { calcRealizedSigma, calcRatioBeta as calcRatioBetaStat, ratioEffectiveSigma } from "../lib/math.js";
 import { detectRegime } from "../lib/regime.js";
-import { updateNpcRegime, applyNpcSettlement, tickNpcRestock, isNpcActive } from "../lib/npcs.js";
 import { runAuction } from "../lib/auction.js";
 import { settleDominantPool, calcRatioBeta, escrowTips } from "../lib/pool.js";
 import { updateYieldModel } from "../lib/yieldModel.js";
 import { calcCrossMarketCorrelations } from "../lib/correlation.js";
-import { generateNpcOrders } from "../lib/npcMarkets.js";
+import { NULL_ORDER_FLOW_ADAPTER, getBids, getPoolUsers } from "../lib/orderFlow.js";
 import { matchRentalAuction, settleRentals } from "../lib/rentalMarket.js";
 import { isPairedLap } from "../lib/pairedLap.js";
 import {
@@ -49,6 +53,7 @@ export function useEpochLoop({
   running,          // boolean
   speed = 1,        // multiplier: 0.5x, 1x, 2x, 5x
   setRoleLedger,    // setter for per-role attribution ledger
+  orderFlowAdapter = NULL_ORDER_FLOW_ADAPTER, // see src/lib/orderFlow.js
 }) {
   const mediumCountRef = useRef(0);
   const lastPlayerEditRef = useRef(0);
@@ -134,7 +139,7 @@ export function useEpochLoop({
         const ps = prev[pk];
         if (!ps) return;
 
-        const { prices, realizedSigma, npcs, regime, yieldModel,
+        const { prices, realizedSigma, regime, yieldModel,
                 smileParams, metaParams, prevSmoothFills, alpha,
                 epochIndex, regimeHistory = [],
                 rentalOffers = [], rentalBids = [], activeRentals = [],
@@ -154,25 +159,22 @@ export function useEpochLoop({
           logs.push(`[REGIME] ${pk}: ${prevRegimeKey ?? "-"} → ${updatedRegime.key}`);
         }
 
-        // Update NPCs with regime awareness, then tick restock cooldowns.
-        const regimeUpdatedNpcs = npcs.map((npc) =>
-          updateNpcRegime(npc, prices.slice(-20), updatedRegime, null, yieldModel)
-        );
-        const restockedNpcs = tickNpcRestock(regimeUpdatedNpcs);
-        const justRestocked = restockedNpcs.filter(
-          (n, i) => (regimeUpdatedNpcs[i].restockRemaining ?? 0) === 1 && (n.restockRemaining ?? 0) === 0
-        );
-        justRestocked.forEach((n) => logs.push(`[NPC] ${n.id} restocked to $${n.base_margin}`));
-
-        // Only NPCs with margin + not in cooldown participate in the auction.
-        const activeNpcs = restockedNpcs.filter(isNpcActive);
-
-        // Build participants: active NPCs + player (if not in grace period).
+        // Pull external counterparty bids from the configured order-flow
+        // adapter. The default NULL adapter returns []; production wires
+        // a real participant feed / broker connector / tape replay.
         const { effectiveCap: cap } = getEffectiveCap(pk, realizedSigma);
-        const participants = activeNpcs.map((n) => ({
-          ...n,
-          base_margin: n.current_margin ?? n.base_margin,
-        }));
+        const adapterCtx = {
+          pairKey: pk,
+          currentEpoch: epochIndex,
+          regime: updatedRegime,
+          realizedSigma,
+          cap,
+        };
+        const externalBids = getBids(orderFlowAdapter, adapterCtx);
+
+        // Build participants: external flow + the local player (if not in
+        // grace period and on this pair).
+        const participants = [...externalBids];
         if (!bidsFrozen && player && player.activePair === pk) {
           participants.push({
             ...player,
@@ -207,14 +209,14 @@ export function useEpochLoop({
         const ratioBeta = calcRatioBetaStat(newRatioHistory, ps.returnHistory);
         const effectiveSigma = ratioEffectiveSigma(realizedSigma, ratioRaw, ratioBeta);
 
-        // Build user list for pool settlement (active NPC + player positions).
-        const poolUsers = activeNpcs.map((npc) => ({
-          id: npc.id,
-          margin: npc.current_margin ?? npc.base_margin,
-          leverage: Math.min(npc.max_lev, cap),
-          side: npc.strategy?.includes("SHORT") ? "SHORT" : "LONG",
-          active: true,
+        // Build user list for pool settlement: external participants
+        // contributed by the adapter + the local player.
+        const externalPoolUsers = getPoolUsers(orderFlowAdapter, adapterCtx).map((u) => ({
+          ...u,
+          leverage: Math.min(u.leverage ?? 1, cap),
+          active: u.active ?? true,
         }));
+        const poolUsers = [...externalPoolUsers];
         if (!bidsFrozen && player?.activePair === pk) {
           poolUsers.push({
             id: player.id ?? "You",
@@ -228,15 +230,6 @@ export function useEpochLoop({
         const { users: settledUsers, stabilityFeeCollected, logs: poolLogs } =
           settleDominantPool(poolUsers, priceOld, priceNew, effectiveSigma, corrMap);
         poolLogs.forEach((l) => logs.push(l));
-
-        // Write NPC settlement margins back — track liquidations + schedule restock.
-        const updatedNpcs = applyNpcSettlement(restockedNpcs, settledUsers);
-        const deadThisEpoch = updatedNpcs.filter(
-          (n, i) => (restockedNpcs[i].current_margin ?? restockedNpcs[i].base_margin) > 0 && n.current_margin === 0
-        );
-        deadThisEpoch.forEach((n) =>
-          logs.push(`[NPC] ${n.id} liquidated — restock in ${n.restockRemaining} epochs`)
-        );
 
         // Update player margin if this is their active pair.
         // Decompose settlement into T-bill + auction P&L + tips (§4.10).
@@ -287,21 +280,6 @@ export function useEpochLoop({
 
         const pid = player?.id ?? "You";
 
-        // NPC market participation: rental bids on paired-LAP legs.
-        // (Strip buys were removed in Phase 5.)
-        const npcOrders = generateNpcOrders({
-          npcs: updatedNpcs.filter(isNpcActive),
-          longMargin,
-          shortMargin,
-          regime: updatedRegime,
-          normWeights: auctionResult.normWeights ?? [],
-          realizedSigma,
-          returnHistory: ps.returnHistory,
-          epochIndex,
-          pairKey: pk,
-          legNotionalEstimate: 1000,
-        });
-
         // Auction tip-rate proxy used by the yield model.
         const currentYield = auctionResult.matched.length > 0
           ? auctionResult.matched.reduce((s, m) => s + m.longTip, 0) / auctionResult.matched.length
@@ -339,8 +317,8 @@ export function useEpochLoop({
         //
         // 1. Settle existing rentals one tick (P&L flows to renter,
         //    tip flows to owner, defaults / expirations terminate).
-        // 2. Match the order book — owner offers + NPC bids — and append
-        //    new rentals.
+        // 2. Match the order book — owner offers + external renter bids —
+        //    and append new rentals.
         // -------------------------------------------------------------------
         const findPairedLap = (id) => {
           const positions = openPositionsRef.current ?? [];
@@ -357,8 +335,8 @@ export function useEpochLoop({
         rentalSettle.logs.forEach((l) => logs.push(l));
 
         // Owner-tip income flushed to player margin if the owner is the
-        // local player. (NPC-owned rentals don't exist yet in Phase 3,
-        // so this is the only counterparty handled.)
+        // local player. External owners are routed by the adapter on its
+        // own side; this loop only mutates the local player's margin.
         const ownerCredits = rentalSettle.ownerCredits ?? {};
         const playerOwnerCredit = ownerCredits[pid] ?? 0;
         if (playerOwnerCredit > 0) {
@@ -368,9 +346,12 @@ export function useEpochLoop({
           }));
         }
 
-        // Match the orderbook against newly-arrived NPC bids.
+        // Match the orderbook against the live bid book. External rental
+        // bids should be enqueued via the adapter ahead of time and
+        // appear in `rentalBids`; the auction core itself doesn't
+        // synthesize them.
         const offersBeforeMatch = rentalOffers;
-        const bidsBeforeMatch = [...rentalBids, ...(npcOrders.rentalBids ?? [])];
+        const bidsBeforeMatch = [...rentalBids];
         const rentalMatch = matchRentalAuction({
           offers: offersBeforeMatch,
           bids: bidsBeforeMatch,
@@ -384,7 +365,6 @@ export function useEpochLoop({
 
         next[pk] = {
           ...ps,
-          npcs: updatedNpcs,
           regime: updatedRegime,
           regimeHistory: newRegimeHistory,
           events: newEvents.slice(-80),
@@ -649,7 +629,7 @@ export function useEpochLoop({
 
       return next;
     });
-  }, [setPairStates, player, setPlayer, setLogs, addToast, setRoleLedger, setTtState, setInsuranceState]);
+  }, [setPairStates, player, setPlayer, setLogs, addToast, setRoleLedger, setTtState, setInsuranceState, orderFlowAdapter]);
 
   // -------------------------------------------------------------------------
   // Interval management

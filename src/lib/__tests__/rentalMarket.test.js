@@ -36,14 +36,14 @@ describe("publishLegOffer", () => {
 describe("placeRentalBid", () => {
   it("returns a well-formed bid with TTL", () => {
     const bid = placeRentalBid({
-      bidderId: "NPC-Bear",
+      bidderId: "RENTER-A",
       pairKey: "BTCUSD",
       maxTipRate: 0.01,
       rentalMargin: 200,
       publishedAtEpoch: 10,
     });
     expect(bid.id).toMatch(/^RENT-BID-/);
-    expect(bid.bidderId).toBe("NPC-Bear");
+    expect(bid.bidderId).toBe("RENTER-A");
     expect(bid.maxTipRate).toBe(0.01);
     expect(bid.rentalMargin).toBe(200);
     expect(bid.expiresAtEpoch).toBe(10 + BID_TTL_EPOCHS);
@@ -69,7 +69,7 @@ describe("matchRentalAuction", () => {
   };
   const baseBid = {
     id: "B-1",
-    bidderId: "NPC-Bear",
+    bidderId: "RENTER-A",
     pairKey: "BTCUSD",
     maxTipRate: 0.008,
     durationEpochs: 5,
@@ -90,7 +90,7 @@ describe("matchRentalAuction", () => {
     // Clears at the OWNER's floor (renter pays 0.005, not their max 0.008).
     expect(rental.tipRate).toBe(0.005);
     expect(rental.ownerId).toBe("You");
-    expect(rental.renterId).toBe("NPC-Bear");
+    expect(rental.renterId).toBe("RENTER-A");
     expect(rental.expiresAtEpoch).toBe(1 + 5);
     expect(rental.active).toBe(true);
     expect(result.remainingOffers).toHaveLength(0);
@@ -110,15 +110,15 @@ describe("matchRentalAuction", () => {
   });
 
   it("matches highest bid first when multiple bids compete on one offer", () => {
-    const highBid = { ...baseBid, id: "B-A", maxTipRate: 0.012, bidderId: "NPC-Whale" };
-    const lowBid = { ...baseBid, id: "B-B", maxTipRate: 0.006, bidderId: "NPC-Bear" };
+    const highBid = { ...baseBid, id: "B-A", maxTipRate: 0.012, bidderId: "RENTER-B" };
+    const lowBid = { ...baseBid, id: "B-B", maxTipRate: 0.006, bidderId: "RENTER-A" };
     const result = matchRentalAuction({
       offers: [baseOffer],
       bids: [lowBid, highBid],
       currentEpoch: 1,
     });
     expect(result.newRentals).toHaveLength(1);
-    expect(result.newRentals[0].renterId).toBe("NPC-Whale");
+    expect(result.newRentals[0].renterId).toBe("RENTER-B");
     // Low bid stays in the orderbook.
     expect(result.remainingBids).toHaveLength(1);
     expect(result.remainingBids[0].id).toBe("B-B");
@@ -168,7 +168,7 @@ describe("settleRentals", () => {
       pairLapId: "PLAP-1",
       legSide: "long",
       ownerId: "You",
-      renterId: "NPC-Bear",
+      renterId: "RENTER-A",
       pairKey: "BTCUSD",
       tipRate: 0.005,
       durationEpochs: 5,
@@ -225,7 +225,7 @@ describe("settleRentals", () => {
     });
     expect(result.terminated).toHaveLength(1);
     expect(result.terminated[0].reason).toBe("default");
-    expect(result.defaultedRenters).toContain("NPC-Bear");
+    expect(result.defaultedRenters).toContain("RENTER-A");
     // Owner still gets accrued tips up to the default tick.
     expect(result.ownerCredits.You).toBeGreaterThanOrEqual(0);
   });

@@ -2,7 +2,7 @@
 //
 // When the owner of a paired LAP wants to monetize one or both legs
 // without taking the directional risk themselves, they publish a
-// rental offer. Renters (NPCs in Phase 3; humans later) submit bids.
+// rental offer. Renters (sourced via the order-flow adapter) submit bids.
 // Each medium tick:
 //
 //   1. matchRentalAuction(offers, bids) clears the order book per pair —

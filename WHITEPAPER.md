@@ -15,9 +15,10 @@ design document.
 
 ## 1. What Trading Tower is
 
-Trading Tower is a fully in-browser simulator of a leveraged trading
-clearinghouse. It replaces the conventional limit-order book with an
-**auction over a parametric leverage distribution**, layered with:
+Trading Tower is a **leveraged-trading clearinghouse engine** delivered
+as a fully in-browser reference implementation. It replaces the
+conventional limit-order book with an **auction over a parametric
+leverage distribution**, layered with:
 
 - ESMA-compliant per-asset leverage caps with a vol-adaptive override.
 - A risk-tiered pool that settles winners and losers in cascading order.
@@ -25,14 +26,18 @@ clearinghouse. It replaces the conventional limit-order book with an
   event), three reinsurance products that sit behind it, and a fully
   collateralised stablecoin (Tower Tether, TT) minted against insurer
   allocations.
-- Five archetypal NPC counterparties, regime detection, cross-pair
-  correlation, paired-LAP delta-neutral positions, and a per-leg rental
-  market.
+- An **OrderFlowAdapter** seam where real participant flow attaches —
+  the engine ships with a NULL adapter and is otherwise free of synthetic
+  counterparties.
+- Regime detection, cross-pair correlation, paired-LAP delta-neutral
+  positions, and a per-leg rental market.
 
-The simulator is a single React + Vite app (no backend). All state is in
-React state and `localStorage`; all math runs client-side. There is no
-chain, no custody, no real money — it is a research tool for the
-mechanism itself.
+The reference implementation is a single React + Vite app (no backend).
+All state is in React state and `localStorage`; all math runs
+client-side. There is no chain, no custody, no real money. The engine
+itself is fintech-shaped — it is the participant feed, custody layer,
+and authentication layer that the project does not yet provide and
+must be added before the engine can be deployed against real flow.
 
 ---
 
@@ -46,7 +51,7 @@ different concerns run on different time scales:
 | Tier   | Period (1× speed) | Responsibilities                                                                                                       |
 | ------ | ----------------- | ---------------------------------------------------------------------------------------------------------------------- |
 | Fast   | ~1 s              | Advance every pair's price one GBM/jump-diffusion step. Recompute realised σ. Run deterministic barrier checks.        |
-| Medium | ~6 s              | Run the auction. Settle the dominant pool. Update NPC books. Advance contracts, rentals, lending, paired-LAP P&L.      |
+| Medium | ~6 s              | Pull external bids from the order-flow adapter. Run the auction. Settle the dominant pool. Advance contracts, rentals, paired-LAP P&L. |
 | Slow   | every 5th medium  | Detect regime. Update yield model. Recompute cross-pair correlations. Tick insurance markets and reinsurance.          |
 
 Two additional **prime-stride** cadences run on top of the slow tier:
@@ -73,8 +78,7 @@ src/
 │   ├── esma.js                   # ESMA caps + vol-adaptive cap min(ESMA, 1/(σ√t·K))
 │   ├── priceModels.js            # GBM / Merton jump-diffusion / mean-revert dispatcher
 │   ├── regime.js                 # 6 regime classifier (CALM…CRASH) + adj weights
-│   ├── npcs.js                   # 5 archetypal counterparties + regime overlays
-│   ├── npcMarkets.js             # NPCs that participate in markets beyond LAPs
+│   ├── orderFlow.js              # OrderFlowAdapter contract (NULL, live feed, broker, replay)
 │   ├── insuranceMarket.js        # two-sided binary insurance, sqrt-style premium
 │   ├── insuranceEvents.js        # per-pair + macro event registry & detectors
 │   ├── reinsurance.js            # three parallel reinsurance products (30/30/40 %)
@@ -168,7 +172,7 @@ algorithm cascades down a sub-unit ladder (`SUB_UNIT_STEPS = [0.75,
 
 If either side of the book is empty the auction short-circuits to a
 well-formed zero result so that downstream consumers (entropy
-contracts, strips, NPC markets) never see undefined state.
+contracts, strips, secondary markets) never see undefined state.
 
 ### 3.4 Caps: ESMA + vol-adaptive
 
@@ -424,29 +428,41 @@ the UI surface.
 
 ---
 
-## 8. NPC ecosystem and regime detection
+## 8. Counterparty flow and regime detection
 
-### 8.1 Five archetypes
+### 8.1 The OrderFlowAdapter
 
-`src/lib/npcs.js` spawns the same five counterparties for each pair:
+`src/lib/orderFlow.js` defines the seam where external participant flow
+enters the auction. Earlier iterations populated the book with five
+hard-coded synthetic counterparties; that path is gone. The auction now
+asks an injected adapter for bids each medium tick:
 
-| NPC    | Strategy      | Behaviour                                         |
-| ------ | ------------- | ------------------------------------------------- |
-| Whale  | FIXED_LONG    | Conservative long, large margin, low leverage     |
-| Degen  | FIXED_LONG    | Aggressive long, small margin, max leverage       |
-| Hedger | FIXED_SHORT   | Yield-farmer short, mid leverage                  |
-| Bot    | YIELD_CHASER  | Switches sides based on book imbalance / yield   |
-| Bear   | FIXED_SHORT   | Contrarian short, mid-large margin                |
+```js
+adapter.getBids({ pairKey, currentEpoch, regime, realizedSigma, cap })
+  // → Array<{ id, strategy, base_margin, max_lev, tip_tiers, ... }>
 
-Each NPC has a `tip_tiers` ladder, a leverage range `[min_lev,
-max_lev]`, and a behaviour string consumed by `updateNpcRegime`. After
-a regime detection, the regime's overlays adjust leverage caps, tip
-rates, and strategy:
+adapter.getPoolUsers(ctx)   // optional — for participants that hold
+                            //            positions, not just submit bids
+```
 
-- CRASH/HIGH_VOL: NPC max leverage × 0.6, tip × 1.3, conservative
-  longs may flip to short.
-- TRENDING_UP: long-side NPCs raise tips by 10 %.
-- CALM: yield chasers reduce their min-yield threshold.
+Three concrete adapter shapes are anticipated:
+
+- **Live participant feed.** Authenticated traders connect to a backend;
+  the backend buffers their bids per epoch and exposes them via the
+  adapter. This is the production target.
+- **Broker / exchange connector.** A translation layer that maps an
+  external book (e.g. Binance, Hyperliquid, IBKR) into the LAP bid
+  shape. Useful for market-making the protocol against an existing
+  venue's flow.
+- **Historical-tape replay.** Recorded bids from a CSV/JSON file,
+  emitted on a synchronised clock. Required for reproducible
+  backtesting and for any rigorous analysis of mechanism behaviour.
+
+The repo ships with `NULL_ORDER_FLOW_ADAPTER`, which returns no flow.
+With the NULL adapter the auction's empty-book short-circuit (see §3.3)
+yields a well-formed zero result and the rest of the loop proceeds —
+the system is fully functional with no external connection, just
+quiet.
 
 ### 8.2 Six regimes
 
@@ -471,8 +487,10 @@ otherwise                                → CALM
 ```
 
 Each regime carries `sigmaAdj` and `muAdj` that nudge the geodesic
-distribution and NPC tip behaviour. The whole loop is closed: realised
-returns → regime → NPC behaviour → auction outcomes → new returns.
+distribution. The classifier output is also part of the adapter
+context, so any external flow source can condition its bidding on the
+current regime. The closed loop is: realised returns → regime →
+distribution + adapter bids → auction outcomes → new returns.
 
 ---
 
@@ -532,36 +550,38 @@ the geodesic learning rate. Everything else is parametric and pure.
 
 ## 10. What's bad
 
-### 10.1 It's a simulator, not a protocol
+### 10.1 It's a clearinghouse engine, not a deployed product
 
-This is the most important caveat. There is no settlement layer, no
-custody, no chain, no oracle, no actual counterparties. Every claim
-about "mints", "withdrawals", and "redemptions" is a state mutation in
-React. The full set of integration concerns — MEV, oracle delay,
-re-org safety, gas, off-chain coordination — is entirely absent. None
-of the mechanism above has been stress-tested by an adversarial
-counterparty.
+The mechanism is implemented; the production envelope around it is
+not. There is no settlement layer, no custody, no chain, no oracle,
+no authentication. Every "mint", "withdrawal", and "redemption" is a
+state mutation in React. The full set of integration concerns — MEV,
+oracle delay, re-org safety, gas, off-chain coordination, KYC, custody
+controls — is absent. The repositioning to remove synthetic NPCs makes
+this gap honest rather than papered over: the engine is now visibly
+inert without an OrderFlowAdapter wired in.
 
-### 10.2 The NPC ecosystem is too small to test the auction at scale
+### 10.2 No bundled order-flow source
 
-Five NPCs per pair is enough to demonstrate the mechanism in motion
-but nowhere near enough to produce realistic order-flow shapes. The
-geodesic adapter has very little data per epoch to descend on, and
-it shows: parameter trajectories are jittery and the entropy weights
-swing more than they should. Real markets would smooth this out, but
-any conclusion drawn from the current simulator about how the
-mechanism behaves under sparse flow is suspect.
+Removing the synthetic NPCs leaves the engine with no counterparty
+flow out of the box. That is intentional — the legacy NPCs let casual
+runs *look* like a working market while doing nothing of forensic
+value — but it does mean the project now requires either a bundled
+historical-tape replay or a connectable live-feed adapter before any
+quantitative claim about mechanism behaviour can be made. Until one
+of those exists, the auction's adaptive parameters can be reasoned
+about analytically but not empirically.
 
 ### 10.3 The regime classifier is brittle
 
 Three thresholds (`volRatio 2.0`, `volRatio 1.5`, `|trend| 0.4`) over
 a 20-epoch window will misclassify any market that doesn't look
 exactly like the GBM/jump-diffusion price models that feed it. The
-regime is then a hard input to NPC behaviour and to the geodesic
-distribution. A misclassified regime cascades into wrong tip ladders,
-wrong leverage caps, and wrong ideal distributions. The classifier
-needs either a probabilistic output, a hidden-Markov backbone, or
-both.
+regime is then a hard input to the geodesic distribution and to any
+adapter that conditions on it. A misclassified regime cascades into
+wrong tip ladders, wrong leverage caps, and wrong ideal
+distributions. The classifier needs either a probabilistic output, a
+hidden-Markov backbone, or both.
 
 ### 10.4 Reinsurance is conceptually right, structurally fragile
 
@@ -685,8 +705,9 @@ cleanest sandboxes I've seen for testing ideas like:
 - Risk-tiered settlement with safety-inverse intra-tier shares.
 
 A careful pass to add price-tape import, deterministic seed control,
-a CSV/JSON export of every per-epoch state, and a configurable NPC
-factory would turn this from an interactive demo into a reproducible
+a CSV/JSON export of every per-epoch state, and a small library of
+reference adapter implementations (replay, deterministic-bot, broker
+shim) would turn this from an interactive demo into a reproducible
 research platform that other people could publish results from.
 
 ### 11.5 A pedagogical anchor for derivatives engineering
@@ -702,38 +723,47 @@ mechanism" teaching artifact, in a way that no textbook currently is.
 
 ### 11.6 An adversarial testbed before any of the above
 
-Before any of §11.1–§11.4 is taken seriously, the simulator should
-gain an **adversarial bot framework**: a way to plug arbitrary
-strategies in and let them play against each other and the NPCs at
-high speed. The protocol's properties are only as strong as their
-worst-case adversary, and the current five-NPC setup is too friendly
-to expose the real failure modes. This is the obvious next step and
-would give every claim above (positive or negative) the empirical
-backing it currently lacks.
+Before any of §11.1–§11.4 is taken seriously, the engine should gain
+an **adversarial bot framework**: a way to plug arbitrary strategies
+into the OrderFlowAdapter and let them compete at high speed. The
+protocol's properties are only as strong as their worst-case
+adversary; with no built-in counterparty flow now that NPCs are
+removed, this is the obvious next priority. Any claim above
+(positive or negative) needs the empirical backing such a framework
+would produce.
 
 ---
 
 ## 12. Closing assessment
 
 Trading Tower implements a coherent and unusually well-factored
-research design. The mechanism is interesting on the merits and the
-implementation is honest about its purity boundaries. The biggest gap
-between what it is and what it could be is **adversarial pressure**:
-real participants, real price tapes, real edge cases. Everything in
-the architecture says it's ready to receive that pressure; nothing in
-the simulator has yet given it any.
+clearinghouse engine. The mechanism is interesting on the merits and
+the implementation is honest about its purity boundaries. With the
+synthetic NPC layer removed, the project is now visibly an engine in
+search of real participant flow — exactly the right framing for a
+serious fintech product, and exactly the right trigger for the next
+round of work.
 
 The right next steps, in order of impact:
 
-1. Adversarial bot framework + price-tape import.
-2. Hidden-Markov or probabilistic regime classifier.
-3. Dynamic cascade-tier boundaries.
-4. Cardinality-stable LTV breadth term.
-5. Multi-tick conservation invariants.
-6. Documented mechanism extraction (§11.3) for the stablecoin design.
-7. On-chain proof-of-concept of the auction core.
+1. **Order-flow adapter implementations.** A historical-tape replay
+   first (deterministic, reproducible, sufficient for backtesting).
+   Then a broker/exchange connector for live market-making. Finally
+   a backend with authenticated participants for production.
+2. **Backend layer.** Node service for sessioned users, persistent
+   storage in a real database, push-based bid submission, server-side
+   custody bookkeeping. Replace `localStorage` with a real source of
+   truth.
+3. Adversarial bot framework on top of the adapter contract.
+4. Hidden-Markov or probabilistic regime classifier.
+5. Dynamic cascade-tier boundaries.
+6. Cardinality-stable LTV breadth term.
+7. Multi-tick conservation invariants.
+8. On-chain proof-of-concept of the auction core, once an adversarial
+   testbed has produced data worth defending.
 
-The project is a long way from being a protocol, but the gap is
-specific and addressable. The mechanism design is the asset; the
-simulator is the tool that earned the right to take that mechanism
-seriously.
+The project is a long way from being a deployed protocol, but the gap
+is specific and addressable, and the adapter seam makes each gap
+attackable independently. The mechanism design is the asset; the
+engine is the working artifact that earned the right to take that
+mechanism seriously.

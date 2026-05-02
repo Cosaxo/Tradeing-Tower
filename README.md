@@ -1,12 +1,17 @@
 # Trading Tower — LAP v2
 
-ESMA-compliant **Leveraged Auction Protocol** simulator.
+ESMA-compliant **Leveraged Auction Protocol** clearinghouse engine.
 
-A clearinghouse that replaces the traditional orderbook with a *geodesic
-leverage distribution* and *entropy-weighted yield* — minority liquidity
-providers earn more when filling thin leverage buckets, stressed markets pay
-insurance-pool depositors more, and position risk is settled in deterministic
-tiers via an analytical Brownian-bridge barrier (Harrison 1985).
+Replaces the traditional orderbook with a *geodesic leverage distribution*
+and *entropy-weighted yield* — minority liquidity providers earn more when
+filling thin leverage buckets, stressed markets pay insurance-pool
+depositors more, and position risk is settled in deterministic tiers via
+an analytical Brownian-bridge barrier (Harrison 1985).
+
+Counterparty flow is supplied by an **OrderFlowAdapter** (live participant
+feed, broker connector, or historical-tape replay). The repo ships with a
+NULL adapter so the engine runs end-to-end on its own machinery; wire a
+real adapter in via the `orderFlowAdapter` prop on `useEpochLoop`.
 
 ```
 npm install
@@ -36,7 +41,7 @@ Speed control (½×, 1×, 2×, 5×) scales both intervals proportionally.
 | `settlement.js`   | `geometricPnl`, `deterministicBarrierAdjustment`                 | Exact compounded P&L + Harrison (1985) barrier formula `P(τ ≤ T) = exp(-2ab/σ²)`.                   |
 | `pool.js`         | `settleDominantPool`                                             | Risk-tiered SAFE/MEDIUM/RISKY cascade settlement with stability fee.                                |
 | `regime.js`       | `REGIMES`, `detectRegime`                                        | Three-signal regime detection: trend, volRatio, autocorr.                                           |
-| `npcs.js`         | `buildNpcs`, `updateNpcRegime`                                   | Five NPC profiles (Whale, Degen, Hedger, Bot, Bear) with regime-overlay adaptation.                 |
+| `orderFlow.js`    | `NULL_ORDER_FLOW_ADAPTER`, `getBids`, `getPoolUsers`             | Adapter contract for external participant flow (live feed, broker connector, tape replay).         |
 | `insurance.js`    | `settleInsurancePool`                                            | KL-divergence-driven counter-cyclical pool yield (1×–3×).                                           |
 | `yieldModel.js`   | `updateYieldModel`, `calcStripPremium`                           | OU mean-reverting yield, Abramowitz-Stegun normal CDF, dynamic buffer rate.                         |
 | `strips.js`       | `initStrip`, `settleStrips`                                      | Forward yield contracts with insurer book-size cap.                                                 |
@@ -50,8 +55,8 @@ Speed control (½×, 1×, 2×, 5×) scales both intervals proportionally.
 ### State (`src/state/`)
 
 `initPairState(pairKey)` builds a full simulation state for one instrument:
-prices, return history, NPC book, regime, yield model, insurance pool slice,
-yield buffer, lending offers/borrows, contracts, strips, regime history.
+prices, return history, regime, yield model, insurance pool slice, yield
+buffer, lending offers/borrows, contracts, strips, regime history.
 
 ### Hooks (`src/hooks/`)
 
@@ -72,7 +77,6 @@ yield buffer, lending offers/borrows, contracts, strips, regime history.
 | `LeverageCurve`       | Ideal (geodesic) vs actual fill curves per side.                     |
 | `PlayerPanel`         | Sliders for leverage / margin / side, preset buttons, tip-tier editor. |
 | `MetricsPanel`        | Equity curve + Sortino / Calmar / WinRate / MaxDD.                   |
-| `NpcPanel`            | NPC book snapshot for the active pair.                               |
 | `ContractDesk`        | Buy imbalance + entropy contracts.                                   |
 | `StripDesk`           | Buy yield strips.                                                    |
 | `PoolDesk`            | Deposit / withdraw from the insurance pool.                          |
@@ -120,8 +124,11 @@ npm run test          # run once
 npm run test:watch    # watch mode
 ```
 
-44 unit tests cover: math helpers, auction clearinghouse, ESMA caps,
-deterministic settlement, lending market.
+260 tests across 24 files cover: math helpers, auction clearinghouse,
+ESMA caps, deterministic settlement, pool cascade, allocations + LTV,
+insurance markets + reinsurance, Tower Tether mint / redemption, paired
+LAPs, the rental market, conservation identity, and a 10-epoch
+end-to-end smoke test of the core loop with the NULL order-flow adapter.
 
 ## Scripts
 

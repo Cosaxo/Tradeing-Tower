@@ -41,7 +41,6 @@ import { CreditDesk } from "./components/CreditDesk.jsx";
 import { StressPanel } from "./components/StressPanel.jsx";
 import { LogicView } from "./components/LogicView.jsx";
 import { MetricsPanel } from "./components/MetricsPanel.jsx";
-import { NpcPanel } from "./components/NpcPanel.jsx";
 import { TtDesk } from "./components/TtDesk.jsx";
 import { InsuranceDesk } from "./components/InsuranceDesk.jsx";
 import { GettingStarted } from "./components/GettingStarted.jsx";
@@ -353,7 +352,7 @@ export default function App() {
     // Paired LAP close: terminate any active rentals on its legs and
     // drop unmatched offers. Renters get any unspent rental margin
     // back (added to the owner's accruedOwnerTips for clarity in the
-    // log; refunds to NPC margin happen via the loop on next tick).
+    // log; refunds to renter margin happen via the loop on next tick).
     if (isPairedLap(pos)) {
       let ownerCreditFromTermination = 0;
       setPairStates((prev) => {
@@ -476,10 +475,10 @@ export default function App() {
         };
 
     // Auto-publish rental offers for both legs of a paired LAP. Owners
-    // can earn tip income when NPCs (or future humans) bid for
-    // directional exposure without paying full LAP capital. Pool
-    // linkage no longer mutates pair state — the linkage tag on the
-    // position itself is the only record needed.
+    // can earn tip income when other participants bid for directional
+    // exposure without paying full LAP capital. Pool linkage no longer
+    // mutates pair state — the linkage tag on the position itself is
+    // the only record needed.
     if (paired) {
       setPairStates((prev) => {
         const target = prev[activePair];
@@ -887,7 +886,6 @@ export default function App() {
                   shortCurve={activePS?.auctionResult?.shortCurve ?? []}
                   cap={cap}
                 />
-                <NpcPanel npcs={activePS?.npcs ?? []} />
                 <div className="rounded border border-gray-800 bg-gray-900 p-2">
                   <div className="text-[10px] text-gray-500 mb-1">Recent Matches</div>
                   {(activePS?.auctionResult?.matched ?? []).slice(0, 8).map((m, i) => (

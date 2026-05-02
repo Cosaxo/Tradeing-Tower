@@ -306,7 +306,7 @@ function matchBids(longBids, shortBids, cap, smileParams, realizedSigma, metaPar
 
 // Full auction for one trading pair, one epoch.
 //
-// users         - array of participant bid objects (player + NPCs)
+// users         - array of participant bid objects (player + adapter flow)
 // alpha         - current long/short ratio from previous epoch [0,1]
 // logs          - mutable log array to push messages into
 // cap           - effective leverage cap for this instrument
@@ -335,7 +335,7 @@ export function runAuction(
 
   // Zero-match short-circuit: if either side of the book is empty, nothing
   // can clear. Return a well-formed empty result so downstream consumers
-  // (entropy contracts, strips, NPC markets) don't have to defend against
+  // (entropy contracts, strips, secondary markets) don't have to defend against
   // undefined/malformed auction state.
   if (longBids.length === 0 || shortBids.length === 0) {
     logs.push(

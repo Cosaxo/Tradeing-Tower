@@ -4,7 +4,8 @@
 //   - autocorr: lag-1 autocorrelation of returns
 //
 // Each regime adjusts sigma_geo and mu_log scaling in the geodesic
-// distribution, and NPC behaviour.
+// distribution and is exposed to the order-flow adapter as part of its
+// per-tick context.
 
 export const REGIMES = {
   CALM: { label: "Calm", color: "#34d399", sigmaAdj: 1.2, muAdj: 1.0 },

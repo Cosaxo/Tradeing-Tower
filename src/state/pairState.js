@@ -1,9 +1,8 @@
 // Per-pair simulation state factory.
 // Each active pair carries its own price history, auction state,
-// NPC book, regime tracker, and insurance pool slice.
+// regime tracker, and insurance pool slice.
 
 import { PAIRS } from "../constants/assets.js";
-import { buildNpcs } from "../lib/npcs.js";
 import { MAX_HISTORY } from "../constants/system.js";
 
 export function initPairState(pairKey) {
@@ -29,9 +28,6 @@ export function initPairState(pairKey) {
     metaParams: { muLow: 0, alpha: 0.5 },
     prevSmoothFills: null,
     alpha: 0.5, // long/short ratio
-
-    // NPC participants.
-    npcs: buildNpcs(pairKey, initialSigma),
 
     // Regime.
     regime: null,

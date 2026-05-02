@@ -1,8 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
   initTtState,
-  mintCapacity,
-  mintTT,
+  openThread,
+  damageThread,
+  growThread,
+  calcInsuranceFillWeights,
   transferTT,
   submitRedemption,
   cancelRedemption,
@@ -13,13 +15,10 @@ import {
   balanceOf,
   mintedByOf,
   debtOf,
-  TT_REINS_OVERSIZE,
+  totalThreadPrincipal,
+  activeThreads,
 } from "../towerTether.js";
-import {
-  MINT_COEFFICIENT,
-  MINT_LTV_GATE,
-  EXPRESS_PENALTY_RATE,
-} from "../../constants/system.js";
+import { EXPRESS_PENALTY_RATE } from "../../constants/system.js";
 
 // ---------------------------------------------------------------------------
 // state factory + accessors
@@ -30,97 +29,272 @@ describe("initTtState", () => {
     const s = initTtState();
     expect(totalSupply(s)).toBe(0);
     expect(totalCirculating(s)).toBe(0);
+    expect(s.threads).toEqual([]);
     expect(s.redemptionQueue).toEqual([]);
     expect(s.merchantBalance).toBe(0);
   });
 });
 
 // ---------------------------------------------------------------------------
-// mint capacity
+// fill weights
 // ---------------------------------------------------------------------------
 
-describe("mintCapacity", () => {
-  it("returns 0 below the LTV gate", () => {
-    const s = initTtState();
+describe("calcInsuranceFillWeights", () => {
+  it("equal-weights when reinsurance is empty", () => {
+    const markets = [
+      { eventId: "E1", insurerCapital: 0 },
+      { eventId: "E2", insurerCapital: 0 },
+      { eventId: "E3", insurerCapital: 0 },
+    ];
+    const w = calcInsuranceFillWeights({
+      eligibleMarkets: markets,
+      reinsuranceLive: false,
+    });
+    expect(w.E1).toBeCloseTo(1 / 3);
+    expect(w.E2).toBeCloseTo(1 / 3);
+    expect(w.E3).toBeCloseTo(1 / 3);
+  });
+
+  it("mixes equal floor with size proportional weighting", () => {
+    const markets = [
+      { eventId: "E1", insurerCapital: 1000 },
+      { eventId: "E2", insurerCapital: 0 },
+    ];
+    const w = calcInsuranceFillWeights({
+      eligibleMarkets: markets,
+      reinsuranceLive: true,
+    });
+    // weight_i = 0.5 × 1/N + 0.5 × size_i/Σsize  (then renormalised)
+    // raw = E1: 0.5×0.5 + 0.5×1 = 0.75; E2: 0.5×0.5 + 0.5×0 = 0.25
+    expect(w.E1).toBeCloseTo(0.75);
+    expect(w.E2).toBeCloseTo(0.25);
+  });
+
+  it("sums to 1 across eligible markets", () => {
+    const markets = [
+      { eventId: "E1", insurerCapital: 100 },
+      { eventId: "E2", insurerCapital: 200 },
+      { eventId: "E3", insurerCapital: 50 },
+      { eventId: "E4", insurerCapital: 0 },
+    ];
+    const w = calcInsuranceFillWeights({
+      eligibleMarkets: markets,
+      reinsuranceLive: true,
+    });
+    const sum = Object.values(w).reduce((s, v) => s + v, 0);
+    expect(sum).toBeCloseTo(1);
+  });
+
+  it("returns {} for an empty market list", () => {
     expect(
-      mintCapacity({ ttState: s, userId: "A", totalStake: 1000, ltv: MINT_LTV_GATE - 0.01 })
-    ).toBe(0);
-  });
-
-  it("equals totalStake × ltv × MINT_COEFFICIENT at the gate", () => {
-    const s = initTtState();
-    const cap = mintCapacity({
-      ttState: s,
-      userId: "A",
-      totalStake: 1000,
-      ltv: 0.8,
-    });
-    expect(cap).toBeCloseTo(1000 * 0.8 * MINT_COEFFICIENT);
-  });
-
-  it("subtracts existing minted + debt", () => {
-    const s = { ...initTtState(), mintedByUser: { A: 100 }, debtByUser: { A: 50 } };
-    const cap = mintCapacity({
-      ttState: s,
-      userId: "A",
-      totalStake: 1000,
-      ltv: 1.0,
-    });
-    // raw cap = 1000 × 1.0 × 0.5 = 500. Outstanding = 100 + 50 = 150.
-    expect(cap).toBeCloseTo(350);
+      calcInsuranceFillWeights({ eligibleMarkets: [], reinsuranceLive: true })
+    ).toEqual({});
   });
 });
 
 // ---------------------------------------------------------------------------
-// mint
+// openThread (mint)
 // ---------------------------------------------------------------------------
 
-describe("mintTT", () => {
-  it("rejects below the LTV gate", () => {
-    const r = mintTT({
-      ttState: initTtState(),
-      userId: "A",
-      amount: 100,
-      totalStake: 1000,
-      ltv: 0.5,
-    });
-    expect(r.ok).toBe(false);
+describe("openThread", () => {
+  const baseWeights = { E1: 0.5, E2: 0.5 };
+
+  it("rejects non-positive principal", () => {
+    expect(
+      openThread({
+        ttState: initTtState(),
+        ownerId: "A",
+        principal: 0,
+        insuranceWeights: baseWeights,
+      }).ok
+    ).toBe(false);
   });
 
-  it("rejects amounts above capacity", () => {
-    const r = mintTT({
+  it("mints TT 1:1 — principal === ttFace at open", () => {
+    const r = openThread({
       ttState: initTtState(),
-      userId: "A",
-      amount: 10000,
-      totalStake: 1000,
-      ltv: 1.0,
-    });
-    expect(r.ok).toBe(false);
-  });
-
-  it("credits both wallet and outstanding mint on success", () => {
-    const r = mintTT({
-      ttState: initTtState(),
-      userId: "A",
-      amount: 200,
-      totalStake: 1000,
-      ltv: 1.0,
+      ownerId: "A",
+      principal: 200,
+      insuranceWeights: baseWeights,
     });
     expect(r.ok).toBe(true);
     expect(balanceOf(r.ttState, "A")).toBe(200);
     expect(mintedByOf(r.ttState, "A")).toBe(200);
     expect(totalSupply(r.ttState)).toBe(200);
+    expect(r.thread.principal).toBe(200);
+    expect(r.thread.ttFace).toBe(200);
   });
 
-  it("returns reinsuranceFacePerProduct = mint × 1.5 / 3 (1.5× rule)", () => {
-    const r = mintTT({
+  it("does NOT impose any LTV gate or coefficient", () => {
+    const r = openThread({
       ttState: initTtState(),
-      userId: "A",
-      amount: 300,
-      totalStake: 1000,
-      ltv: 1.0,
+      ownerId: "A",
+      principal: 1000,
+      insuranceWeights: { E1: 1 },
     });
-    expect(r.reinsuranceFacePerProduct).toBeCloseTo((300 * TT_REINS_OVERSIZE) / 3);
+    expect(r.ok).toBe(true);
+    expect(r.thread.ttFace).toBe(1000);
+  });
+
+  it("appends to threads array", () => {
+    let s = initTtState();
+    s = openThread({
+      ttState: s,
+      ownerId: "A",
+      principal: 100,
+      insuranceWeights: baseWeights,
+    }).ttState;
+    s = openThread({
+      ttState: s,
+      ownerId: "A",
+      principal: 50,
+      insuranceWeights: baseWeights,
+    }).ttState;
+    expect(activeThreads(s)).toHaveLength(2);
+    expect(totalThreadPrincipal(s, "A")).toBe(150);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// damageThread (loss propagation across all 4 layers)
+// ---------------------------------------------------------------------------
+
+describe("damageThread", () => {
+  function seed(principal = 200) {
+    return openThread({
+      ttState: initTtState(),
+      ownerId: "A",
+      principal,
+      insuranceWeights: { E1: 0.6, E2: 0.4 },
+    });
+  }
+
+  it("shrinks principal by the delta and reports per-layer deltas", () => {
+    const { ttState, thread } = seed(200);
+    const r = damageThread({ ttState, threadId: thread.id, delta: 50 });
+    expect(r.deltaApplied).toBe(50);
+    expect(r.poolLayerDelta).toBe(50);
+    expect(r.insuranceLayerDeltas.E1).toBeCloseTo(50 * 0.6);
+    expect(r.insuranceLayerDeltas.E2).toBeCloseTo(50 * 0.4);
+    const updated = r.ttState.threads[0];
+    expect(updated.principal).toBe(150);
+  });
+
+  it("ttFace shrinks alongside principal when redemption hasn't occurred", () => {
+    const { ttState, thread } = seed(200);
+    const r = damageThread({ ttState, threadId: thread.id, delta: 50 });
+    const updated = r.ttState.threads[0];
+    expect(updated.ttFace).toBe(150);
+    expect(r.ttFaceDelta).toBe(50);
+    expect(mintedByOf(r.ttState, "A")).toBe(150);
+  });
+
+  it("caps damage at the thread's current principal", () => {
+    const { ttState, thread } = seed(100);
+    const r = damageThread({ ttState, threadId: thread.id, delta: 1e6 });
+    expect(r.deltaApplied).toBe(100);
+    expect(r.ttState.threads[0].principal).toBe(0);
+    expect(r.ttState.threads[0].closed).toBe(true);
+  });
+
+  it("zero delta is a no-op", () => {
+    const { ttState, thread } = seed();
+    const r = damageThread({ ttState, threadId: thread.id, delta: 0 });
+    expect(r.deltaApplied).toBe(0);
+    expect(r.ttState).toBe(ttState);
+  });
+
+  it("propagates ALL FOUR layers symmetrically (the thread invariant)", () => {
+    const { ttState, thread } = seed(400);
+    const r = damageThread({ ttState, threadId: thread.id, delta: 100 });
+    expect(r.deltaApplied).toBe(100);
+    expect(r.poolLayerDelta).toBe(100); // B-book pool layer
+    const insSum = Object.values(r.insuranceLayerDeltas).reduce((s, v) => s + v, 0);
+    expect(insSum).toBeCloseTo(100);
+    expect(r.ttFaceDelta).toBe(100);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// growThread (gain into layers 1, 2, 3 — NOT layer 4)
+// ---------------------------------------------------------------------------
+
+describe("growThread", () => {
+  function seed(principal = 200) {
+    return openThread({
+      ttState: initTtState(),
+      ownerId: "A",
+      principal,
+      insuranceWeights: { E1: 0.6, E2: 0.4 },
+    });
+  }
+
+  it("grows principal but leaves ttFace UNCHANGED", () => {
+    const { ttState, thread } = seed(200);
+    const r = growThread({ ttState, threadId: thread.id, gain: 25 });
+    expect(r.gainApplied).toBe(25);
+    const grown = r.ttState.threads[0];
+    expect(grown.principal).toBe(225);
+    expect(grown.ttFace).toBe(200);
+  });
+
+  it("returns insuranceLayerAdds split by mix weights (layer 2)", () => {
+    const { ttState, thread } = seed(200);
+    const r = growThread({ ttState, threadId: thread.id, gain: 100 });
+    expect(r.insuranceLayerAdds.E1).toBeCloseTo(60);
+    expect(r.insuranceLayerAdds.E2).toBeCloseTo(40);
+  });
+
+  it("returns poolLayerAdd matching the gain (layer 3 — B-book pool)", () => {
+    const { ttState, thread } = seed(200);
+    const r = growThread({ ttState, threadId: thread.id, gain: 30 });
+    expect(r.poolLayerAdd).toBe(30);
+  });
+
+  it("does NOT touch wallet TT or mintedByUser (no auto-mint at layer 4)", () => {
+    const { ttState, thread } = seed(200);
+    const before = balanceOf(ttState, "A");
+    const beforeMint = mintedByOf(ttState, "A");
+    const r = growThread({ ttState, threadId: thread.id, gain: 50 });
+    expect(balanceOf(r.ttState, "A")).toBe(before);
+    expect(mintedByOf(r.ttState, "A")).toBe(beforeMint);
+  });
+
+  it("creates a buffer (principal − ttFace) that absorbs subsequent damage first", () => {
+    let { ttState, thread } = seed(100);
+    // Grow 30 → principal 130, ttFace 100. Buffer = 30.
+    ttState = growThread({ ttState, threadId: thread.id, gain: 30 }).ttState;
+    // Damage 20 — should eat into buffer only, ttFace stays at 100.
+    const dmg = damageThread({ ttState, threadId: thread.id, delta: 20 });
+    const t = dmg.ttState.threads[0];
+    expect(t.principal).toBe(110);
+    expect(t.ttFace).toBe(100);
+    expect(dmg.ttFaceDelta).toBe(0);
+  });
+
+  it("damage above buffer eats principal AND ttFace pro-rata", () => {
+    let { ttState, thread } = seed(100);
+    ttState = growThread({ ttState, threadId: thread.id, gain: 30 }).ttState;
+    const dmg = damageThread({ ttState, threadId: thread.id, delta: 50 });
+    const t = dmg.ttState.threads[0];
+    expect(t.principal).toBe(80);
+    expect(t.ttFace).toBe(80);
+    expect(dmg.ttFaceDelta).toBe(20);
+  });
+
+  it("zero gain is a no-op", () => {
+    const { ttState, thread } = seed();
+    const r = growThread({ ttState, threadId: thread.id, gain: 0 });
+    expect(r.gainApplied).toBe(0);
+    expect(r.ttState).toBe(ttState);
+  });
+
+  it("ignores closed threads", () => {
+    const { ttState, thread } = seed(50);
+    const dmg = damageThread({ ttState, threadId: thread.id, delta: 1e6 });
+    expect(dmg.ttState.threads[0].closed).toBe(true);
+    const r = growThread({ ttState: dmg.ttState, threadId: thread.id, gain: 100 });
+    expect(r.gainApplied).toBe(0);
   });
 });
 
@@ -130,12 +304,11 @@ describe("mintTT", () => {
 
 describe("transferTT", () => {
   function seed() {
-    return mintTT({
+    return openThread({
       ttState: initTtState(),
-      userId: "A",
-      amount: 200,
-      totalStake: 1000,
-      ltv: 1.0,
+      ownerId: "A",
+      principal: 200,
+      insuranceWeights: { E1: 1 },
     }).ttState;
   }
 
@@ -161,17 +334,16 @@ describe("transferTT", () => {
 });
 
 // ---------------------------------------------------------------------------
-// redemption queue
+// submit / cancel
 // ---------------------------------------------------------------------------
 
 describe("submitRedemption / cancelRedemption", () => {
   function seed() {
-    return mintTT({
+    return openThread({
       ttState: initTtState(),
-      userId: "A",
-      amount: 200,
-      totalStake: 1000,
-      ltv: 1.0,
+      ownerId: "A",
+      principal: 200,
+      insuranceWeights: { E1: 1 },
     }).ttState;
   }
 
@@ -202,13 +374,24 @@ describe("submitRedemption / cancelRedemption", () => {
 });
 
 // ---------------------------------------------------------------------------
-// cycle drain
+// cycle drain — thread unwinds
 // ---------------------------------------------------------------------------
 
 describe("runRedemptionCycle", () => {
-  it("standard requests respect the supply cap and FIFO", () => {
+  function makeMintedState() {
     let s = initTtState();
-    s = mintTT({ ttState: s, userId: "A", amount: 100, totalStake: 1000, ltv: 1 }).ttState;
+    s = openThread({
+      ttState: s,
+      ownerId: "A",
+      principal: 100,
+      insuranceWeights: { E1: 0.5, E2: 0.5 },
+      currentEpoch: 0,
+    }).ttState;
+    return s;
+  }
+
+  it("standard requests respect the supply cap and FIFO", () => {
+    let s = makeMintedState();
     s = submitRedemption({ ttState: s, userId: "A", amount: 8, currentEpoch: 1 }).ttState;
     s = submitRedemption({ ttState: s, userId: "A", amount: 8, currentEpoch: 1 }).ttState;
     const result = runRedemptionCycle({ ttState: s, currentEpoch: 1 });
@@ -216,8 +399,7 @@ describe("runRedemptionCycle", () => {
   });
 
   it("express requests bypass the cap and pay penalty to pool", () => {
-    let s = initTtState();
-    s = mintTT({ ttState: s, userId: "A", amount: 100, totalStake: 1000, ltv: 1 }).ttState;
+    let s = makeMintedState();
     s = submitRedemption({
       ttState: s,
       userId: "A",
@@ -231,21 +413,50 @@ describe("runRedemptionCycle", () => {
     expect(result.penaltyToPool).toBeCloseTo(50 * EXPRESS_PENALTY_RATE);
   });
 
-  it("collateralHaircuts spread pro-rata across all minters", () => {
-    let s = initTtState();
-    s = mintTT({ ttState: s, userId: "A", amount: 100, totalStake: 1000, ltv: 1 }).ttState;
-    s = mintTT({ ttState: s, userId: "B", amount: 100, totalStake: 1000, ltv: 1 }).ttState;
-    s = transferTT({ ttState: s, fromId: "A", toId: "C", amount: 60 }).ttState;
-    s = submitRedemption({ ttState: s, userId: "C", amount: 20, currentEpoch: 1 }).ttState;
+  it("threadUnwinds give per-thread layer deltas the loop can apply", () => {
+    let s = makeMintedState();
+    s = submitRedemption({
+      ttState: s,
+      userId: "A",
+      amount: 8,
+      currentEpoch: 1,
+    }).ttState;
     const result = runRedemptionCycle({ ttState: s, currentEpoch: 1 });
-    expect(result.collateralHaircuts.A).toBeCloseTo(10);
-    expect(result.collateralHaircuts.B).toBeCloseTo(10);
+    expect(result.threadUnwinds).toHaveLength(1);
+    const u = result.threadUnwinds[0];
+    expect(u.delta).toBeCloseTo(8);
+    expect(u.poolLayerDelta).toBeCloseTo(8);
+    expect(u.insuranceLayerDeltas.E1).toBeCloseTo(4);
+    expect(u.insuranceLayerDeltas.E2).toBeCloseTo(4);
+  });
+
+  it("FIFO across discrete threads — oldest thread shrinks first", () => {
+    let s = initTtState();
+    s = openThread({
+      ttState: s,
+      ownerId: "A",
+      principal: 30,
+      insuranceWeights: { E1: 1 },
+      currentEpoch: 0,
+    }).ttState;
+    s = openThread({
+      ttState: s,
+      ownerId: "A",
+      principal: 40,
+      insuranceWeights: { E1: 1 },
+      currentEpoch: 5,
+    }).ttState;
+    s = transferTT({ ttState: s, fromId: "A", toId: "B", amount: 50 }).ttState;
+    s = submitRedemption({ ttState: s, userId: "B", amount: 5, currentEpoch: 10 }).ttState;
+    const result = runRedemptionCycle({ ttState: s, currentEpoch: 10 });
+    expect(result.threadUnwinds).toHaveLength(1);
+    expect(result.threadUnwinds[0].delta).toBeCloseTo(5);
   });
 
   it("empty queue is a no-op", () => {
     const result = runRedemptionCycle({ ttState: initTtState(), currentEpoch: 5 });
     expect(result.dollarsOut).toEqual({});
-    expect(result.collateralHaircuts).toEqual({});
+    expect(result.threadUnwinds).toEqual([]);
     expect(result.penaltyToPool).toBe(0);
   });
 });
@@ -255,62 +466,50 @@ describe("runRedemptionCycle", () => {
 // ---------------------------------------------------------------------------
 
 describe("applySolvencyCheck", () => {
-  it("does nothing when outstanding mint fits within new cap", () => {
-    let s = mintTT({
+  it("does nothing when ttFace ≤ principal across the user's threads", () => {
+    let s = openThread({
       ttState: initTtState(),
-      userId: "A",
-      amount: 200,
-      totalStake: 1000,
-      ltv: 1.0,
+      ownerId: "A",
+      principal: 200,
+      insuranceWeights: { E1: 1 },
     }).ttState;
-    const result = applySolvencyCheck({
-      ttState: s,
-      userId: "A",
-      newTotalStake: 800,
-      ltv: 1.0,
-    });
+    const result = applySolvencyCheck({ ttState: s, userId: "A" });
     expect(result.clawback).toBe(0);
     expect(result.newDebt).toBe(0);
   });
 
-  it("claws back from wallet first when stake drops", () => {
-    let s = mintTT({
+  it("claws back from wallet first when a thread principal drops below ttFace", () => {
+    let s = openThread({
       ttState: initTtState(),
-      userId: "A",
-      amount: 200,
-      totalStake: 1000,
-      ltv: 1.0,
+      ownerId: "A",
+      principal: 200,
+      insuranceWeights: { E1: 1 },
     }).ttState;
-    // Stake drops to 200 → cap = 100. Outstanding 200 → overflow 100.
-    const result = applySolvencyCheck({
-      ttState: s,
-      userId: "A",
-      newTotalStake: 200,
-      ltv: 1.0,
-    });
-    expect(result.clawback).toBeCloseTo(100);
+    s = {
+      ...s,
+      threads: s.threads.map((t) => ({ ...t, principal: 80, ttFace: 200 })),
+    };
+    const result = applySolvencyCheck({ ttState: s, userId: "A" });
+    expect(result.clawback).toBeCloseTo(120);
     expect(result.newDebt).toBe(0);
-    expect(balanceOf(result.ttState, "A")).toBeCloseTo(100);
-    expect(mintedByOf(result.ttState, "A")).toBeCloseTo(100);
+    expect(balanceOf(result.ttState, "A")).toBeCloseTo(80);
   });
 
   it("records debt when wallet doesn't cover the shortfall", () => {
-    let s = mintTT({
+    let s = openThread({
       ttState: initTtState(),
-      userId: "A",
-      amount: 200,
-      totalStake: 1000,
-      ltv: 1.0,
+      ownerId: "A",
+      principal: 200,
+      insuranceWeights: { E1: 1 },
     }).ttState;
     s = transferTT({ ttState: s, fromId: "A", toId: "B", amount: 180 }).ttState;
-    const result = applySolvencyCheck({
-      ttState: s,
-      userId: "A",
-      newTotalStake: 200,
-      ltv: 1.0,
-    });
+    s = {
+      ...s,
+      threads: s.threads.map((t) => ({ ...t, principal: 80, ttFace: 200 })),
+    };
+    const result = applySolvencyCheck({ ttState: s, userId: "A" });
     expect(result.clawback).toBeCloseTo(20);
-    expect(result.newDebt).toBeCloseTo(80);
-    expect(debtOf(result.ttState, "A")).toBeCloseTo(80);
+    expect(result.newDebt).toBeCloseTo(100);
+    expect(debtOf(result.ttState, "A")).toBeCloseTo(100);
   });
 });

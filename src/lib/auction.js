@@ -5,10 +5,12 @@
 // preferences. Meta-parameters adapt each epoch via KL-gradient descent so the
 // distribution self-calibrates to the actual order flow.
 
-import { ENTROPY_BETA, ENTROPY_EPS, ADAPTIVE_LR, SOFT_CLOSE_PCT, SUB_UNIT_STEPS } from "../constants/system.js";
-import { timeWeightedYieldMult } from "./math.js";
+import { ENTROPY_BETA, ENTROPY_EPS, ADAPTIVE_LR, SOFT_CLOSE_PCT } from "../constants/system.js";
 
-export { timeWeightedYieldMult };
+// Minimum fillable leverage. Pairs whose smaller max-lev is below this
+// are skipped (the position would be too small to be meaningful and
+// rounds badly through the exp payoff math).
+const MIN_FILL_LEVERAGE = 0.5;
 
 // ---------------------------------------------------------------------------
 // Geodesic weight
@@ -241,67 +243,71 @@ function buildCurve(bids, cap, smileParams, realizedSigma, metaParams) {
   }));
 }
 
-// Match long and short users via the geodesic distribution.
-// Returns matched pairs, filled leverage, and per-user yield estimates.
-function matchBids(longBids, shortBids, cap, smileParams, realizedSigma, metaParams, normWeights, bucketLevs) {
+// Match long and short users via leverage proximity.
+//
+// Sort both sides ASCENDING by max-leverage and pair index-aligned —
+// this is provably optimal for minimising Σ |L_long − L_short| (sort
+// both, pair same-rank). Pairs at the smaller of the two max-leverages
+// (continuous fill: no [0.75, 0.5, 0.25] cascade) — the cascade was
+// dead code in practice (fell through when baseLev < 0.5, took the
+// full step otherwise).
+//
+// Why proximity instead of greedy max-lev descending: greedy could
+// pair a 5× long with a 1× short (filled at 1×, the long compromises
+// 4 leverage units) while a 4× short sat unpaired with a 6× long. Sort+
+// align pairs traders of similar conviction together so neither side
+// over-compromises.
+//
+// Returns matched pairs (long↔short, fill leverage, margin, tips) AND
+// per-side unmatched bid lists. The caller routes the unmatched lists:
+// A-classified users wait for next tick; B-classified users get
+// filled by the B-book pool.
+function matchBids(longBids, shortBids, _cap, _smileParams, _realizedSigma, _metaParams, normWeights, bucketLevs) {
   const matched = [];
   const logs = [];
 
-  // Sub-unit cascade: try full match first, then fall back to fractional
-  // leverage steps so thin books still clear when bid/ask leverage differ.
-  const steps = [1, ...SUB_UNIT_STEPS];
+  const sortedLong = [...longBids].sort((a, b) => (a.max_lev ?? 1) - (b.max_lev ?? 1));
+  const sortedShort = [...shortBids].sort((a, b) => (a.max_lev ?? 1) - (b.max_lev ?? 1));
 
-  const sortedLong = [...longBids].sort((a, b) => (b.max_lev ?? 1) - (a.max_lev ?? 1));
-  const sortedShort = [...shortBids].sort((a, b) => (b.max_lev ?? 1) - (a.max_lev ?? 1));
+  const matchedLongIds = new Set();
+  const matchedShortIds = new Set();
+  const minPairs = Math.min(sortedLong.length, sortedShort.length);
 
-  let si = 0;
-  for (const lb of sortedLong) {
-    if (si >= sortedShort.length) break;
-    const sb = sortedShort[si];
+  for (let i = 0; i < minPairs; i++) {
+    const lb = sortedLong[i];
+    const sb = sortedShort[i];
 
-    // Start from the smaller of the two max-leverage offers, then cascade
-    // down the sub-unit ladder until we find a fillable step >= 0.5.
-    const baseLev = Math.min(lb.max_lev ?? 1, sb.max_lev ?? 1);
-    let filledLev = 0;
-    let stepFraction = 1;
-    for (const s of steps) {
-      const candidate = baseLev * s;
-      if (candidate >= 0.5) {
-        filledLev = candidate;
-        stepFraction = s;
-        break;
-      }
-    }
+    // Continuous fill at min(longMax, shortMax). Skip if below the
+    // minimum fillable leverage.
+    const fillLev = Math.min(lb.max_lev ?? 1, sb.max_lev ?? 1);
+    if (fillLev < MIN_FILL_LEVERAGE) continue;
 
-    if (filledLev < 0.5) {
-      si++;
-      continue;
-    }
+    const margin = Math.min(lb.base_margin ?? 1000, sb.base_margin ?? 1000);
 
-    const margin = Math.min(lb.base_margin ?? 1000, sb.base_margin ?? 1000) * stepFraction;
-
-    const entMultL = getEntropyMultForUser(filledLev, normWeights, bucketLevs);
-    const entMultS = getEntropyMultForUser(filledLev, normWeights, bucketLevs);
-
-    const tipL = (lb.tip_tiers?.[0]?.tip ?? 0.02) * entMultL;
-    const tipS = (sb.tip_tiers?.[0]?.tip ?? 0.02) * entMultS;
+    const entMult = getEntropyMultForUser(fillLev, normWeights, bucketLevs);
+    const tipL = (lb.tip_tiers?.[0]?.tip ?? 0.02) * entMult;
+    const tipS = (sb.tip_tiers?.[0]?.tip ?? 0.02) * entMult;
 
     matched.push({
       longId: lb.id,
       shortId: sb.id,
-      leverage: parseFloat(filledLev.toFixed(3)),
+      leverage: parseFloat(fillLev.toFixed(3)),
       margin: parseFloat(margin.toFixed(2)),
-      fillFraction: stepFraction,
+      fillFraction: 1,
       longTip: parseFloat(tipL.toFixed(4)),
       shortTip: parseFloat(tipS.toFixed(4)),
     });
+    matchedLongIds.add(lb.id);
+    matchedShortIds.add(sb.id);
     logs.push(
-      `[MATCH] ${lb.id} LONG x${filledLev.toFixed(2)} ↔ ${sb.id} SHORT | margin=$${margin.toFixed(0)} fill=${(stepFraction * 100).toFixed(0)}% tipL=${(tipL * 100).toFixed(2)}%`
+      `[MATCH] ${lb.id} LONG x${fillLev.toFixed(2)} ↔ ${sb.id} SHORT | margin=$${margin.toFixed(0)} tipL=${(tipL * 100).toFixed(2)}%`
     );
-    si++;
   }
 
-  return { matched, logs };
+  const unmatchedLongs = longBids.filter((b) => !matchedLongIds.has(b.id));
+  const unmatchedShorts = shortBids.filter((b) => !matchedShortIds.has(b.id));
+
+  return { matched, unmatchedLongs, unmatchedShorts, logs };
 }
 
 // Full auction for one trading pair, one epoch.
@@ -343,6 +349,8 @@ export function runAuction(
     );
     return {
       matched: [],
+      unmatchedLongs: longBids,
+      unmatchedShorts: shortBids,
       longCurve: [],
       shortCurve: [],
       dominantSide: longBids.length >= shortBids.length ? "LONG" : "SHORT",
@@ -380,7 +388,12 @@ export function runAuction(
 
   const updatedMeta = adaptMetaParams(metaParams ?? {}, actualBuckets, idealBuckets, ratio, realizedSigma);
 
-  const { matched, logs: matchLogs } = matchBids(
+  const {
+    matched,
+    unmatchedLongs,
+    unmatchedShorts,
+    logs: matchLogs,
+  } = matchBids(
     longBids,
     shortBids,
     cap,
@@ -418,6 +431,8 @@ export function runAuction(
 
   return {
     matched,
+    unmatchedLongs,
+    unmatchedShorts,
     longCurve,
     shortCurve,
     dominantSide,

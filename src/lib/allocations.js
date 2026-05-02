@@ -18,10 +18,15 @@
 // Allocation state shape (per user):
 //
 //   {
-//     allocations: { [marketId]: pct }, // pct in [0, 1], should sum ≤ 1
-//     version: integer,                  // bumped on each declaration
-//     pendingLapPnl: number,              // queued P&L to apply on next settle
+//     allocations: { [eventId]: pct }, // pct in [0, 1], should sum ≤ 1
+//     version: integer,                 // bumped on each declaration
+//     pendingLapPnl: number,            // queued P&L to apply on next settle
 //   }
+//
+// Keys are event IDs (from STANDARD_EVENTS) — NOT market object IDs.
+// Market IDs are minted at runtime and don't survive across reloads,
+// while event IDs are stable across the registry's lifetime. This
+// keeps persisted allocations meaningful even if a market is rebuilt.
 
 import {
   postInsurer,
@@ -88,18 +93,21 @@ export function setUserAllocation(allocations, userId, marketAllocations) {
 // Inputs:
 //   markets         — list of insurance markets
 //   userId
-//   userAllocation  — { allocations: { marketId: pct }, ... }
+//   userAllocation  — { allocations: { eventId: pct }, ... }
 //   totalCapital    — current working capital to allocate
 //
-// Returns { markets } with the user's positions resized.
+// Returns { markets } with the user's positions resized. Allocations
+// for event IDs that don't match any current market are silently
+// ignored — that's the survival path when the event registry shifts
+// between sessions.
 export function applyAllocations({ markets, userId, userAllocation, totalCapital }) {
   if (!userAllocation || !userAllocation.allocations) return { markets };
-  const targetByMarketId = {};
-  for (const [mid, pct] of Object.entries(userAllocation.allocations)) {
-    targetByMarketId[mid] = pct * Math.max(0, totalCapital);
+  const targetByEventId = {};
+  for (const [eventId, pct] of Object.entries(userAllocation.allocations)) {
+    targetByEventId[eventId] = pct * Math.max(0, totalCapital);
   }
   const out = markets.map((m) => {
-    const target = targetByMarketId[m.id] ?? 0;
+    const target = targetByEventId[m.eventId] ?? 0;
     const current = m.insurerPositions?.[userId] ?? 0;
     const delta = target - current;
     if (Math.abs(delta) < 1e-6) return m;

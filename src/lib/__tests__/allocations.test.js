@@ -68,9 +68,9 @@ describe("applyAllocations", () => {
     const markets = makeMarkets(["E1", "E2", "E3"]);
     const userAllocation = {
       allocations: {
-        [markets[0].id]: 0.5,
-        [markets[1].id]: 0.3,
-        [markets[2].id]: 0.2,
+        [markets[0].eventId]: 0.5,
+        [markets[1].eventId]: 0.3,
+        [markets[2].eventId]: 0.2,
       },
     };
     const out = applyAllocations({
@@ -87,7 +87,7 @@ describe("applyAllocations", () => {
   it("redirects from old to new on rebalance", () => {
     let markets = makeMarkets(["E1", "E2"]);
     let userAllocation = {
-      allocations: { [markets[0].id]: 1.0 },
+      allocations: { [markets[0].eventId]: 1.0 },
     };
     let out = applyAllocations({
       markets,
@@ -99,7 +99,7 @@ describe("applyAllocations", () => {
 
     // Now rebalance to 50/50
     userAllocation = {
-      allocations: { [out.markets[0].id]: 0.5, [out.markets[1].id]: 0.5 },
+      allocations: { [out.markets[0].eventId]: 0.5, [out.markets[1].eventId]: 0.5 },
     };
     out = applyAllocations({
       markets: out.markets,
@@ -121,9 +121,9 @@ describe("propagateLapPnl", () => {
     let markets = makeMarkets(["E1", "E2", "E3"]);
     const userAllocation = {
       allocations: {
-        [markets[0].id]: 0.5,
-        [markets[1].id]: 0.3,
-        [markets[2].id]: 0.2,
+        [markets[0].eventId]: 0.5,
+        [markets[1].eventId]: 0.3,
+        [markets[2].eventId]: 0.2,
       },
     };
     const r = applyAllocations({
@@ -192,10 +192,10 @@ describe("allocationDiversificationStats", () => {
     let markets = makeMarkets(["E1", "E2", "E3", "E4"]);
     const userAllocation = {
       allocations: {
-        [markets[0].id]: 0.25,
-        [markets[1].id]: 0.25,
-        [markets[2].id]: 0.25,
-        [markets[3].id]: 0.25,
+        [markets[0].eventId]: 0.25,
+        [markets[1].eventId]: 0.25,
+        [markets[2].eventId]: 0.25,
+        [markets[3].eventId]: 0.25,
       },
     };
     markets = applyAllocations({
@@ -216,7 +216,7 @@ describe("allocationDiversificationStats", () => {
     markets = applyAllocations({
       markets,
       userId: "A",
-      userAllocation: { allocations: { [markets[0].id]: 1.0 } },
+      userAllocation: { allocations: { [markets[0].eventId]: 1.0 } },
       totalCapital: 1000,
     }).markets;
     const s = allocationDiversificationStats({ markets, userId: "A" });

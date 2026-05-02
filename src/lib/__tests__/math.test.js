@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import {
-  timeWeightedYieldMult,
   calcRealizedSigma,
   calcCorrelation,
   sortino,
@@ -9,19 +8,6 @@ import {
   calcRatioBeta,
   ratioEffectiveSigma,
 } from "../math.js";
-
-describe("timeWeightedYieldMult", () => {
-  it("is 1 at epoch 0", () => {
-    expect(timeWeightedYieldMult(0)).toBe(1);
-  });
-  it("caps at 1.4 after 20 epochs", () => {
-    expect(timeWeightedYieldMult(20)).toBeCloseTo(1.4);
-    expect(timeWeightedYieldMult(100)).toBeCloseTo(1.4);
-  });
-  it("handles negative input as zero epochs", () => {
-    expect(timeWeightedYieldMult(-5)).toBe(1);
-  });
-});
 
 describe("calcRealizedSigma", () => {
   it("returns default when history too short", () => {

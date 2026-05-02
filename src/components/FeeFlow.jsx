@@ -146,7 +146,7 @@ export function FeeFlow({ ledger }) {
       <div className="flex items-center justify-between">
         <span className="text-xs font-mono text-gray-300 flex items-center">
           Fee Flow
-          <HelpHint text="Where each fee dollar went: stability fee + strip premiums accumulate into pool pendingPremiums; the pool's own prime-stride settlement (INSURANCE_EVERY) routes the yieldMultiplier-adjusted revenue to claim payouts first and depositors second. Dynamic buffer contributions skim excess yield; buffer draws cover pool shortfalls." />
+          <HelpHint text="Per-pair fee accounting. The cumulative `stabilityFee` is deducted from auction tip revenue each medium epoch. Pre-Phase-5 routing (pool premiums, claims, yield buffer) was removed — only the stability-fee tally remains." />
         </span>
         <span className="text-[10px] font-mono text-gray-500">
           last epoch

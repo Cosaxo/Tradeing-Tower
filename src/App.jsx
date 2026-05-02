@@ -1,5 +1,6 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { ACTIVE_PAIRS } from "./constants/assets.js";
+import { createDefaultBotAdapter } from "./lib/defaultBotAdapter.js";
 import { initPairState } from "./state/pairState.js";
 import { initInsuranceState } from "./state/insuranceState.js";
 import { useEpochLoop } from "./hooks/useEpochLoop.js";
@@ -16,16 +17,36 @@ import {
   allocationDiversificationStats,
   propagateLapPnl,
 } from "./lib/allocations.js";
+import { postInsurer, withdrawInsurer } from "./lib/insuranceMarket.js";
 import { postReinsuranceBuyer } from "./lib/reinsurance.js";
 import { makePairedLap, isPairedLap, calcPairedLapClosePnl } from "./lib/pairedLap.js";
 import { publishLegOffer, terminateRental } from "./lib/rentalMarket.js";
 import {
   initTtState,
-  mintTT,
+  openThread,
+  calcInsuranceFillWeights,
   transferTT,
   submitRedemption,
   cancelRedemption,
-  mintCapacity,
+  totalThreadPrincipal,
+} from "./lib/towerTether.js";
+import {
+  initBBookState,
+  depositUnderwriter,
+  withdrawUnderwriter,
+  adjustThreadDerived,
+  openContract as openBBookContract,
+  closeContract as closeBBookContract,
+} from "./lib/bBookPool.js";
+import {
+  initClassifierState,
+  recordClose as recordClassifierClose,
+  getUserStats as getClassifierStats,
+  routeFor,
+} from "./lib/userClassifier.js";
+import {
+  damageThread,
+  growThread,
 } from "./lib/towerTether.js";
 import { getEffectiveCap } from "./lib/esma.js";
 import { initLedger } from "./lib/roleLedger.js";
@@ -44,6 +65,8 @@ import { MetricsPanel } from "./components/MetricsPanel.jsx";
 import { NpcPanel } from "./components/NpcPanel.jsx";
 import { TtDesk } from "./components/TtDesk.jsx";
 import { InsuranceDesk } from "./components/InsuranceDesk.jsx";
+import { BBookDesk } from "./components/BBookDesk.jsx";
+import { LapPayoffCurve } from "./components/LapPayoffCurve.jsx";
 import { GettingStarted } from "./components/GettingStarted.jsx";
 import { TradeHistory } from "./components/TradeHistory.jsx";
 import { SpeedControl } from "./components/SpeedControl.jsx";
@@ -99,10 +122,17 @@ const INITIAL_PLAYER = {
   tags: initTags(), // §10.1 — capital accumulates roles via tags, not transfers
 };
 
-const TABS = ["Chart", "Auction", "Insurance", "Credit", "Stress", "Markets", "History", "Log"];
+const TABS = ["Chart", "Auction", "Insurance", "Credit", "B-book", "Stress", "Markets", "History", "Log"];
 
 export default function App() {
-  const [pairStates, setPairStates] = useState(INITIAL_PAIR_STATES);
+  // pairStates is persisted so epoch counters, price history, and
+  // regime context survive a reload. Without this, openPositions
+  // would carry an `openedAtEpoch` that referred to a counter that
+  // had been reset to 0 — making the field meaningless.
+  const [pairStates, setPairStates, clearPairStates] = usePersistentState(
+    "tt.pairStates",
+    INITIAL_PAIR_STATES
+  );
   const [player, setPlayer, clearPlayer] = usePersistentState("tt.player", INITIAL_PLAYER);
   const [logs, setLogs] = useState([]);
   const [running, setRunning] = useState(false);
@@ -128,8 +158,34 @@ export default function App() {
     "tt.insurance",
     initInsuranceState()
   );
+  const [bBookState, setBBookState, clearBBook] = usePersistentState(
+    "tt.bBook",
+    initBBookState()
+  );
+  const [classifierState, setClassifierState, clearClassifier] = usePersistentState(
+    "tt.classifier",
+    initClassifierState()
+  );
   const { toasts, history, addToast, clearHistory } = useToast();
   const [showTutorial, setShowTutorial] = useState(false);
+
+  // OrderFlowAdapter — pluggable source of market flow. Default impl
+  // wraps the legacy NPCs (Whale / Degen / Hedger / Bot / Bear) for
+  // parity with prior behaviour. Swap in ReplayAdapter for backtests
+  // or BrokerAdapter for live-market wiring.
+  //
+  // Held in a ref so the same instance persists across re-renders
+  // (the adapter holds NPC state internally — recreating would reset
+  // their margins / restock counters every render).
+  const flowAdapterRef = useRef(null);
+  if (flowAdapterRef.current === null) {
+    flowAdapterRef.current = createDefaultBotAdapter({
+      pairKeys: ACTIVE_PAIRS,
+      realizedSigmaByPair: Object.fromEntries(
+        ACTIVE_PAIRS.map((pk) => [pk, pairStates[pk]?.realizedSigma ?? 0.02])
+      ),
+    });
+  }
 
   const { onPlayerEdit } = useEpochLoop({
     pairStates,
@@ -137,15 +193,19 @@ export default function App() {
     player,
     setPlayer,
     openPositions,
+    setOpenPositions,
     ttState,
     setTtState,
     insuranceState,
     setInsuranceState,
+    bBookState,
+    setBBookState,
     setLogs,
     addToast,
     running,
     speed,
     setRoleLedger,
+    flowAdapter: flowAdapterRef.current,
   });
 
   // Track equity history (one sample per medium epoch — the hook updates player.margin).
@@ -323,6 +383,110 @@ export default function App() {
     const priceNow = ps?.prices?.slice(-1)[0] ?? 1;
     const priceThen = pos.openPrice ?? priceNow;
 
+    // B-book contract: settles through the pool, not the auction. The
+    // user takes their P&L from the pool's stake (or pays into it on
+    // a loss). Underwriters share P&L pro-rata.
+    if (pos.type === "bbook" && pos.bBookContractId) {
+      const closed = closeBBookContract({
+        state: bBookState,
+        contractId: pos.bBookContractId,
+        currentPrice: priceNow,
+      });
+      if (!closed.ok) {
+        addToast(`B-book close failed: ${closed.reason}`, "warning");
+        return;
+      }
+
+      // closeBBookContract has already updated threadDerivedStake
+      // proportionally per underwriter. Now propagate the same
+      // thread-derived deltas into each thread's principal + the other
+      // layers so the 4-layer invariant holds (pool moved → T-bill +
+      // insurance + ttFace move too). poolLayerDelta/Add from
+      // damage/growThread is informational here — the pool was already
+      // moved by closeContract.
+      let workingTt = closed.state ? ttState : ttState; // closed.state is bBookState
+      let workingInsurance = insuranceState;
+      for (const [uid, shares] of Object.entries(closed.underwriterShares ?? {})) {
+        const td = shares?.threadDerived ?? 0;
+        if (Math.abs(td) <= 1e-9) continue;
+        const userThreads = (workingTt.threads ?? []).filter(
+          (t) => !t.closed && t.ownerId === uid && t.principal > 1e-9
+        );
+        if (userThreads.length === 0) continue;
+        const totalPrincipal = userThreads.reduce((s, t) => s + t.principal, 0);
+        if (totalPrincipal <= 0) continue;
+        for (const t of userThreads) {
+          const portion = td * (t.principal / totalPrincipal);
+          if (Math.abs(portion) <= 1e-9) continue;
+          if (portion > 0) {
+            const grown = growThread({
+              ttState: workingTt,
+              threadId: t.id,
+              gain: portion,
+            });
+            workingTt = grown.ttState;
+            for (const [eventId, add] of Object.entries(grown.insuranceLayerAdds)) {
+              if (add <= 1e-9) continue;
+              workingInsurance = {
+                ...workingInsurance,
+                markets: workingInsurance.markets.map((m) => {
+                  if (m.eventId !== eventId) return m;
+                  const pr = postInsurer({ market: m, userId: uid, amount: add });
+                  return pr.ok ? pr.market : m;
+                }),
+              };
+            }
+          } else {
+            const dmg = damageThread({
+              ttState: workingTt,
+              threadId: t.id,
+              delta: -portion,
+            });
+            workingTt = dmg.ttState;
+            for (const [eventId, cut] of Object.entries(dmg.insuranceLayerDeltas)) {
+              if (cut <= 1e-9) continue;
+              workingInsurance = {
+                ...workingInsurance,
+                markets: workingInsurance.markets.map((m) => {
+                  if (m.eventId !== eventId) return m;
+                  const wr = withdrawInsurer({ market: m, userId: uid, amount: cut });
+                  return wr.ok ? wr.market : m;
+                }),
+              };
+            }
+          }
+        }
+      }
+
+      setBBookState(closed.state);
+      setTtState(workingTt);
+      if (workingInsurance !== insuranceState) {
+        setInsuranceState(workingInsurance);
+      }
+      setOpenPositions((prev) => prev.filter((_, idx) => idx !== i));
+      setTradeLog((prev) => [
+        ...prev,
+        { ...pos, pnl: closed.userPnl, closedPrice: priceNow },
+      ]);
+      setPlayer((p) => ({
+        ...p,
+        margin: p.margin + closed.userPnl,
+        tags: untag(p.tags ?? {}, "auctionMargin", pos.margin),
+      }));
+      setClassifierState((prev) =>
+        recordClassifierClose(prev, player.id, {
+          pnl: closed.userPnl,
+          marginAtOpen: pos.margin,
+          closedAtEpoch: ps?.epochIndex ?? 0,
+        })
+      );
+      addToast(
+        `Closed ${pos.pairKey} ${pos.side} (B-book): ${closed.userPnl >= 0 ? "+" : ""}$${closed.userPnl.toFixed(2)}`,
+        closed.userPnl >= 0 ? "info" : "warning"
+      );
+      return;
+    }
+
     // Two close formulas. Single LAPs use the directional log-return
     // formula; paired LAPs decompose into long + short legs that
     // largely cancel, leaving positive gamma. Both close atomically —
@@ -337,10 +501,10 @@ export default function App() {
       pnl = pos.margin * pos.leverage * (Math.exp(direction * logRet) - 1);
     }
 
-    // Pool-linked LAPs propagate their P&L to the depositor's
-    // allocation stakes. Gains grow the stakes pro-rata; losses shrink
-    // them. (The legacy unlinkLapFromDeposit helper is gone — the new
-    // flow is one-shot and lives in `propagateLapPnl`.)
+    // Pool-linked LAP (loose allocation, not a thread): gains grow
+    // stakes pro-rata, losses shrink them. Thread-linked closes are
+    // blocked above — they must unwind via TT redemption to preserve
+    // the 4-layer invariant.
     if (pos.poolLinkage && pos.poolLinkage.depositorId === player.id) {
       const r = propagateLapPnl({
         markets: insuranceState.markets,
@@ -398,6 +562,14 @@ export default function App() {
       margin: p.margin + pnl,
       tags: untag(p.tags, "auctionMargin", pos.margin),
     }));
+    // Classifier records this close — affects future A/B routing.
+    setClassifierState((prev) =>
+      recordClassifierClose(prev, player.id, {
+        pnl,
+        marginAtOpen: pos.margin,
+        closedAtEpoch: ps?.epochIndex ?? 0,
+      })
+    );
     const desc = isPairedLap(pos)
       ? `${pos.pairKey} PAIRED`
       : `${pos.pairKey} ${pos.side}`;
@@ -456,6 +628,38 @@ export default function App() {
       newTags = tagged;
     }
 
+    // B-book routing decision. Only single (directional) LAPs route
+    // via the pool — paired LAPs are delta-neutral so the pool has no
+    // directional exposure to take. Pool-credit LAPs are also excluded
+    // (separate collateral semantics). Falls back to peer (A) flow if
+    // pool is over capacity or empty.
+    let bBookContract = null;
+    if (!paired && !usePoolCredit) {
+      const route = routeFor({
+        state: classifierState,
+        userId: player.id,
+        positionMargin: legSize,
+      });
+      if (route === "B") {
+        const opened = openBBookContract({
+          state: bBookState,
+          userId: player.id,
+          pairKey: activePair,
+          side: player.side,
+          leverage: player.leverage,
+          margin: legSize,
+          openPrice: priceNow,
+          currentEpoch: activePS?.epochIndex ?? 0,
+        });
+        if (opened.ok) {
+          bBookContract = opened.contract;
+          setBBookState(opened.state);
+        }
+        // If pool refused (capacity / empty), silently fall back to
+        // the peer-matched LAP path so user isn't blocked.
+      }
+    }
+
     const newPos = paired
       ? makePairedLap({
           pairKey: activePair,
@@ -465,6 +669,18 @@ export default function App() {
           openedAtEpoch: activePS?.epochIndex ?? 0,
           poolLinkage,
         })
+      : bBookContract
+      ? {
+          type: "bbook",
+          bBookContractId: bBookContract.id,
+          pairKey: activePair,
+          side: player.side,
+          leverage: player.leverage,
+          margin: legSize,
+          openPrice: priceNow,
+          openedAtEpoch: activePS?.epochIndex ?? 0,
+          poolLinkage: null,
+        }
       : {
           pairKey: activePair,
           side: player.side,
@@ -511,7 +727,11 @@ export default function App() {
 
     setOpenPositions((prev) => [...prev, newPos]);
     if (!usePoolCredit) setPlayer((p) => ({ ...p, tags: newTags }));
-    const labelTag = usePoolCredit ? "(pool credit)" : "tagged";
+    const labelTag = usePoolCredit
+      ? "(pool credit)"
+      : bBookContract
+      ? "(B-book)"
+      : "tagged";
     const label = paired
       ? `Opened ${activePair} PAIRED x${player.leverage.toFixed(1)} · $${requiredCapital.toFixed(0)} ${labelTag} · legs auto-listed for rent`
       : `Opened ${activePair} ${player.side} x${player.leverage.toFixed(1)} · $${legSize.toFixed(0)} ${labelTag}`;
@@ -519,35 +739,126 @@ export default function App() {
   }
 
   // --- Tower Tether handlers ----------------------------------------------
+  //
+  // Mint = open a thread. The same `amount` of free margin is locked as
+  // the thread's underlying T-bill stake AND simultaneously deployed
+  // as:
+  //   - insurer-side fill across reinsurance-covered insurance markets
+  //     (layer 2; mixed equal/size weighting)
+  //   - B-book pool underwriter stake (layer 3; thread-derived stake
+  //     that earns user tip flow + absorbs B-classed user P&L)
+  //   - an equal amount of TT minted into the wallet (layer 4)
+  //   plus auto-bought reinsurance face = 1.5× amount split across the
+  //   3 reinsurance products, hedging the insurer-side exposure.
+  //
+  // No LTV gate, no coefficient — gate is purely "can you afford to
+  // deploy `amount` of free margin?"
   function handleMintTT(amount) {
-    const result = mintTT({
-      ttState,
-      userId: player.id,
-      amount,
-      totalStake: poolDepositAmount,
-      ltv: poolLtvInfo.ltv,
-    });
-    if (!result.ok) {
-      addToast(`Mint failed: ${result.reason}`, "warning");
+    if (!Number.isFinite(amount) || amount <= 0) {
+      addToast("Mint amount must be positive", "warning");
       return;
     }
-    setTtState(result.ttState);
-    // Auto-buy reinsurance: face = result.reinsuranceFacePerProduct
-    // on each of the 3 reinsurance products (the 1.5× rule, split
-    // across 3 sleeves). Each product post is independent.
-    setInsuranceState((prev) => {
-      const next = { ...prev };
-      next.reinsurance = prev.reinsurance.map((p) => {
-        const r = postReinsuranceBuyer({
-          product: p,
-          userId: player.id,
-          faceAmount: result.reinsuranceFacePerProduct,
-        });
-        return r.ok ? r.product : p;
-      });
-      return next;
+    const free = freeMargin(player.margin, player.tags);
+    if (amount > free + 1e-6) {
+      addToast(
+        `Not enough free margin: $${free.toFixed(0)} available, need $${amount.toFixed(0)}`,
+        "warning"
+      );
+      return;
+    }
+
+    // 1. Pick eligible markets and fill weights.
+    const reinsuranceLive = (insuranceState.reinsurance ?? []).some(
+      (p) => (p.sellerCapital ?? 0) > 0
+    );
+    const eligibleMarkets = insuranceState.markets ?? [];
+    if (eligibleMarkets.length === 0) {
+      addToast("No insurance markets available for thread", "warning");
+      return;
+    }
+    const weights = calcInsuranceFillWeights({
+      eligibleMarkets,
+      reinsuranceLive,
     });
-    addToast(`Minted ${amount.toFixed(0)} TT (auto-bought reinsurance)`, "info");
+
+    // 2. Tag the principal as threadStake (locks same dollar across 4 roles).
+    const newTags = tryTag(player.margin, player.tags, "threadStake", amount);
+    if (!newTags) {
+      addToast("Insufficient free margin (tag check)", "warning");
+      return;
+    }
+
+    // 3. Layer 2: post insurer-side stakes weighted by the fill weights.
+    let nextMarkets = insuranceState.markets;
+    for (const [eventId, w] of Object.entries(weights)) {
+      const fill = amount * w;
+      if (fill <= 1e-6) continue;
+      const idx = nextMarkets.findIndex((m) => m.eventId === eventId);
+      if (idx < 0) continue;
+      const r = postInsurer({
+        market: nextMarkets[idx],
+        userId: player.id,
+        amount: fill,
+      });
+      if (r.ok) {
+        nextMarkets = nextMarkets.map((m, i) => (i === idx ? r.market : m));
+      }
+    }
+
+    // 3b. Auto-buy reinsurance — face = 1.5 × amount split across the 3
+    //     products. Hedges the insurer-side exposure: if any market the
+    //     thread participates in triggers, reinsurance pays the
+    //     coverageFraction × loss back to the user.
+    const reinsuranceFacePerProduct = (amount * 1.5) / 3;
+    let nextReinsurance = insuranceState.reinsurance ?? [];
+    nextReinsurance = nextReinsurance.map((p) => {
+      const r = postReinsuranceBuyer({
+        product: p,
+        userId: player.id,
+        faceAmount: reinsuranceFacePerProduct,
+      });
+      return r.ok ? r.product : p;
+    });
+
+    // 4. Layer 3: deposit the principal into the B-book pool as
+    //    thread-derived stake. No lockup — it's gated by the thread
+    //    redemption mechanics (10% cycle cap or express penalty).
+    const adjusted = adjustThreadDerived({
+      state: bBookState,
+      uid: player.id,
+      delta: amount,
+    });
+    if (!adjusted.ok) {
+      addToast(`Mint failed: ${adjusted.reason}`, "warning");
+      return;
+    }
+
+    // 5. Open the thread record. 1:1-mints the TT into the wallet.
+    const opened = openThread({
+      ttState,
+      ownerId: player.id,
+      principal: amount,
+      insuranceWeights: weights,
+      currentEpoch: activePS?.epochIndex ?? 0,
+    });
+    if (!opened.ok) {
+      addToast(`Mint failed: ${opened.reason}`, "warning");
+      return;
+    }
+
+    // 6. Commit all the new state in lockstep.
+    setTtState(opened.ttState);
+    setInsuranceState({
+      ...insuranceState,
+      markets: nextMarkets,
+      reinsurance: nextReinsurance,
+    });
+    setBBookState(adjusted.state);
+    setPlayer((p) => ({ ...p, tags: newTags }));
+    addToast(
+      `Thread opened: $${amount.toFixed(0)} → T-bill + insurance + B-book pool + TT (1 dollar, 4 jobs) · ${(reinsuranceFacePerProduct * 3).toFixed(0)} reinsurance face`,
+      "info"
+    );
   }
 
   function handleSendToMerchant(amount) {
@@ -594,6 +905,68 @@ export default function App() {
     addToast("Redemption cancelled, TT returned to wallet", "info");
   }
 
+  // --- B-book underwriter handlers ----------------------------------------
+  function handleBBookDeposit(amount) {
+    if (!Number.isFinite(amount) || amount <= 0) {
+      addToast("Deposit must be positive", "warning");
+      return;
+    }
+    const free = freeMargin(player.margin, player.tags);
+    if (amount > free + 1e-6) {
+      addToast(
+        `Not enough free margin: $${free.toFixed(0)} available, need $${amount.toFixed(0)}`,
+        "warning"
+      );
+      return;
+    }
+    const newTags = tryTag(player.margin, player.tags, "bBookStake", amount);
+    if (!newTags) {
+      addToast("Insufficient free margin (tag check)", "warning");
+      return;
+    }
+    const epoch = activePS?.epochIndex ?? 0;
+    const r = depositUnderwriter({
+      state: bBookState,
+      uid: player.id,
+      amount,
+      currentEpoch: epoch,
+    });
+    if (!r.ok) {
+      addToast(`Deposit failed: ${r.reason}`, "warning");
+      return;
+    }
+    setBBookState(r.state);
+    setPlayer((p) => ({ ...p, tags: newTags }));
+    addToast(
+      `Staked $${amount.toFixed(0)} as B-book underwriter (locked ${(activePS?.epochIndex ?? 0)} → ${epoch + 100})`,
+      "info"
+    );
+  }
+
+  function handleBBookWithdraw(amount) {
+    if (!Number.isFinite(amount) || amount <= 0) {
+      addToast("Withdraw must be positive", "warning");
+      return;
+    }
+    const epoch = activePS?.epochIndex ?? 0;
+    const r = withdrawUnderwriter({
+      state: bBookState,
+      uid: player.id,
+      amount,
+      currentEpoch: epoch,
+    });
+    if (!r.ok) {
+      addToast(`Withdraw failed: ${r.reason}`, "warning");
+      return;
+    }
+    setBBookState(r.state);
+    setPlayer((p) => ({
+      ...p,
+      tags: untag(p.tags ?? {}, "bBookStake", amount),
+    }));
+    addToast(`Withdrew $${amount.toFixed(0)} from B-book pool`, "info");
+  }
+
   function handleResetSession() {
     clearPlayer();
     clearPositions();
@@ -602,7 +975,9 @@ export default function App() {
     clearLedger();
     clearTt();
     clearInsurance();
-    setPairStates(INITIAL_PAIR_STATES);
+    clearBBook();
+    clearClassifier();
+    clearPairStates();
     setLogs([]);
     setShockResults(null);
     addToast("Session reset", "info");
@@ -618,7 +993,13 @@ export default function App() {
       }));
       onPlayerEdit();
       addToast(`Router: switch to ${s.pairKey} ${s.action}`, "info");
+      return;
     }
+    // Defensive: surface unrecognized actions instead of silently
+    // swallowing the click. The router can in principle emit other
+    // actions (CLOSE_*, REBALANCE, etc.) — when it does, we'll see
+    // it here rather than a dead button.
+    addToast(`Router: action "${s.action}" not yet implemented`, "warning");
   }
 
   useKeyboardShortcuts({
@@ -627,9 +1008,10 @@ export default function App() {
     "2": () => setActiveTab("Auction"),
     "3": () => setActiveTab("Insurance"),
     "4": () => setActiveTab("Credit"),
-    "5": () => setActiveTab("Stress"),
-    "6": () => setActiveTab("Markets"),
-    "7": () => setActiveTab("History"),
+    "5": () => setActiveTab("B-book"),
+    "6": () => setActiveTab("Stress"),
+    "7": () => setActiveTab("Markets"),
+    "8": () => setActiveTab("History"),
     "0": () => setActiveTab("Log"),
     "+": () => setSpeed((s) => Math.min(5, s * 2)),
     "-": () => setSpeed((s) => Math.max(0.5, s / 2)),
@@ -699,7 +1081,7 @@ export default function App() {
                 ? "text-emerald-200 border-emerald-700 bg-emerald-950"
                 : "text-gray-500 border-gray-800 bg-gray-900"
             }
-            title={`Tower Tether wallet · outstanding mint $${(ttState?.mintedByUser?.[player.id] ?? 0).toFixed(0)} · queue ${(ttState?.redemptionQueue ?? []).filter((q) => q.userId === player.id).length}`}
+            title={`Tower Tether wallet · outstanding mint $${(ttState?.threads ?? []).filter((t) => !t.closed && t.ownerId === player.id).reduce((s, t) => s + t.ttFace, 0).toFixed(0)} · queue ${(ttState?.redemptionQueue ?? []).filter((q) => q.userId === player.id).length}`}
             onClick={() => setActiveTab("Insurance")}
           />
         </div>
@@ -811,7 +1193,7 @@ export default function App() {
               <GettingStarted
                 hasAllocation={poolDepositAmount > 0}
                 hasPosition={openPositions.length > 0}
-                hasMinted={(ttState?.mintedByUser?.[player.id] ?? 0) > 0}
+                hasMinted={totalThreadPrincipal(ttState, player.id) > 0}
                 hasMerchantSent={(ttState?.merchantBalance ?? 0) > 0}
                 activeTab={activeTab}
                 onJump={(t) => setActiveTab(t)}
@@ -915,14 +1297,8 @@ export default function App() {
                 <TtDesk
                   ttState={ttState}
                   playerId={player.id}
-                  ltv={poolLtvInfo?.ltv ?? 0}
-                  poolDeposit={poolDepositAmount}
-                  mintCapacityRemaining={mintCapacity({
-                    ttState,
-                    userId: player.id,
-                    totalStake: poolDepositAmount,
-                    ltv: poolLtvInfo?.ltv ?? 0,
-                  })}
+                  freeMargin={freeMargin(player.margin, player.tags)}
+                  threadPrincipal={totalThreadPrincipal(ttState, player.id)}
                   onMint={handleMintTT}
                   onSendToMerchant={handleSendToMerchant}
                   onRedeem={handleRedeem}
@@ -945,7 +1321,37 @@ export default function App() {
                   deployedPoolCredit={deployedPoolCredit}
                   rentalsByPair={rentalsByPair}
                 />
+                {openPositions.length > 0 && (
+                  <div className="flex flex-col gap-2">
+                    <span className="text-[10px] font-mono text-gray-500 uppercase">
+                      Position payoff curves
+                    </span>
+                    {openPositions.slice(0, 4).map((pos, idx) => (
+                      <LapPayoffCurve
+                        key={pos.id ?? idx}
+                        position={pos}
+                        currentPrice={pairStates[pos.pairKey]?.prices?.slice(-1)[0]}
+                        label={
+                          pos.type === "bbook"
+                            ? `${pos.pairKey} ${pos.side} (B-book)`
+                            : null
+                        }
+                      />
+                    ))}
+                  </div>
+                )}
               </>
+            )}
+
+            {activeTab === "B-book" && (
+              <BBookDesk
+                bBookState={bBookState}
+                playerId={player.id}
+                freeMargin={freeMargin(player.margin, player.tags)}
+                currentEpoch={activePS?.epochIndex ?? 0}
+                onDeposit={handleBBookDeposit}
+                onWithdraw={handleBBookWithdraw}
+              />
             )}
 
             {activeTab === "Stress" && (
@@ -994,6 +1400,7 @@ export default function App() {
             poolLtv={poolLtvInfo}
             availablePoolCredit={availablePoolCredit}
             deployedPoolCredit={deployedPoolCredit}
+            classifierStats={getClassifierStats(classifierState, player.id)}
           />
         </aside>
 
@@ -1025,6 +1432,7 @@ export default function App() {
                 poolLtv={poolLtvInfo}
                 availablePoolCredit={availablePoolCredit}
                 deployedPoolCredit={deployedPoolCredit}
+                classifierStats={getClassifierStats(classifierState, player.id)}
               />
             </aside>
           </div>

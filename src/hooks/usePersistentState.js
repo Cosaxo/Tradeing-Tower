@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 // Migrations are functions (data) -> data that upgrade from version v to v+1.
 // They live in the `migrations` option so call sites can opt in without the
 // hook owning knowledge of each key's shape.
-export const PERSIST_SCHEMA_VERSION = 1;
+export const PERSIST_SCHEMA_VERSION = 2;
 
 // useState wrapper that persists to localStorage and hydrates on mount.
 // Stored payload shape: `{ v: <schemaVersion>, data: <value> }`. On read

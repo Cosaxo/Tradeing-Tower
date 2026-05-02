@@ -35,13 +35,24 @@ export const POOL_LTV_W_DIVERSITY = 0.25;
 export const POOL_LTV_W_BREADTH = 0.20;
 export const POOL_LTV_MAXWEIGHT_PENALTY = 0.20;
 
+// Cardinality-stable breadth target — the breadth term saturates at
+// this many distinct markets. Adding a 9th, 10th, ... event to the
+// registry no longer silently lowers everyone's LTV. Existing users
+// who were spread across 8 markets keep their full breadth credit
+// when new events are introduced.
+//
+// Tunable as policy: lower → easier to max breadth; higher → demands
+// more diversification before reaching the breadth cap.
+export const POOL_LTV_BREADTH_TARGET = 8;
+
 // Compute the LTV for a user's allocation across insurance markets.
 //
 // Inputs:
-//   markets       — current insurance market list
+//   markets       — current insurance market list (used for stake stats only)
 //   userId
-//   marketsTotal  — optional override for the registry size (used by
-//                   the breadth term). Defaults to markets.length.
+//   marketsTotal  — DEPRECATED. Kept for backwards compatibility but
+//                   ignored — breadth divisor is the immutable
+//                   POOL_LTV_BREADTH_TARGET.
 //
 // Returns:
 //   {
@@ -49,9 +60,9 @@ export const POOL_LTV_MAXWEIGHT_PENALTY = 0.20;
 //     breakdown: { floor, concentration, diversity, breadth, maxWeightPenalty },
 //     stats: { numMarkets, hhi, maxWeight, shannonNorm, totalStake },
 //   }
-export function calcAllocationLtv({ markets = [], userId, marketsTotal = null }) {
+export function calcAllocationLtv({ markets = [], userId, marketsTotal: _marketsTotal = null }) {
   const stats = allocationDiversificationStats({ markets, userId });
-  const total = marketsTotal ?? Math.max(1, markets.length);
+  const total = POOL_LTV_BREADTH_TARGET;
 
   if (stats.totalStake <= 0) {
     return {
@@ -98,32 +109,6 @@ export function calcAllocationLtv({ markets = [], userId, marketsTotal = null })
       maxWeight: parseFloat(stats.maxWeight.toFixed(4)),
       shannonNorm: parseFloat(stats.shannonNorm.toFixed(4)),
       totalStake: parseFloat(stats.totalStake.toFixed(2)),
-    },
-  };
-}
-
-// Backwards-compatible alias used by older callers (CreditDesk, App.jsx,
-// PortfolioStructurer). Takes positions for legacy interface but routes
-// to the allocation-based version when given markets+userId.
-export function calcPoolLtv(positions = []) {
-  // Legacy positional invocation — return floor-only result so older
-  // callers don't crash. New code should use calcAllocationLtv.
-  void positions;
-  return {
-    ltv: POOL_LTV_FLOOR,
-    breakdown: {
-      floor: POOL_LTV_FLOOR,
-      concentration: 0,
-      diversity: 0,
-      breadth: 0,
-      maxWeightPenalty: 0,
-    },
-    stats: {
-      numMarkets: 0,
-      hhi: 1,
-      maxWeight: 1,
-      shannonNorm: 0,
-      totalStake: 0,
     },
   };
 }

@@ -265,7 +265,17 @@ export function useEpochLoop({
         const ratioBeta = calcRatioBetaStat(newRatioHistory, ps.returnHistory);
         const effectiveSigma = ratioEffectiveSigma(realizedSigma, ratioRaw, ratioBeta);
 
-        // Build user list for pool settlement (active NPC + player positions).
+        // Build user list for pool settlement. NPCs ONLY — the player
+        // is no longer a participant in continuous-ambient settlement.
+        // Their declared bid (side/leverage) still feeds into the
+        // auction for tip distribution and B-book routing decisions,
+        // but it doesn't generate phantom directional P&L. All player
+        // exposure flows through explicit positions (LAPs, paired LAPs,
+        // threads, B-book contracts) with clear open/close lifecycles.
+        // This is the fix for the double-exposure bug where an open
+        // LAP's notional was being counted twice — once on the explicit
+        // ticket, once via settleDominantPool on the player's full
+        // margin.
         const poolUsers = activeNpcs.map((npc) => ({
           id: npc.id,
           margin: npc.current_margin ?? npc.base_margin,
@@ -273,15 +283,6 @@ export function useEpochLoop({
           side: npc.strategy?.includes("SHORT") ? "SHORT" : "LONG",
           active: true,
         }));
-        if (!bidsFrozen && player?.activePair === pk) {
-          poolUsers.push({
-            id: player.id ?? "You",
-            margin: player.margin ?? 5000,
-            leverage: Math.min(player.leverage ?? 1, cap),
-            side: player.side ?? "LONG",
-            active: true,
-          });
-        }
 
         const { users: settledUsers, stabilityFeeCollected, logs: poolLogs } =
           settleDominantPool(poolUsers, priceOld, priceNew, effectiveSigma, corrMap);
@@ -299,54 +300,38 @@ export function useEpochLoop({
           logs.push(`[NPC] ${n.id} liquidated — restock in ${n.restockRemaining} epochs`)
         );
 
-        // Update player margin if this is their active pair.
-        // Decompose settlement into T-bill + auction P&L + tips (§4.10).
+        // Apply T-bill yield + auction tips to player margin. These are
+        // the only "ambient" flows now — directional P&L is exclusively
+        // through explicit positions.
         let playerRoleEntry = null;
         if (!bidsFrozen && player?.activePair === pk) {
-          const playerSettled = settledUsers.find((u) => u.id === (player.id ?? "You"));
-          if (playerSettled) {
-            const preMargin = player.margin ?? 0;
-            const postMargin = playerSettled.margin;
-            // Pool applies T-bill multiplicatively AFTER geometric P&L + stability fee.
-            // tbill portion = postMargin − postMargin / (1 + r).
-            const r = TBILL_RATE / 365;
-            const tbill = playerSettled.active ? postMargin - postMargin / (1 + r) : 0;
-            const auctionPnl = playerSettled.active
-              ? postMargin / (1 + r) - preMargin
-              : postMargin - preMargin;
+          const preMargin = player.margin ?? 0;
+          // Per-tick T-bill yield matches the magnitude that
+          // settleDominantPool used to apply on the player's margin.
+          const r = TBILL_RATE / 365;
+          const tbill = preMargin * r;
 
-            // Tips are escrowed separately (§5.2) — use the escrow, not raw matches.
-            const pid = player.id ?? "You";
-            const { tipEscrow } = escrowTips(auctionResult.matched);
-            const tipEntry = tipEscrow[pid] ?? { paid: 0, received: 0 };
-            const tips = tipEntry.received - tipEntry.paid;
+          // Tips from auction matches — player earns them when their
+          // bid pairs with an NPC counterparty.
+          const pid = player.id ?? "You";
+          const { tipEscrow } = escrowTips(auctionResult.matched);
+          const tipEntry = tipEscrow[pid] ?? { paid: 0, received: 0 };
+          const tips = tipEntry.received - tipEntry.paid;
 
-            playerRoleEntry = {
-              epoch: epochIndex,
-              tbill,
-              auctionPnl,
-              tips,
-              // poolYield + stripPnl + creditChange filled in below as we settle.
-              poolYield: 0,
-              stripPnl: 0,
-              creditChange: 0,
-            };
+          // Both flows accrue to playerMarginDelta — explicit, no
+          // phantom P&L.
+          sideEffects.playerMarginDelta += tbill + tips;
 
-            // Absolute reset of player state from this pair's settlement.
-            // Combined with playerMarginDelta (rental tips, insurance flows,
-            // redemption dollars) below at apply time.
-            sideEffects.playerOverrides = {
-              margin: playerSettled.margin,
-              pnl: playerSettled.pnl ?? 0,
-              liquidated: playerSettled.liquidated,
-              normaliseTagsAt: playerSettled.margin,
-            };
-            if (playerSettled.liquidated) {
-              sideEffects.toasts.push([`Liquidated on ${pk}!`, "error"]);
-            }
-          }
+          playerRoleEntry = {
+            epoch: epochIndex,
+            tbill,
+            auctionPnl: 0, // No phantom P&L on continuous bid.
+            tips,
+            poolYield: 0,
+            stripPnl: 0,
+            creditChange: 0,
+          };
         }
-
         const pid = player?.id ?? "You";
 
         // NPC market participation: rental bids on paired-LAP legs.

@@ -84,7 +84,13 @@ export function PlayerPanel({
   return (
     <div className="flex flex-col gap-3 p-3 rounded border border-gray-700 bg-gray-900">
       <div className="flex items-center justify-between">
-        <span className="text-xs font-mono text-gray-300">Your Position</span>
+        <span className="text-xs font-mono text-gray-300 flex items-center">
+          Your Auction Bid
+          <HelpHint
+            width={340}
+            text="Side / leverage / margin define your auction bid — they earn tip income when matched and drive A/B routing for explicit positions, but DON'T generate directional P&L on their own. Open a position in the Credit tab to take actual exposure (LAP, paired LAP, or thread)."
+          />
+        </span>
         {activePair && (
           <span className="text-[10px] font-mono text-indigo-400">{activePair}</span>
         )}
@@ -179,11 +185,11 @@ export function PlayerPanel({
         onChange={(tiers) => onUpdate({ tip_tiers: tiers })}
       />
 
-      {player.liquidated && (
-        <div className="text-center text-xs font-mono text-red-400 animate-pulse border border-red-800 rounded py-1">
-          LIQUIDATED
-        </div>
-      )}
+      <div className="text-[10px] font-mono text-gray-500 leading-tight border-t border-gray-800 pt-2">
+        These controls set your auction bid — tips flow when matched, but
+        directional exposure only comes from positions you open in the
+        Credit tab.
+      </div>
 
       {(deployedPoolCredit > 0 || availablePoolCredit > 0) && (() => {
         const atFloor = shouldUnwindCredit(player.margin ?? 0, deployedPoolCredit);

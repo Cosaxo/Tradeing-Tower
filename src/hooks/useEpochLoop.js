@@ -9,13 +9,12 @@ import { FAST_MS, MEDIUM_MS, SLOW_EVERY, REDEMPTION_EVERY, GRACE_MS, SOFT_CLOSE_
 import { priceStep } from "../lib/priceModels.js";
 import { calcRealizedSigma, calcRatioBeta as calcRatioBetaStat, ratioEffectiveSigma } from "../lib/math.js";
 import { detectRegime } from "../lib/regime.js";
-import { updateNpcRegime, applyNpcSettlement, tickNpcRestock, isNpcActive } from "../lib/npcs.js";
 import { runAuction } from "../lib/auction.js";
 import { settleDominantPool, calcRatioBeta, escrowTips } from "../lib/pool.js";
 import { updateYieldModel } from "../lib/yieldModel.js";
 import { calcCrossMarketCorrelations } from "../lib/correlation.js";
-import { generateNpcOrders } from "../lib/npcMarkets.js";
 import { matchRentalAuction, settleRentals } from "../lib/rentalMarket.js";
+import { filterValid, isValidAuctionBid, isValidPoolUser, isValidRentalBid } from "../lib/orderFlow.js";
 import { isPairedLap } from "../lib/pairedLap.js";
 import {
   runRedemptionCycle,
@@ -52,6 +51,9 @@ export function useEpochLoop({
   running,          // boolean
   speed = 1,        // multiplier: 0.5x, 1x, 2x, 5x
   setRoleLedger,    // setter for per-role attribution ledger
+  flowAdapter,      // OrderFlowAdapter — pluggable source of market flow
+                    //   (DefaultBotAdapter, ReplayAdapter, BrokerAdapter, ...)
+                    //   Falls back to no-flow if undefined.
 }) {
   const mediumCountRef = useRef(0);
   const lastPlayerEditRef = useRef(0);
@@ -183,7 +185,7 @@ export function useEpochLoop({
         const ps = prev[pk];
         if (!ps) return;
 
-        const { prices, realizedSigma, npcs, regime, yieldModel,
+        const { prices, realizedSigma, regime, yieldModel,
                 smileParams, metaParams, prevSmoothFills, alpha,
                 epochIndex, regimeHistory = [],
                 rentalOffers = [], rentalBids = [], activeRentals = [],
@@ -203,30 +205,43 @@ export function useEpochLoop({
           logs.push(`[REGIME] ${pk}: ${prevRegimeKey ?? "-"} → ${updatedRegime.key}`);
         }
 
-        // Update NPCs with regime awareness, then tick restock cooldowns.
-        const regimeUpdatedNpcs = npcs.map((npc) =>
-          updateNpcRegime(npc, prices.slice(-20), updatedRegime, null, yieldModel)
-        );
-        const restockedNpcs = tickNpcRestock(regimeUpdatedNpcs);
-        // Detect "just restocked" by id-matching against the pre-tick
-        // snapshot (regimeUpdatedNpcs). Index-aligned compare would
-        // silently misclassify if anything reorders the NPC array.
-        const preById = new Map(regimeUpdatedNpcs.map((n) => [n.id, n]));
-        const justRestocked = restockedNpcs.filter((n) => {
-          const pre = preById.get(n.id);
-          return (pre?.restockRemaining ?? 0) === 1 && (n.restockRemaining ?? 0) === 0;
-        });
-        justRestocked.forEach((n) => logs.push(`[NPC] ${n.id} restocked to $${n.base_margin}`));
-
-        // Only NPCs with margin + not in cooldown participate in the auction.
-        const activeNpcs = restockedNpcs.filter(isNpcActive);
-
-        // Build participants: active NPCs + player (if not in grace period).
+        // Pull market flow from the adapter. The loop is agnostic to
+        // the source — DefaultBotAdapter wraps the legacy NPCs;
+        // ReplayAdapter reads a recorded tape; BrokerAdapter would
+        // pull from a live feed. Schema guards strip malformed entries
+        // at the boundary so a bad upstream record can't poison the
+        // auction's internal math.
         const { effectiveCap: cap } = getEffectiveCap(pk, realizedSigma);
-        const participants = activeNpcs.map((n) => ({
-          ...n,
-          base_margin: n.current_margin ?? n.base_margin,
-        }));
+        const flow = flowAdapter
+          ? flowAdapter.run({
+              pairKey: pk,
+              epoch: epochIndex,
+              pairState: ps,
+              regime: updatedRegime,
+              yieldModel,
+              cap,
+            })
+          : { participants: [], poolUsers: [], rentalBids: [], snapshot: [] };
+        const { valid: validParticipants, dropped: droppedBids } = filterValid(
+          flow.participants ?? [],
+          isValidAuctionBid
+        );
+        const { valid: validPoolUsers } = filterValid(flow.poolUsers ?? [], isValidPoolUser);
+        const { valid: adapterRentalBids } = filterValid(flow.rentalBids ?? [], isValidRentalBid);
+        if (droppedBids.length > 0) {
+          logs.push(`[FLOW] dropped ${droppedBids.length} malformed bid(s) at adapter boundary`);
+        }
+        // Adapter "just restocked" detection — replaces the inline scan.
+        if (flowAdapter?.markRestockedFromSnapshot) {
+          const restockedIds = flowAdapter.markRestockedFromSnapshot({ pairKey: pk });
+          for (const id of restockedIds) {
+            const bot = (flow.snapshot ?? []).find((n) => n.id === id);
+            if (bot) logs.push(`[BOT] ${id} restocked to $${bot.base_margin}`);
+          }
+        }
+
+        // Build participants: adapter flow + player bid (if not frozen).
+        const participants = [...validParticipants];
         if (!bidsFrozen && player && player.activePair === pk) {
           participants.push({
             ...player,
@@ -261,40 +276,32 @@ export function useEpochLoop({
         const ratioBeta = calcRatioBetaStat(newRatioHistory, ps.returnHistory);
         const effectiveSigma = ratioEffectiveSigma(realizedSigma, ratioRaw, ratioBeta);
 
-        // Build user list for pool settlement. NPCs ONLY — the player
-        // is no longer a participant in continuous-ambient settlement.
-        // Their declared bid (side/leverage) still feeds into the
-        // auction for tip distribution and B-book routing decisions,
-        // but it doesn't generate phantom directional P&L. All player
-        // exposure flows through explicit positions (LAPs, paired LAPs,
-        // threads, B-book contracts) with clear open/close lifecycles.
-        // This is the fix for the double-exposure bug where an open
-        // LAP's notional was being counted twice — once on the explicit
-        // ticket, once via settleDominantPool on the player's full
-        // margin.
-        const poolUsers = activeNpcs.map((npc) => ({
-          id: npc.id,
-          margin: npc.current_margin ?? npc.base_margin,
-          leverage: Math.min(npc.max_lev, cap),
-          side: npc.strategy?.includes("SHORT") ? "SHORT" : "LONG",
-          active: true,
-        }));
-
+        // Pool settlement uses the adapter-provided poolUsers list.
+        // NPCs ONLY — the player isn't included in continuous-ambient
+        // settlement (explicit-only model fixed the double-exposure
+        // bug; player exposure flows through positions, not bids).
+        const preSettlementSnapshot = flow.snapshot ?? [];
         const { users: settledUsers, stabilityFeeCollected, logs: poolLogs } =
-          settleDominantPool(poolUsers, priceOld, priceNew, effectiveSigma, corrMap);
+          settleDominantPool(validPoolUsers, priceOld, priceNew, effectiveSigma, corrMap);
         poolLogs.forEach((l) => logs.push(l));
 
-        // Write NPC settlement margins back — track liquidations + schedule restock.
-        const updatedNpcs = applyNpcSettlement(restockedNpcs, settledUsers);
-        const settledById = new Map(restockedNpcs.map((n) => [n.id, n]));
-        const deadThisEpoch = updatedNpcs.filter((n) => {
-          const pre = settledById.get(n.id);
-          const preMargin = pre?.current_margin ?? pre?.base_margin ?? 0;
-          return preMargin > 0 && n.current_margin === 0;
-        });
-        deadThisEpoch.forEach((n) =>
-          logs.push(`[NPC] ${n.id} liquidated — restock in ${n.restockRemaining} epochs`)
-        );
+        // Hand settlement results back to the adapter (NPCs update
+        // their margin / restock state). For replay/broker adapters
+        // this is typically a no-op.
+        if (flowAdapter?.applySettlement) {
+          flowAdapter.applySettlement({ pairKey: pk, settledUsers });
+        }
+        // Liquidation detection — adapter-provided id-comparison so
+        // we don't have to maintain pre/post lookup tables here.
+        if (flowAdapter?.detectLiquidationsFromSnapshot) {
+          const dead = flowAdapter.detectLiquidationsFromSnapshot({
+            pairKey: pk,
+            preSettlementSnapshot,
+          });
+          for (const d of dead) {
+            logs.push(`[BOT] ${d.id} liquidated — restock in ${d.restockRemaining} epochs`);
+          }
+        }
 
         // Apply T-bill yield + auction tips to player margin. These are
         // the only "ambient" flows now — directional P&L is exclusively
@@ -330,20 +337,10 @@ export function useEpochLoop({
         }
         const pid = player?.id ?? "You";
 
-        // NPC market participation: rental bids on paired-LAP legs.
-        // (Strip buys were removed in Phase 5.)
-        const npcOrders = generateNpcOrders({
-          npcs: updatedNpcs.filter(isNpcActive),
-          longMargin,
-          shortMargin,
-          regime: updatedRegime,
-          normWeights: auctionResult.normWeights ?? [],
-          realizedSigma,
-          returnHistory: ps.returnHistory,
-          epochIndex,
-          pairKey: pk,
-          legNotionalEstimate: 1000,
-        });
+        // Adapter-supplied rental bids: DefaultBotAdapter generates
+        // them via npcMarkets; ReplayAdapter pulls from tape.
+        // longMargin/shortMargin already computed above for ratio.
+        const adapterBids = adapterRentalBids;
 
         // Auction tip-rate proxy used by the yield model.
         const currentYield = auctionResult.matched.length > 0
@@ -420,9 +417,9 @@ export function useEpochLoop({
             (lapMarginAddByLapId[lapId] ?? 0) - deficit;
         }
 
-        // Match the orderbook against newly-arrived NPC bids.
+        // Match the orderbook against newly-arrived adapter bids.
         const offersBeforeMatch = rentalOffers;
-        const bidsBeforeMatch = [...rentalBids, ...(npcOrders.rentalBids ?? [])];
+        const bidsBeforeMatch = [...rentalBids, ...adapterBids];
         const rentalMatch = matchRentalAuction({
           offers: offersBeforeMatch,
           bids: bidsBeforeMatch,
@@ -436,7 +433,11 @@ export function useEpochLoop({
 
         next[pk] = {
           ...ps,
-          npcs: updatedNpcs,
+          // npcs is a write-through MIRROR of the adapter snapshot
+          // (kept on pairState for UI compat — NpcPanel reads from
+          // here). The adapter is authoritative; this is just the
+          // latest cached view.
+          npcs: flow.snapshot ?? [],
           regime: updatedRegime,
           regimeHistory: newRegimeHistory,
           events: newEvents.slice(-80),
@@ -946,7 +947,7 @@ export function useEpochLoop({
         setLogs((prev) => [...prev.slice(-300), ...sideEffects.logs]);
       }
     }
-  }, [setPairStates, player, setPlayer, setLogs, addToast, setRoleLedger, setTtState, setInsuranceState, setBBookState, setOpenPositions]);
+  }, [setPairStates, player, setPlayer, setLogs, addToast, setRoleLedger, setTtState, setInsuranceState, setBBookState, setOpenPositions, flowAdapter]);
 
   // -------------------------------------------------------------------------
   // Interval management

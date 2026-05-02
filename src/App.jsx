@@ -1,5 +1,6 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { ACTIVE_PAIRS } from "./constants/assets.js";
+import { createDefaultBotAdapter } from "./lib/defaultBotAdapter.js";
 import { initPairState } from "./state/pairState.js";
 import { initInsuranceState } from "./state/insuranceState.js";
 import { useEpochLoop } from "./hooks/useEpochLoop.js";
@@ -168,6 +169,24 @@ export default function App() {
   const { toasts, history, addToast, clearHistory } = useToast();
   const [showTutorial, setShowTutorial] = useState(false);
 
+  // OrderFlowAdapter — pluggable source of market flow. Default impl
+  // wraps the legacy NPCs (Whale / Degen / Hedger / Bot / Bear) for
+  // parity with prior behaviour. Swap in ReplayAdapter for backtests
+  // or BrokerAdapter for live-market wiring.
+  //
+  // Held in a ref so the same instance persists across re-renders
+  // (the adapter holds NPC state internally — recreating would reset
+  // their margins / restock counters every render).
+  const flowAdapterRef = useRef(null);
+  if (flowAdapterRef.current === null) {
+    flowAdapterRef.current = createDefaultBotAdapter({
+      pairKeys: ACTIVE_PAIRS,
+      realizedSigmaByPair: Object.fromEntries(
+        ACTIVE_PAIRS.map((pk) => [pk, pairStates[pk]?.realizedSigma ?? 0.02])
+      ),
+    });
+  }
+
   const { onPlayerEdit } = useEpochLoop({
     pairStates,
     setPairStates,
@@ -186,6 +205,7 @@ export default function App() {
     running,
     speed,
     setRoleLedger,
+    flowAdapter: flowAdapterRef.current,
   });
 
   // Track equity history (one sample per medium epoch — the hook updates player.margin).

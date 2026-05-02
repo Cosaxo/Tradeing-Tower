@@ -37,7 +37,9 @@ export function BBookDesk({
   const [withdrawAmount, setWithdrawAmount] = useState(100);
 
   const my = bBookState?.underwriters?.[playerId];
-  const myStake = my?.stake ?? 0;
+  const myVoluntary = my?.voluntaryStake ?? 0;
+  const myThreadDerived = my?.threadDerivedStake ?? 0;
+  const myStake = myVoluntary + myThreadDerived;
   const myLockedUntil = my?.lockupReleaseEpoch ?? 0;
   const lockedFor = Math.max(0, myLockedUntil - currentEpoch);
 
@@ -114,13 +116,28 @@ export function BBookDesk({
         </div>
       </div>
 
-      {/* Your share */}
+      {/* Your share — split by source */}
       {myStake > 0 && (
-        <div className="text-[10px] font-mono text-gray-400 border border-gray-800 bg-gray-950 px-2 py-1 rounded">
-          Your share: <span className="text-pink-300">{sharePct.toFixed(1)}%</span> of pool ·{" "}
-          {lockedFor > 0
-            ? `locked for ${lockedFor} more epochs`
-            : "unlocked — withdraw any time"}
+        <div className="flex flex-col gap-1 text-[10px] font-mono border border-gray-800 bg-gray-950 px-2 py-1 rounded">
+          <div className="text-gray-400">
+            Your share: <span className="text-pink-300">{sharePct.toFixed(1)}%</span> of pool
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <span className="text-gray-500">voluntary </span>
+              <span className="text-pink-300">${myVoluntary.toFixed(0)}</span>
+              <span className="text-gray-600 ml-1">
+                {lockedFor > 0
+                  ? `· locked ${lockedFor}ep`
+                  : "· unlocked"}
+              </span>
+            </div>
+            <div>
+              <span className="text-gray-500">from threads </span>
+              <span className="text-amber-300">${myThreadDerived.toFixed(0)}</span>
+              <span className="text-gray-600 ml-1">· thread-locked</span>
+            </div>
+          </div>
         </div>
       )}
 

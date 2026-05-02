@@ -65,9 +65,26 @@ const _uid = (prefix) => `${prefix}-${Date.now().toString(36)}-${(++_ctr).toStri
 // State factory
 // ---------------------------------------------------------------------------
 
+// Underwriter capital comes from two sources, tracked separately for
+// clean withdraw + lockup semantics:
+//
+//   voluntaryStake  — staked deliberately via BBookDesk. Subject to
+//                     BBOOK_LOCKUP_EPOCHS lockup. Withdrawn to wallet.
+//
+//   threadDerivedStake — contributed automatically by an open Tower
+//                     Tether thread (the "layer 3" of the thread). Not
+//                     subject to per-stake lockup — its lockup is the
+//                     thread's own redemption mechanics (10%/cycle cap
+//                     or 5% express penalty). P&L on this portion
+//                     compounds back into the thread's principal
+//                     instead of flowing to wallet.
+//
+// `totalStake` = sum of both portions across all underwriters.
+// Pool P&L distributes pro-rata to each user's TOTAL stake, then
+// gets split per-user proportionally between the two portions.
 export function initBBookState() {
   return {
-    underwriters: {}, // { [uid]: { stake, depositedAtEpoch, lockupReleaseEpoch } }
+    underwriters: {}, // { [uid]: { voluntaryStake, threadDerivedStake, depositedAtEpoch, lockupReleaseEpoch } }
     totalStake: 0,
     activeContracts: [],
     cumulativePoolPnl: 0,    // signed — positive means pool has won net
@@ -97,8 +114,20 @@ export function poolUtilization(state) {
   return totalActiveNotional(state) / stake;
 }
 
+// Total underwriter stake for a user (voluntary + thread-derived).
 export function underwriterStake(state, uid) {
-  return state?.underwriters?.[uid]?.stake ?? 0;
+  const u = state?.underwriters?.[uid];
+  if (!u) return 0;
+  return (u.voluntaryStake ?? 0) + (u.threadDerivedStake ?? 0);
+}
+
+// Per-portion accessors — useful for UI that wants to show the split.
+export function voluntaryStakeOf(state, uid) {
+  return state?.underwriters?.[uid]?.voluntaryStake ?? 0;
+}
+
+export function threadDerivedStakeOf(state, uid) {
+  return state?.underwriters?.[uid]?.threadDerivedStake ?? 0;
 }
 
 export function activeContractsByUser(state, userId) {
@@ -109,6 +138,8 @@ export function activeContractsByUser(state, userId) {
 // Underwriter deposit / withdraw
 // ---------------------------------------------------------------------------
 
+// Deposit voluntary underwriter capital. Adds to voluntaryStake and
+// extends the lockup release epoch.
 export function depositUnderwriter({ state, uid, amount, currentEpoch = 0 }) {
   if (!Number.isFinite(amount) || amount <= 0) {
     return { ok: false, reason: "amount must be positive" };
@@ -119,7 +150,8 @@ export function depositUnderwriter({ state, uid, amount, currentEpoch = 0 }) {
   // drip-drip deposits from short-circuiting the lockup.
   const release = (currentEpoch ?? 0) + BBOOK_LOCKUP_EPOCHS;
   const nextEntry = {
-    stake: (prev?.stake ?? 0) + amount,
+    voluntaryStake: (prev?.voluntaryStake ?? 0) + amount,
+    threadDerivedStake: prev?.threadDerivedStake ?? 0,
     depositedAtEpoch: currentEpoch,
     lockupReleaseEpoch: Math.max(prev?.lockupReleaseEpoch ?? 0, release),
   };
@@ -133,28 +165,87 @@ export function depositUnderwriter({ state, uid, amount, currentEpoch = 0 }) {
   };
 }
 
+// Withdraw voluntary stake to wallet. Respects lockup. Cannot touch
+// threadDerivedStake (which only moves via adjustThreadDerived).
 export function withdrawUnderwriter({ state, uid, amount, currentEpoch = 0 }) {
   const u = state.underwriters?.[uid];
   if (!u) return { ok: false, reason: "no underwriter record" };
-  if (currentEpoch < u.lockupReleaseEpoch) {
+  if (currentEpoch < (u.lockupReleaseEpoch ?? 0)) {
     return {
       ok: false,
       reason: `locked until epoch ${u.lockupReleaseEpoch} (currently ${currentEpoch})`,
     };
   }
-  if (amount > u.stake + 1e-9) {
-    return { ok: false, reason: "amount exceeds stake" };
+  const voluntary = u.voluntaryStake ?? 0;
+  if (amount > voluntary + 1e-9) {
+    return {
+      ok: false,
+      reason: `amount exceeds voluntary stake (have $${voluntary.toFixed(2)}; thread-derived $${(u.threadDerivedStake ?? 0).toFixed(2)} is locked by thread)`,
+    };
   }
-  const newStake = u.stake - amount;
+  const nextVoluntary = voluntary - amount;
+  const threadDerived = u.threadDerivedStake ?? 0;
   const nextUnderwriters = { ...state.underwriters };
-  if (newStake <= 1e-9) delete nextUnderwriters[uid];
-  else nextUnderwriters[uid] = { ...u, stake: newStake };
+  if (nextVoluntary + threadDerived <= 1e-9) {
+    delete nextUnderwriters[uid];
+  } else {
+    nextUnderwriters[uid] = { ...u, voluntaryStake: nextVoluntary };
+  }
   return {
     ok: true,
     state: {
       ...state,
       underwriters: nextUnderwriters,
       totalStake: Math.max(0, (state.totalStake ?? 0) - amount),
+    },
+  };
+}
+
+// Adjust the thread-derived portion of a user's stake. Used by:
+//   - Thread mint (delta > 0): when a thread opens, its principal
+//     becomes part of the user's threadDerivedStake.
+//   - Thread damage (delta < 0): when a thread takes damage from
+//     insurance / rental defaults, the corresponding portion of pool
+//     stake comes off.
+//   - Thread growth (delta > 0): when a thread compounds from B-book
+//     gains, the principal increase reflects in pool stake.
+//   - Thread redemption (delta < 0): when a thread is unwound, the
+//     principal exits the pool back to the user's wallet.
+//
+// No lockup check — thread-derived stakes are gated by the thread's
+// own redemption mechanics, not the per-stake lockup.
+//
+// Returns { ok, state } or { ok: false, reason }.
+export function adjustThreadDerived({ state, uid, delta }) {
+  if (!Number.isFinite(delta) || delta === 0) {
+    return { ok: true, state };
+  }
+  const u = state.underwriters?.[uid];
+  if (delta < 0) {
+    if (!u) return { ok: false, reason: "no underwriter record" };
+    const have = u.threadDerivedStake ?? 0;
+    if (-delta > have + 1e-9) {
+      return { ok: false, reason: "delta exceeds thread-derived stake" };
+    }
+  }
+  const prev = u ?? {
+    voluntaryStake: 0,
+    threadDerivedStake: 0,
+    depositedAtEpoch: 0,
+    lockupReleaseEpoch: 0,
+  };
+  const nextThreadDerived = Math.max(0, (prev.threadDerivedStake ?? 0) + delta);
+  const nextEntry = { ...prev, threadDerivedStake: nextThreadDerived };
+  const totalForUser = (nextEntry.voluntaryStake ?? 0) + nextThreadDerived;
+  const nextUnderwriters = { ...state.underwriters };
+  if (totalForUser <= 1e-9) delete nextUnderwriters[uid];
+  else nextUnderwriters[uid] = nextEntry;
+  return {
+    ok: true,
+    state: {
+      ...state,
+      underwriters: nextUnderwriters,
+      totalStake: Math.max(0, (state.totalStake ?? 0) + delta),
     },
   };
 }
@@ -248,8 +339,20 @@ export function calcContractUserPnl(contract, currentPrice) {
 //     ok, state,
 //     userPnl,                  // signed — what user gains (>0) or loses (<0)
 //     poolPnl,                  // signed — what the pool gains (= -userPnl)
-//     underwriterShares,        // { [uid]: signedDelta }
+//     underwriterShares,        // { [uid]: { total, voluntary, threadDerived } }
+//                               //   total = signed P&L share for this user
+//                               //   voluntary = portion attributable to wallet
+//                               //               (caller flushes to wallet margin)
+//                               //   threadDerived = portion attributable to the
+//                               //               user's open threads (caller
+//                               //               propagates via grow/damage)
 //   }
+//
+// P&L distributes pro-rata to each user's TOTAL stake. Within each
+// user, the share is then split proportionally between voluntary and
+// thread-derived portions — voluntary share goes to wallet margin,
+// thread-derived share goes back into the thread principal (compounds
+// gain into layers 1/2/3, propagates damage symmetrically).
 export function closeContract({ state, contractId, currentPrice }) {
   const idx = (state.activeContracts ?? []).findIndex((c) => c.id === contractId);
   if (idx < 0) return { ok: false, reason: "contract not found" };
@@ -257,23 +360,38 @@ export function closeContract({ state, contractId, currentPrice }) {
   const userPnl = calcContractUserPnl(c, currentPrice);
   const poolPnl = -userPnl; // zero-sum versus user
 
-  // Distribute poolPnl across underwriters pro-rata to their CURRENT
-  // stake (snapshot at close). Stakes adjust by their share.
   const stake = poolStake(state);
   const underwriterShares = {};
   let nextUnderwriters = state.underwriters;
   if (stake > 0 && Math.abs(poolPnl) > 1e-9) {
     nextUnderwriters = { ...state.underwriters };
     for (const [uid, u] of Object.entries(state.underwriters ?? {})) {
-      const share = u.stake / stake;
+      const userTotal = (u.voluntaryStake ?? 0) + (u.threadDerivedStake ?? 0);
+      if (userTotal <= 0) continue;
+      const share = userTotal / stake;
       const delta = poolPnl * share;
-      underwriterShares[uid] = delta;
-      nextUnderwriters[uid] = { ...u, stake: Math.max(0, u.stake + delta) };
+      const vFrac = userTotal > 0 ? (u.voluntaryStake ?? 0) / userTotal : 0;
+      const tFrac = 1 - vFrac;
+      const dVoluntary = delta * vFrac;
+      const dThreadDerived = delta * tFrac;
+      underwriterShares[uid] = {
+        total: delta,
+        voluntary: dVoluntary,
+        threadDerived: dThreadDerived,
+      };
+      nextUnderwriters[uid] = {
+        ...u,
+        voluntaryStake: Math.max(0, (u.voluntaryStake ?? 0) + dVoluntary),
+        threadDerivedStake: Math.max(0, (u.threadDerivedStake ?? 0) + dThreadDerived),
+      };
     }
   }
   const newTotalStake = Math.max(
     0,
-    Object.values(nextUnderwriters).reduce((s, u) => s + (u?.stake ?? 0), 0)
+    Object.values(nextUnderwriters).reduce(
+      (s, u) => s + (u?.voluntaryStake ?? 0) + (u?.threadDerivedStake ?? 0),
+      0
+    )
   );
 
   const remainingContracts = state.activeContracts.filter((_, i) => i !== idx);

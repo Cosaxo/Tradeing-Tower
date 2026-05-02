@@ -3,6 +3,7 @@ import {
   initBBookState,
   depositUnderwriter,
   withdrawUnderwriter,
+  adjustThreadDerived,
   openContract,
   closeContract,
   calcContractUserPnl,
@@ -12,6 +13,8 @@ import {
   poolUtilization,
   totalActiveNotional,
   underwriterStake,
+  voluntaryStakeOf,
+  threadDerivedStakeOf,
   activeContractsByUser,
 } from "../bBookPool.js";
 import {
@@ -95,6 +98,90 @@ describe("depositUnderwriter / withdrawUnderwriter", () => {
     }).state;
     expect(s.underwriters.U1).toBeUndefined();
     expect(poolStake(s)).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// adjustThreadDerived (thread-funded stake portion)
+// ---------------------------------------------------------------------------
+
+describe("adjustThreadDerived", () => {
+  it("adds thread-derived stake without lockup", () => {
+    let s = initBBookState();
+    const r = adjustThreadDerived({ state: s, uid: "U1", delta: 1000 });
+    expect(r.ok).toBe(true);
+    expect(threadDerivedStakeOf(r.state, "U1")).toBe(1000);
+    expect(voluntaryStakeOf(r.state, "U1")).toBe(0);
+    expect(poolStake(r.state)).toBe(1000);
+  });
+
+  it("withdrawal (delta < 0) reduces thread-derived stake", () => {
+    let s = initBBookState();
+    s = adjustThreadDerived({ state: s, uid: "U1", delta: 1000 }).state;
+    const r = adjustThreadDerived({ state: s, uid: "U1", delta: -300 });
+    expect(r.ok).toBe(true);
+    expect(threadDerivedStakeOf(r.state, "U1")).toBe(700);
+  });
+
+  it("rejects negative delta exceeding thread-derived stake", () => {
+    let s = initBBookState();
+    s = adjustThreadDerived({ state: s, uid: "U1", delta: 100 }).state;
+    const r = adjustThreadDerived({ state: s, uid: "U1", delta: -1000 });
+    expect(r.ok).toBe(false);
+  });
+
+  it("does NOT impose any lockup on thread-derived withdrawals", () => {
+    let s = initBBookState();
+    s = adjustThreadDerived({ state: s, uid: "U1", delta: 1000 }).state;
+    // Lockup epoch hasn't passed but thread-derived can still be withdrawn.
+    const r = adjustThreadDerived({ state: s, uid: "U1", delta: -500 });
+    expect(r.ok).toBe(true);
+  });
+
+  it("co-exists with voluntaryStake in totalStake", () => {
+    let s = initBBookState();
+    s = depositUnderwriter({ state: s, uid: "U1", amount: 500, currentEpoch: 0 }).state;
+    s = adjustThreadDerived({ state: s, uid: "U1", delta: 700 }).state;
+    expect(voluntaryStakeOf(s, "U1")).toBe(500);
+    expect(threadDerivedStakeOf(s, "U1")).toBe(700);
+    expect(underwriterStake(s, "U1")).toBe(1200);
+    expect(poolStake(s)).toBe(1200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// withdrawUnderwriter only operates on voluntary
+// ---------------------------------------------------------------------------
+
+describe("withdrawUnderwriter (voluntary only)", () => {
+  it("rejects when amount exceeds voluntary stake even if total is sufficient", () => {
+    let s = initBBookState();
+    s = depositUnderwriter({ state: s, uid: "U1", amount: 100, currentEpoch: 0 }).state;
+    s = adjustThreadDerived({ state: s, uid: "U1", delta: 1000 }).state;
+    const r = withdrawUnderwriter({
+      state: s,
+      uid: "U1",
+      amount: 500, // > voluntary (100), but < total (1100)
+      currentEpoch: BBOOK_LOCKUP_EPOCHS + 1,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/voluntary stake/);
+  });
+
+  it("withdraws from voluntary while leaving thread-derived intact", () => {
+    let s = initBBookState();
+    s = depositUnderwriter({ state: s, uid: "U1", amount: 200, currentEpoch: 0 }).state;
+    s = adjustThreadDerived({ state: s, uid: "U1", delta: 800 }).state;
+    const r = withdrawUnderwriter({
+      state: s,
+      uid: "U1",
+      amount: 150,
+      currentEpoch: BBOOK_LOCKUP_EPOCHS + 1,
+    });
+    expect(r.ok).toBe(true);
+    expect(voluntaryStakeOf(r.state, "U1")).toBe(50);
+    expect(threadDerivedStakeOf(r.state, "U1")).toBe(800);
+    expect(poolStake(r.state)).toBe(850);
   });
 });
 
@@ -263,9 +350,44 @@ describe("closeContract", () => {
     });
     s = opened.state;
     const r = closeContract({ state: s, contractId: opened.contract.id, currentPrice: 110 });
-    // poolPnl = -20 distributed 80/20
-    expect(r.underwriterShares.U1).toBeCloseTo(-16, 5);
-    expect(r.underwriterShares.U2).toBeCloseTo(-4, 5);
+    // poolPnl = -20 distributed 80/20 — both fully voluntary
+    expect(r.underwriterShares.U1.total).toBeCloseTo(-16, 5);
+    expect(r.underwriterShares.U1.voluntary).toBeCloseTo(-16, 5);
+    expect(r.underwriterShares.U1.threadDerived).toBeCloseTo(0, 5);
+    expect(r.underwriterShares.U2.total).toBeCloseTo(-4, 5);
+    expect(r.underwriterShares.U2.voluntary).toBeCloseTo(-4, 5);
+  });
+
+  it("splits each user's P&L proportionally between voluntary and thread-derived", () => {
+    // U1: $4000 voluntary, $4000 thread-derived (50/50 split internally).
+    // U2: $2000 voluntary, $0 thread-derived.
+    let s = initBBookState();
+    s = depositUnderwriter({ state: s, uid: "U1", amount: 4000, currentEpoch: 0 }).state;
+    s = adjustThreadDerived({ state: s, uid: "U1", delta: 4000 }).state;
+    s = depositUnderwriter({ state: s, uid: "U2", amount: 2000, currentEpoch: 0 }).state;
+    expect(poolStake(s)).toBe(10000);
+    const opened = openContract({
+      state: s,
+      userId: "Alice",
+      pairKey: "BTCUSD",
+      side: "LONG",
+      leverage: 2,
+      margin: 100,
+      openPrice: 100,
+    });
+    s = opened.state;
+    const r = closeContract({ state: s, contractId: opened.contract.id, currentPrice: 110 });
+    // poolPnl = -20. U1 owns 8000/10000 = 80% → -16; U2 owns 2000/10000 = 20% → -4.
+    expect(r.underwriterShares.U1.total).toBeCloseTo(-16, 5);
+    // U1's -16 splits 50/50 between voluntary and thread-derived.
+    expect(r.underwriterShares.U1.voluntary).toBeCloseTo(-8, 5);
+    expect(r.underwriterShares.U1.threadDerived).toBeCloseTo(-8, 5);
+    // U2 has no thread-derived — full -4 goes to voluntary.
+    expect(r.underwriterShares.U2.voluntary).toBeCloseTo(-4, 5);
+    expect(r.underwriterShares.U2.threadDerived).toBeCloseTo(0, 5);
+    // Final stakes update both portions.
+    expect(voluntaryStakeOf(r.state, "U1")).toBeCloseTo(3992, 5);
+    expect(threadDerivedStakeOf(r.state, "U1")).toBeCloseTo(3992, 5);
   });
 });
 

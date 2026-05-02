@@ -21,9 +21,9 @@ import {
   runRedemptionCycle,
   applySolvencyCheck,
   damageThread,
-  growThread,
   submitRedemption as submitTtRedemption,
 } from "../lib/towerTether.js";
+import { adjustThreadDerived } from "../lib/bBookPool.js";
 import { detectTriggeredEvents } from "../lib/insuranceEvents.js";
 import { settleMarketTick, withdrawInsurer, postInsurer } from "../lib/insuranceMarket.js";
 import { settleReinsuranceTick } from "../lib/reinsurance.js";
@@ -40,11 +40,13 @@ export function useEpochLoop({
   player,           // { id, leverage, margin, side, strategy, minYield, tip_tiers, ... }
   setPlayer,        // React setter
   openPositions = [], // current player positions — used to look up paired LAPs by id during rental settlement
-  setOpenPositions, // React setter for openPositions (loop shrinks thread-linked LAPs on redemption)
-  ttState = null,   // Tower Tether global state (mints, balances, queue, etc.)
+  setOpenPositions, // React setter for openPositions
+  ttState = null,   // Tower Tether global state (threads, balances, queue, etc.)
   setTtState,       // React setter for TT state
   insuranceState = null, // global insurance markets + reinsurance + allocations
   setInsuranceState,     // React setter for insuranceState
+  bBookState = null, // global B-book pool state
+  setBBookState,    // React setter for bBookState (thread layer-3 lives here)
   setLogs,          // (fn) => void
   addToast,         // (msg, type) => void
   running,          // boolean
@@ -57,14 +59,6 @@ export function useEpochLoop({
   // medium epoch began so soft-close measures against the tick window,
   // not the user's last-edit timestamp.
   const lastMediumTickRef = useRef(0);
-  // Tower-Tether thread invariant: insurance and LAP must NEVER
-  // calculate thread damage in the same medium tick. We split them by
-  // parity — LAP fires on EVEN ticks (mediumCount % 2 === 0), insurance
-  // fires on ODD ticks. When insurance has a claim that surfaces on a
-  // LAP tick (i.e. an event triggered now but it isn't insurance's
-  // turn), it queues here and gets applied on the next available
-  // (odd) tick — the "skip to next available epoch" rule.
-  const pendingInsuranceClaimsRef = useRef([]);
   // External state mirrored into refs so the tick can read the freshest
   // snapshot synchronously without React's render cycle. Crucially, the
   // tick body operates on these refs and calls setters with concrete
@@ -79,6 +73,8 @@ export function useEpochLoop({
   ttStateRef.current = ttState;
   const insuranceStateRef = useRef(insuranceState);
   insuranceStateRef.current = insuranceState;
+  const bBookStateRef = useRef(bBookState);
+  bBookStateRef.current = bBookState;
 
   // Helper: pick a representative epoch from the pair-states object.
   // Used by the TT redemption cycle which is global, not per-pair.
@@ -403,131 +399,25 @@ export function useEpochLoop({
         });
         rentalSettle.logs.forEach((l) => logs.push(l));
 
-        // Owner-tip income. For ordinary (non-thread) paired LAPs, tips
-        // flush to the player's wallet margin. For THREAD-LINKED paired
-        // LAPs (the layer-3 of a TT thread), tips compound into the
-        // thread instead — principal + layers 1/2/3 grow by the tip
-        // amount, but ttFace stays put. That's the user's decision: no
-        // auto-mint at layer 4, but auto-deploy across the other three.
-        //
-        // To split the thread-linked share from the wallet share, we
-        // re-derive the per-LAP tip for this tick. The settleRentals
-        // accrual is `tipRate × legNotional` per active rental — we
-        // sum that across all rentals owned by the player, then route
-        // the thread-linked portion via growThread.
+        // Owner-tip income flushes to the player's wallet margin. With
+        // threads no longer holding paired LAPs as layer 3 (the layer-3
+        // role moved to the B-book pool), there's no thread compounding
+        // path here — rental tips are just user income on whatever
+        // paired LAPs the user opened directly.
         const ownerCredits = rentalSettle.ownerCredits ?? {};
-        const playerTotalTip = ownerCredits[pid] ?? 0;
-
-        // Per-LAP tip attribution (this-tick income). Pre-settlement
-        // values match settleRentals' per-rental tipFee.
-        const tipByLapId = {};
-        for (const r of activeRentals) {
-          if (!r.active) continue;
-          const lap = findPairedLap(r.pairLapId);
-          if (!lap || lap.ownerId !== undefined && lap.ownerId !== pid) continue;
-          const legNotional = ((lap.margin ?? 0) / 2) * (lap.leverage ?? 1);
-          tipByLapId[r.pairLapId] =
-            (tipByLapId[r.pairLapId] ?? 0) + r.tipRate * legNotional;
+        const playerOwnerCredit = ownerCredits[pid] ?? 0;
+        if (playerOwnerCredit > 0) {
+          sideEffects.playerMarginDelta += playerOwnerCredit;
         }
 
-        let threadLinkedShare = 0;
-        for (const [lapId, tip] of Object.entries(tipByLapId)) {
-          if (tip <= 1e-9) continue;
-          const lap = findPairedLap(lapId);
-          if (!lap?.threadId || !workingTtRunning) continue;
-          const thread = (workingTtRunning.threads ?? []).find(
-            (t) => t.id === lap.threadId
-          );
-          if (!thread || thread.closed || thread.ownerId !== pid) continue;
-          const grown = growThread({
-            ttState: workingTtRunning,
-            threadId: thread.id,
-            gain: tip,
-          });
-          if (grown.gainApplied <= 1e-9) continue;
-          workingTtRunning = grown.ttState;
-          threadLinkedShare += grown.gainApplied;
-          // Insurer-side stake adds — applied to markets in the
-          // post-forEach reconciliation below.
-          for (const [eventId, add] of Object.entries(grown.insuranceLayerAdds)) {
-            if (add <= 1e-9) continue;
-            insurerAddsByMarket[eventId] = insurerAddsByMarket[eventId] ?? {};
-            insurerAddsByMarket[eventId][thread.ownerId] =
-              (insurerAddsByMarket[eventId][thread.ownerId] ?? 0) + add;
-          }
-          if (grown.lapLayerAdd > 0) {
-            lapMarginAddByLapId[lapId] =
-              (lapMarginAddByLapId[lapId] ?? 0) + grown.lapLayerAdd;
-          }
-          logs.push(
-            `[TT-THREAD GROW] ${thread.id} +$${grown.gainApplied.toFixed(2)} (rental tips → layers 1/2/3, ttFace fixed)`
-          );
-        }
-
-        const playerOwnerCreditAfterThreads = playerTotalTip - threadLinkedShare;
-        if (playerOwnerCreditAfterThreads > 0) {
-          sideEffects.playerMarginDelta += playerOwnerCreditAfterThreads;
-        }
-
-        // ---- LAP→thread damage propagation (rental defaults) -----------
-        // Each rental default surfaces an unrecovered loss the renter
-        // couldn't pay (their posted collateral was wiped). For
-        // thread-linked LAPs, this loss damages the thread per the
-        // 4-layer invariant: principal + insurance fills + paired LAP
-        // + ttFace all shrink by the same amount. For non-thread LAPs,
-        // the underlying LAP just shrinks by the deficit (no thread to
-        // propagate into).
-        //
-        // Epoch-separation invariant: insurance damage is gated by tick
-        // parity (odd ticks). LAP damage from rental defaults is rare
-        // and runs every tick — so on a tick where insurance ALSO
-        // produces thread damage, insurance defers (already wired in
-        // the global block via pendingInsuranceClaimsRef).
+        // Rental defaults shrink the underlying LAP's margin (real
+        // loss the renter couldn't pay). Threads no longer hold LAPs,
+        // so this no longer propagates into thread layers.
         const lapDeficits = rentalSettle.lapDeficitsByLapId ?? {};
         for (const [lapId, deficit] of Object.entries(lapDeficits)) {
           if (deficit <= 1e-9) continue;
-          const lap = findPairedLap(lapId);
-          if (!lap) {
-            // LAP gone — record the loss as direct margin shrink intent
-            // anyway (caller may have already removed the position).
-            lapMarginAddByLapId[lapId] =
-              (lapMarginAddByLapId[lapId] ?? 0) - deficit;
-            continue;
-          }
-          // Always shrink the LAP itself (deficit is real LAP margin
-          // loss whether or not it's thread-linked).
           lapMarginAddByLapId[lapId] =
             (lapMarginAddByLapId[lapId] ?? 0) - deficit;
-
-          // Thread-linked: propagate to the other 3 layers.
-          if (!lap.threadId || !workingTtRunning) continue;
-          const thread = (workingTtRunning.threads ?? []).find(
-            (t) => t.id === lap.threadId
-          );
-          if (!thread || thread.closed) continue;
-          const dmg = damageThread({
-            ttState: workingTtRunning,
-            threadId: thread.id,
-            delta: deficit,
-          });
-          if (dmg.deltaApplied <= 1e-9) continue;
-          workingTtRunning = dmg.ttState;
-          // Withdraw insurer-side stakes pro-rata across the thread's
-          // covered markets.
-          for (const [eventId, cut] of Object.entries(dmg.insuranceLayerDeltas)) {
-            if (cut <= 1e-9) continue;
-            insurerAddsByMarket[eventId] = insurerAddsByMarket[eventId] ?? {};
-            insurerAddsByMarket[eventId][thread.ownerId] =
-              (insurerAddsByMarket[eventId][thread.ownerId] ?? 0) - cut;
-          }
-          // Release the player's threadStake tag if this is their thread.
-          if (thread.ownerId === pid) {
-            sideEffects.threadStakeRelease =
-              (sideEffects.threadStakeRelease ?? 0) + dmg.deltaApplied;
-          }
-          logs.push(
-            `[TT-THREAD DMG] ${thread.id} −$${dmg.deltaApplied.toFixed(2)} (rental default on layer-3 LAP ${lapId} → all 4 layers shrink)`
-          );
         }
 
         // Match the orderbook against newly-arrived NPC bids.
@@ -715,29 +605,18 @@ export function useEpochLoop({
         // -----------------------------------------------------------------
         // Thread damage propagation (insurance side)
         //
-        // Critical invariant: insurance and LAP must NEVER calculate
-        // thread damage in the same medium tick. Insurance owns ODD
-        // ticks (mediumCount % 2 === 1). On EVEN ticks, claim losses
-        // queue into pendingInsuranceClaimsRef and apply on the next
-        // available (odd) tick — "skip to next available epoch".
+        // When a market triggers and a thread participates as insurer,
+        // the thread takes a loss equal to its share of the payout.
+        // By the 4-layer invariant, all four layers shrink by that
+        // amount: T-bill (principal), other insurance fills covered
+        // by this thread, B-book pool stake (threadDerivedStake), and
+        // ttFace.
         // -----------------------------------------------------------------
-        const insuranceTurn = mediumCountRef.current % 2 === 1;
-        if (tickClaimLosses.length > 0 && !insuranceTurn) {
-          pendingInsuranceClaimsRef.current.push(...tickClaimLosses);
-          logs.push(
-            `[TT-THREAD] ${tickClaimLosses.length} claim(s) deferred to next insurance tick (LAP turn)`
-          );
-        }
-        const claimsToApply = insuranceTurn
-          ? [...pendingInsuranceClaimsRef.current, ...tickClaimLosses]
-          : [];
-        if (insuranceTurn) pendingInsuranceClaimsRef.current = [];
-
         let workingTtForDamage = ttStateRef.current;
-        let totalLapDamageDelta = 0;
+        let workingBBookForDamage = bBookStateRef.current;
         const playerThreadStakeRelease = { delta: 0 };
-        if (claimsToApply.length > 0 && workingTtForDamage) {
-          for (const { eventId, lossesByUser } of claimsToApply) {
+        if (tickClaimLosses.length > 0 && workingTtForDamage) {
+          for (const { eventId, lossesByUser } of tickClaimLosses) {
             for (const [uid, lossAmt] of Object.entries(lossesByUser)) {
               if (lossAmt <= 0) continue;
               const userThreads = (workingTtForDamage.threads ?? []).filter(
@@ -748,8 +627,6 @@ export function useEpochLoop({
                   t.principal > 1e-9
               );
               if (userThreads.length === 0) continue;
-              // Pro-rata across this user's threads, weighted by each
-              // thread's exposure to the triggering market.
               const exposure = userThreads.map(
                 (t) => t.principal * (t.insuranceWeights[eventId] ?? 0)
               );
@@ -768,21 +645,27 @@ export function useEpochLoop({
                 });
                 if (dmg.deltaApplied <= 1e-9) continue;
                 workingTtForDamage = dmg.ttState;
-                totalLapDamageDelta += dmg.lapLayerDelta;
                 if (uid === pid) {
                   playerThreadStakeRelease.delta += dmg.deltaApplied;
                 }
-                // Withdraw the per-market layer deltas from the
-                // insurance markets (the insurance loss already
-                // happened in settleMarketTick — but for OTHER markets
-                // covered by this same thread, the principal write-down
-                // needs to shrink those stakes too so the thread layers
-                // stay in sync).
+                // Layer 3: shrink the user's thread-derived B-book
+                // stake by the damage amount (poolLayerDelta).
+                if (workingBBookForDamage && dmg.poolLayerDelta > 0) {
+                  const adj = adjustThreadDerived({
+                    state: workingBBookForDamage,
+                    uid,
+                    delta: -dmg.poolLayerDelta,
+                  });
+                  if (adj.ok) workingBBookForDamage = adj.state;
+                }
+                // Layer 2: withdraw the per-market layer deltas. The
+                // triggering market already wrote down via
+                // settleMarketTick (claimOut); skip it to avoid
+                // double-debit. Other covered markets need the cut
+                // applied so the thread's layer-2 stays in sync.
                 nextInsurance.markets = nextInsurance.markets.map((m) => {
                   const cut = dmg.insuranceLayerDeltas[m.eventId] ?? 0;
                   if (cut <= 1e-9) return m;
-                  // The triggering market already wrote down via
-                  // settleMarketTick (claimOut); skip to avoid double-debit.
                   if (m.eventId === eventId) return m;
                   const r = withdrawInsurer({
                     market: m,
@@ -803,16 +686,9 @@ export function useEpochLoop({
           ttStateRef.current = workingTtForDamage;
           sideEffects.nextTtState = workingTtForDamage;
         }
-
-        // Shrink the player's thread-linked paired LAPs by the
-        // accumulated lapLayerDelta. We hit each thread's LAP
-        // proportionally to the damage it took.
-        if (totalLapDamageDelta > 0) {
-          // The actual mutation is left to the position list update
-          // below — we collect intent here.
-          sideEffects.lapShrinkIntents = sideEffects.lapShrinkIntents ?? [];
-          // Using the per-thread deltas captured during damage; the
-          // openPositions reducer below reads from threads after damage.
+        if (workingBBookForDamage !== bBookStateRef.current) {
+          bBookStateRef.current = workingBBookForDamage;
+          sideEffects.nextBBookState = workingBBookForDamage;
         }
         if (playerThreadStakeRelease.delta > 0) {
           sideEffects.threadStakeRelease =
@@ -820,8 +696,6 @@ export function useEpochLoop({
         }
 
         sideEffects.nextInsuranceState = nextInsurance;
-        // Persist the working copy for downstream blocks (redemption
-        // haircut application reads it via the ref).
         insuranceStateRef.current = nextInsurance;
 
         const playerNet = playerCashChanges[pid] ?? 0;
@@ -879,13 +753,11 @@ export function useEpochLoop({
         workingTt = cycle.ttState;
 
         // Step 3: apply per-thread unwinds. For each unwind:
-        //   - withdraw the per-market insurance stakes (split by the
-        //     thread's insuranceWeights — already computed inside
-        //     damageThread and returned in insuranceLayerDeltas)
-        //   - shrink the paired LAP's margin (or close it if the
-        //     remaining margin would fall below dust threshold)
+        //   - withdraw the per-market insurance stakes (layer 2)
+        //   - shrink the user's threadDerivedStake in the B-book pool
+        //     by poolLayerDelta (layer 3)
         //   - release the minter's threadStake tag (local player only)
-        const lapShrinkByLapId = {}; // { [lapId]: dollarAmountToShrink }
+        let workingBBook = bBookStateRef.current;
         const threadStakeReleaseByOwner = {};
         for (const u of cycle.threadUnwinds) {
           if (workingInsurance && u.insuranceLayerDeltas) {
@@ -903,9 +775,13 @@ export function useEpochLoop({
               }),
             };
           }
-          if (u.lapId && u.lapLayerDelta > 0) {
-            lapShrinkByLapId[u.lapId] =
-              (lapShrinkByLapId[u.lapId] ?? 0) + u.lapLayerDelta;
+          if (workingBBook && u.poolLayerDelta > 0) {
+            const adj = adjustThreadDerived({
+              state: workingBBook,
+              uid: u.ownerId,
+              delta: -u.poolLayerDelta,
+            });
+            if (adj.ok) workingBBook = adj.state;
           }
           threadStakeReleaseByOwner[u.ownerId] =
             (threadStakeReleaseByOwner[u.ownerId] ?? 0) + u.delta;
@@ -966,15 +842,16 @@ export function useEpochLoop({
           }
         }
 
-        // Stash LAP-shrink intents for the position update below to
-        // consume.
-        sideEffects.lapShrinkByLapId = lapShrinkByLapId;
         sideEffects.threadStakeReleaseByOwner = threadStakeReleaseByOwner;
 
         sideEffects.nextTtState = workingTt;
         if (workingInsurance && workingInsurance !== insuranceStateRef.current) {
           sideEffects.nextInsuranceState = workingInsurance;
           insuranceStateRef.current = workingInsurance;
+        }
+        if (workingBBook && workingBBook !== bBookStateRef.current) {
+          sideEffects.nextBBookState = workingBBook;
+          bBookStateRef.current = workingBBook;
         }
       }
 
@@ -994,6 +871,10 @@ export function useEpochLoop({
       if (sideEffects.nextInsuranceState) {
         setInsuranceState(sideEffects.nextInsuranceState);
         insuranceStateRef.current = sideEffects.nextInsuranceState;
+      }
+      if (sideEffects.nextBBookState && setBBookState) {
+        setBBookState(sideEffects.nextBBookState);
+        bBookStateRef.current = sideEffects.nextBBookState;
       }
 
       const overrides = sideEffects.playerOverrides;
@@ -1028,17 +909,11 @@ export function useEpochLoop({
         });
       }
 
-      // Apply paired-LAP shrinks from redemption thread-unwinds AND
-      // paired-LAP grows from thread tip compounding. Net the two
-      // first so a LAP that both shrank and grew this tick gets a
-      // single margin update.
-      const shrinks = sideEffects.lapShrinkByLapId ?? {};
-      const grows = lapMarginAddByLapId;
+      // Paired-LAP margin shrinks from rental defaults. (Thread-driven
+      // LAP changes are gone — threads no longer hold paired LAPs as
+      // layer 3; that role moved to the B-book pool.)
       const lapDeltas = {};
-      for (const [lapId, cut] of Object.entries(shrinks)) {
-        lapDeltas[lapId] = (lapDeltas[lapId] ?? 0) - cut;
-      }
-      for (const [lapId, add] of Object.entries(grows)) {
+      for (const [lapId, add] of Object.entries(lapMarginAddByLapId)) {
         lapDeltas[lapId] = (lapDeltas[lapId] ?? 0) + add;
       }
       const lapDeltaIds = Object.keys(lapDeltas);
@@ -1054,7 +929,7 @@ export function useEpochLoop({
             }
             const newMargin = (pos.margin ?? 0) + d;
             changed = true;
-            if (newMargin <= 1) continue; // drop dust on full unwind
+            if (newMargin <= 1) continue; // drop dust
             out.push({ ...pos, margin: newMargin });
           }
           return changed ? out : prev;
@@ -1071,7 +946,7 @@ export function useEpochLoop({
         setLogs((prev) => [...prev.slice(-300), ...sideEffects.logs]);
       }
     }
-  }, [setPairStates, player, setPlayer, setLogs, addToast, setRoleLedger, setTtState, setInsuranceState, setOpenPositions]);
+  }, [setPairStates, player, setPlayer, setLogs, addToast, setRoleLedger, setTtState, setInsuranceState, setBBookState, setOpenPositions]);
 
   // -------------------------------------------------------------------------
   // Interval management

@@ -5,7 +5,9 @@
 //
 //   1. T-bill stake          (Floor 1 — the underlying asset)
 //   2. Insurance-seller stakes spread across reinsurance-covered markets
-//   3. Paired-LAP (delta-neutral, both legs leased out as liquidity)
+//   3. B-book pool underwriter stake (the protocol's open counterparty
+//      pool for B-classified user flow — earns user tip income +
+//      absorbs their directional P&L pro-rata)
 //   4. TT in circulation
 //
 // Mint is 1:1 against free margin — no LTV gate, no coefficient. The
@@ -44,9 +46,12 @@
 //     principal,                  // T-bill stake (current)
 //     ttFace,                     // outstanding TT minted from this thread
 //     insuranceWeights: { [eventId]: weight }, // sum ≈ 1
-//     lapPairKey, lapId,          // paired-LAP backing this thread
 //     closed: boolean,
 //   }
+//
+//   Layer 3 lives in bBookPool.js as the user's threadDerivedStake.
+//   The thread's principal IS its contribution to the pool; they
+//   stay in lockstep via adjustThreadDerived calls in the App layer.
 //
 //   `mintedByUser[uid]` is derived from threads (sum of ttFace per owner)
 //   so we don't have to keep two maps in sync. See `mintedByOf`.
@@ -170,8 +175,9 @@ export function calcInsuranceFillWeights({ eligibleMarkets, reinsuranceLive }) {
 
 // Build a new thread record. Caller is responsible for:
 //   - posting the insurance stakes via the allocations / market helpers
-//   - creating the paired-LAP and publishing rental offers
+//   - depositing the principal into bBookPool as thread-derived stake
 //   - tagging the user's margin for `principal`
+//   - auto-buying reinsurance (the 1.5× rule) to hedge the insurer-side
 //
 // This module owns the thread bookkeeping + TT mint. The atomic
 // orchestration lives in App.jsx (handleMintTT).
@@ -182,8 +188,6 @@ export function openThread({
   ownerId,
   principal,
   insuranceWeights,
-  lapPairKey,
-  lapId,
   currentEpoch,
 }) {
   if (!ownerId) return { ok: false, reason: "no ownerId" };
@@ -197,8 +201,6 @@ export function openThread({
     principal,
     ttFace: principal, // 1:1 mint
     insuranceWeights: { ...(insuranceWeights ?? {}) },
-    lapPairKey: lapPairKey ?? null,
-    lapId: lapId ?? null,
     closed: false,
   };
   return {
@@ -226,19 +228,20 @@ export function openThread({
 //     ttState,
 //     deltaApplied,                 // actual amount written down (capped at principal)
 //     insuranceLayerDeltas,         // { [eventId]: amountToWithdrawFromMarket }
-//     lapLayerDelta,                // amount to remove from the paired LAP
+//     poolLayerDelta,               // amount to remove from B-book threadDerivedStake
 //     ttFaceDelta,                  // shrink in mintedByUser / outstanding TT
 //   }
 //
-// The caller (epoch loop) is responsible for actually mutating the
-// insurance markets and paired-LAP state using these deltas.
+// The caller (epoch loop / App handlers) is responsible for actually
+// mutating the insurance markets and bBookPool state using these
+// deltas (via withdrawInsurer + adjustThreadDerived).
 export function damageThread({ ttState, threadId, delta }) {
   if (!Number.isFinite(delta) || delta <= 0) {
     return {
       ttState,
       deltaApplied: 0,
       insuranceLayerDeltas: {},
-      lapLayerDelta: 0,
+      poolLayerDelta: 0,
       ttFaceDelta: 0,
     };
   }
@@ -249,7 +252,7 @@ export function damageThread({ ttState, threadId, delta }) {
       ttState,
       deltaApplied: 0,
       insuranceLayerDeltas: {},
-      lapLayerDelta: 0,
+      poolLayerDelta: 0,
       ttFaceDelta: 0,
     };
   }
@@ -259,7 +262,7 @@ export function damageThread({ ttState, threadId, delta }) {
       ttState,
       deltaApplied: 0,
       insuranceLayerDeltas: {},
-      lapLayerDelta: 0,
+      poolLayerDelta: 0,
       ttFaceDelta: 0,
     };
   }
@@ -286,7 +289,7 @@ export function damageThread({ ttState, threadId, delta }) {
     ttState: { ...ttState, threads: newThreads },
     deltaApplied: applied,
     insuranceLayerDeltas,
-    lapLayerDelta: applied,
+    poolLayerDelta: applied,
     ttFaceDelta,
   };
 }
@@ -307,12 +310,12 @@ export function damageThread({ ttState, threadId, delta }) {
 //     ttState,                      // thread.principal incremented
 //     gainApplied,                  // actual amount written up
 //     insuranceLayerAdds,           // { [eventId]: amountToPostAsInsurer }
-//     lapLayerAdd,                  // amount to add to the paired LAP's margin
+//     poolLayerAdd,                 // amount to add to bBookPool threadDerivedStake
 //   }
 //
-// The caller (epoch loop) is responsible for:
-//   - posting the additional insurer stakes via postInsurer
-//   - bumping the paired-LAP's margin (notional grows, leverage stays)
+// The caller is responsible for:
+//   - posting additional insurer stakes via postInsurer
+//   - growing the user's threadDerivedStake via adjustThreadDerived
 //
 // T-bill is the principal itself, so no separate caller action is
 // needed for layer 1.
@@ -322,7 +325,7 @@ export function growThread({ ttState, threadId, gain }) {
       ttState,
       gainApplied: 0,
       insuranceLayerAdds: {},
-      lapLayerAdd: 0,
+      poolLayerAdd: 0,
     };
   }
   const threads = ttState.threads ?? [];
@@ -332,7 +335,7 @@ export function growThread({ ttState, threadId, gain }) {
       ttState,
       gainApplied: 0,
       insuranceLayerAdds: {},
-      lapLayerAdd: 0,
+      poolLayerAdd: 0,
     };
   }
   const t = threads[idx];
@@ -341,7 +344,7 @@ export function growThread({ ttState, threadId, gain }) {
       ttState,
       gainApplied: 0,
       insuranceLayerAdds: {},
-      lapLayerAdd: 0,
+      poolLayerAdd: 0,
     };
   }
   const insuranceLayerAdds = {};
@@ -358,15 +361,8 @@ export function growThread({ ttState, threadId, gain }) {
     ttState: { ...ttState, threads: newThreads },
     gainApplied: gain,
     insuranceLayerAdds,
-    lapLayerAdd: gain,
+    poolLayerAdd: gain,
   };
-}
-
-// Look up the active thread that backs a given paired-LAP id. Used by
-// the epoch loop to route LAP-side gains/losses back to thread layers.
-export function findThreadByLapId(ttState, lapId) {
-  if (!lapId) return null;
-  return activeThreads(ttState).find((t) => t.lapId === lapId) ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -468,7 +464,7 @@ export function cancelRedemption({ ttState, requestId }) {
 //   {
 //     ttState,
 //     dollarsOut,            // { redeemerUid: $ }
-//     threadUnwinds,         // [{ threadId, ownerId, delta, insuranceLayerDeltas, lapLayerDelta }]
+//     threadUnwinds,         // [{ threadId, ownerId, delta, insuranceLayerDeltas, poolLayerDelta }]
 //     penaltyToPool,         // express-penalty $ (epoch loop routes to reinsurance sellers)
 //     logs,
 //   }
@@ -521,9 +517,7 @@ export function runRedemptionCycle({ ttState, currentEpoch }) {
         ownerId: t.ownerId,
         delta: dmg.deltaApplied,
         insuranceLayerDeltas: dmg.insuranceLayerDeltas,
-        lapLayerDelta: dmg.lapLayerDelta,
-        lapPairKey: t.lapPairKey,
-        lapId: t.lapId,
+        poolLayerDelta: dmg.poolLayerDelta,
       });
       amountLeft -= dmg.deltaApplied;
     }

@@ -16,7 +16,8 @@ import {
   allocationDiversificationStats,
   propagateLapPnl,
 } from "./lib/allocations.js";
-import { postInsurer } from "./lib/insuranceMarket.js";
+import { postInsurer, withdrawInsurer } from "./lib/insuranceMarket.js";
+import { postReinsuranceBuyer } from "./lib/reinsurance.js";
 import { makePairedLap, isPairedLap, calcPairedLapClosePnl } from "./lib/pairedLap.js";
 import { publishLegOffer, terminateRental } from "./lib/rentalMarket.js";
 import {
@@ -32,6 +33,7 @@ import {
   initBBookState,
   depositUnderwriter,
   withdrawUnderwriter,
+  adjustThreadDerived,
   openContract as openBBookContract,
   closeContract as closeBBookContract,
 } from "./lib/bBookPool.js";
@@ -41,6 +43,10 @@ import {
   getUserStats as getClassifierStats,
   routeFor,
 } from "./lib/userClassifier.js";
+import {
+  damageThread,
+  growThread,
+} from "./lib/towerTether.js";
 import { getEffectiveCap } from "./lib/esma.js";
 import { initLedger } from "./lib/roleLedger.js";
 import { initTags, tryTag, untag, freeMargin } from "./lib/capitalTags.js";
@@ -175,8 +181,6 @@ export default function App() {
     setInsuranceState,
     bBookState,
     setBBookState,
-    classifierState,
-    setClassifierState,
     setLogs,
     addToast,
     running,
@@ -355,13 +359,6 @@ export default function App() {
   function handleClosePosition(i) {
     const pos = openPositions[i];
     if (!pos) return;
-    if (pos.threadLinked) {
-      addToast(
-        "Thread-linked LAP — redeem the underlying TT to unwind (preserves the 4-layer invariant)",
-        "warning"
-      );
-      return;
-    }
     const ps = pairStates[pos.pairKey];
     const priceNow = ps?.prices?.slice(-1)[0] ?? 1;
     const priceThen = pos.openPrice ?? priceNow;
@@ -375,33 +372,98 @@ export default function App() {
         contractId: pos.bBookContractId,
         currentPrice: priceNow,
       });
-      if (closed.ok) {
-        setBBookState(closed.state);
-        setOpenPositions((prev) => prev.filter((_, idx) => idx !== i));
-        setTradeLog((prev) => [
-          ...prev,
-          { ...pos, pnl: closed.userPnl, closedPrice: priceNow },
-        ]);
-        setPlayer((p) => ({
-          ...p,
-          margin: p.margin + closed.userPnl,
-          tags: untag(p.tags ?? {}, "auctionMargin", pos.margin),
-        }));
-        // Classifier records this close — affects future routing.
-        setClassifierState((prev) =>
-          recordClassifierClose(prev, player.id, {
-            pnl: closed.userPnl,
-            marginAtOpen: pos.margin,
-            closedAtEpoch: ps?.epochIndex ?? 0,
-          })
-        );
-        addToast(
-          `Closed ${pos.pairKey} ${pos.side} (B-book): ${closed.userPnl >= 0 ? "+" : ""}$${closed.userPnl.toFixed(2)}`,
-          closed.userPnl >= 0 ? "info" : "warning"
-        );
-      } else {
+      if (!closed.ok) {
         addToast(`B-book close failed: ${closed.reason}`, "warning");
+        return;
       }
+
+      // closeBBookContract has already updated threadDerivedStake
+      // proportionally per underwriter. Now propagate the same
+      // thread-derived deltas into each thread's principal + the other
+      // layers so the 4-layer invariant holds (pool moved → T-bill +
+      // insurance + ttFace move too). poolLayerDelta/Add from
+      // damage/growThread is informational here — the pool was already
+      // moved by closeContract.
+      let workingTt = closed.state ? ttState : ttState; // closed.state is bBookState
+      let workingInsurance = insuranceState;
+      for (const [uid, shares] of Object.entries(closed.underwriterShares ?? {})) {
+        const td = shares?.threadDerived ?? 0;
+        if (Math.abs(td) <= 1e-9) continue;
+        const userThreads = (workingTt.threads ?? []).filter(
+          (t) => !t.closed && t.ownerId === uid && t.principal > 1e-9
+        );
+        if (userThreads.length === 0) continue;
+        const totalPrincipal = userThreads.reduce((s, t) => s + t.principal, 0);
+        if (totalPrincipal <= 0) continue;
+        for (const t of userThreads) {
+          const portion = td * (t.principal / totalPrincipal);
+          if (Math.abs(portion) <= 1e-9) continue;
+          if (portion > 0) {
+            const grown = growThread({
+              ttState: workingTt,
+              threadId: t.id,
+              gain: portion,
+            });
+            workingTt = grown.ttState;
+            for (const [eventId, add] of Object.entries(grown.insuranceLayerAdds)) {
+              if (add <= 1e-9) continue;
+              workingInsurance = {
+                ...workingInsurance,
+                markets: workingInsurance.markets.map((m) => {
+                  if (m.eventId !== eventId) return m;
+                  const pr = postInsurer({ market: m, userId: uid, amount: add });
+                  return pr.ok ? pr.market : m;
+                }),
+              };
+            }
+          } else {
+            const dmg = damageThread({
+              ttState: workingTt,
+              threadId: t.id,
+              delta: -portion,
+            });
+            workingTt = dmg.ttState;
+            for (const [eventId, cut] of Object.entries(dmg.insuranceLayerDeltas)) {
+              if (cut <= 1e-9) continue;
+              workingInsurance = {
+                ...workingInsurance,
+                markets: workingInsurance.markets.map((m) => {
+                  if (m.eventId !== eventId) return m;
+                  const wr = withdrawInsurer({ market: m, userId: uid, amount: cut });
+                  return wr.ok ? wr.market : m;
+                }),
+              };
+            }
+          }
+        }
+      }
+
+      setBBookState(closed.state);
+      setTtState(workingTt);
+      if (workingInsurance !== insuranceState) {
+        setInsuranceState(workingInsurance);
+      }
+      setOpenPositions((prev) => prev.filter((_, idx) => idx !== i));
+      setTradeLog((prev) => [
+        ...prev,
+        { ...pos, pnl: closed.userPnl, closedPrice: priceNow },
+      ]);
+      setPlayer((p) => ({
+        ...p,
+        margin: p.margin + closed.userPnl,
+        tags: untag(p.tags ?? {}, "auctionMargin", pos.margin),
+      }));
+      setClassifierState((prev) =>
+        recordClassifierClose(prev, player.id, {
+          pnl: closed.userPnl,
+          marginAtOpen: pos.margin,
+          closedAtEpoch: ps?.epochIndex ?? 0,
+        })
+      );
+      addToast(
+        `Closed ${pos.pairKey} ${pos.side} (B-book): ${closed.userPnl >= 0 ? "+" : ""}$${closed.userPnl.toFixed(2)}`,
+        closed.userPnl >= 0 ? "info" : "warning"
+      );
       return;
     }
 
@@ -659,11 +721,15 @@ export default function App() {
   // --- Tower Tether handlers ----------------------------------------------
   //
   // Mint = open a thread. The same `amount` of free margin is locked as
-  // the thread's underlying T-bill stake AND simultaneously deployed as:
+  // the thread's underlying T-bill stake AND simultaneously deployed
+  // as:
   //   - insurer-side fill across reinsurance-covered insurance markets
-  //     (mixed equal/size weighting)
-  //   - a delta-neutral paired LAP (both legs auto-leased)
-  //   - an equal amount of TT minted into the wallet
+  //     (layer 2; mixed equal/size weighting)
+  //   - B-book pool underwriter stake (layer 3; thread-derived stake
+  //     that earns user tip flow + absorbs B-classed user P&L)
+  //   - an equal amount of TT minted into the wallet (layer 4)
+  //   plus auto-bought reinsurance face = 1.5× amount split across the
+  //   3 reinsurance products, hedging the insurer-side exposure.
   //
   // No LTV gate, no coefficient — gate is purely "can you afford to
   // deploy `amount` of free margin?"
@@ -681,10 +747,7 @@ export default function App() {
       return;
     }
 
-    // 1. Pick eligible markets — those with at least one reinsurance
-    //    product carrying seller capital. Falls back to all markets if
-    //    reinsurance is empty (so the system is still usable in early
-    //    sim states).
+    // 1. Pick eligible markets and fill weights.
     const reinsuranceLive = (insuranceState.reinsurance ?? []).some(
       (p) => (p.sellerCapital ?? 0) > 0
     );
@@ -698,17 +761,14 @@ export default function App() {
       reinsuranceLive,
     });
 
-    // 2. Tag the principal as threadStake. This locks the same dollar
-    //    across all four roles — threadStake on top of any existing
-    //    tags is the bookkeeping for "this $ is now busy in 4 places".
+    // 2. Tag the principal as threadStake (locks same dollar across 4 roles).
     const newTags = tryTag(player.margin, player.tags, "threadStake", amount);
     if (!newTags) {
       addToast("Insufficient free margin (tag check)", "warning");
       return;
     }
 
-    // 3. Apply the insurance-fill: post insurer stakes weighted by the
-    //    fill weights. Same money the threadStake tag now claims.
+    // 3. Layer 2: post insurer-side stakes weighted by the fill weights.
     let nextMarkets = insuranceState.markets;
     for (const [eventId, w] of Object.entries(weights)) {
       const fill = amount * w;
@@ -725,75 +785,58 @@ export default function App() {
       }
     }
 
-    // 4. Build a delta-neutral paired LAP for the thread. Margin =
-    //    `amount` (split equally across long+short legs). Both legs
-    //    auto-listed for rent; thread-linked via the lapId.
-    const priceNow = activePS?.prices?.slice(-1)[0] ?? 1;
-    const lapId = makeLapId();
-    const pairedLap = makePairedLap({
-      pairKey: activePair,
-      margin: amount,
-      leverage: player.leverage ?? 2,
-      openPrice: priceNow,
-      openedAtEpoch: activePS?.epochIndex ?? 0,
-      poolLinkage: null,
-      id: lapId,
+    // 3b. Auto-buy reinsurance — face = 1.5 × amount split across the 3
+    //     products. Hedges the insurer-side exposure: if any market the
+    //     thread participates in triggers, reinsurance pays the
+    //     coverageFraction × loss back to the user.
+    const reinsuranceFacePerProduct = (amount * 1.5) / 3;
+    let nextReinsurance = insuranceState.reinsurance ?? [];
+    nextReinsurance = nextReinsurance.map((p) => {
+      const r = postReinsuranceBuyer({
+        product: p,
+        userId: player.id,
+        faceAmount: reinsuranceFacePerProduct,
+      });
+      return r.ok ? r.product : p;
     });
-    // 5. Open the thread record in TT state. This 1:1-mints the TT
-    //    into the user's wallet.
+
+    // 4. Layer 3: deposit the principal into the B-book pool as
+    //    thread-derived stake. No lockup — it's gated by the thread
+    //    redemption mechanics (10% cycle cap or express penalty).
+    const adjusted = adjustThreadDerived({
+      state: bBookState,
+      uid: player.id,
+      delta: amount,
+    });
+    if (!adjusted.ok) {
+      addToast(`Mint failed: ${adjusted.reason}`, "warning");
+      return;
+    }
+
+    // 5. Open the thread record. 1:1-mints the TT into the wallet.
     const opened = openThread({
       ttState,
       ownerId: player.id,
       principal: amount,
       insuranceWeights: weights,
-      lapPairKey: activePair,
-      lapId,
       currentEpoch: activePS?.epochIndex ?? 0,
     });
     if (!opened.ok) {
       addToast(`Mint failed: ${opened.reason}`, "warning");
       return;
     }
-    // Bind the LAP back to the thread so the epoch loop can route
-    // rental tips through growThread (and damage through damageThread).
-    pairedLap.threadId = opened.thread.id;
-    pairedLap.threadLinked = true;
 
-    // 6. Auto-publish rental offers for both legs of the paired LAP.
-    setPairStates((prev) => {
-      const target = prev[activePair];
-      if (!target) return prev;
-      const epochNow = target.epochIndex ?? 0;
-      const longOffer = publishLegOffer({
-        pairLapId: lapId,
-        legSide: "long",
-        ownerId: player.id,
-        pairKey: activePair,
-        publishedAtEpoch: epochNow,
-      });
-      const shortOffer = publishLegOffer({
-        pairLapId: lapId,
-        legSide: "short",
-        ownerId: player.id,
-        pairKey: activePair,
-        publishedAtEpoch: epochNow,
-      });
-      return {
-        ...prev,
-        [activePair]: {
-          ...target,
-          rentalOffers: [...(target.rentalOffers ?? []), longOffer, shortOffer],
-        },
-      };
-    });
-
-    // 7. Commit the new state.
+    // 6. Commit all the new state in lockstep.
     setTtState(opened.ttState);
-    setInsuranceState({ ...insuranceState, markets: nextMarkets });
-    setOpenPositions((prev) => [...prev, pairedLap]);
+    setInsuranceState({
+      ...insuranceState,
+      markets: nextMarkets,
+      reinsurance: nextReinsurance,
+    });
+    setBBookState(adjusted.state);
     setPlayer((p) => ({ ...p, tags: newTags }));
     addToast(
-      `Thread opened: $${amount.toFixed(0)} → T-bill + insurance + LAP + TT (1 dollar, 4 jobs)`,
+      `Thread opened: $${amount.toFixed(0)} → T-bill + insurance + B-book pool + TT (1 dollar, 4 jobs) · ${(reinsuranceFacePerProduct * 3).toFixed(0)} reinsurance face`,
       "info"
     );
   }

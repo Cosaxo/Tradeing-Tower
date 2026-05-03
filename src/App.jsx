@@ -1,6 +1,9 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { ACTIVE_PAIRS } from "./constants/assets.js";
-import { createDefaultBotAdapter } from "./lib/defaultBotAdapter.js";
+import {
+  createLocalBroadcastAdapter,
+  getOrCreateTabUserId,
+} from "./lib/localBroadcastAdapter.js";
 import { initPairState } from "./state/pairState.js";
 import { initInsuranceState } from "./state/insuranceState.js";
 import { useEpochLoop } from "./hooks/useEpochLoop.js";
@@ -62,7 +65,7 @@ import { CreditDesk } from "./components/CreditDesk.jsx";
 import { StressPanel } from "./components/StressPanel.jsx";
 import { LogicView } from "./components/LogicView.jsx";
 import { MetricsPanel } from "./components/MetricsPanel.jsx";
-import { NpcPanel } from "./components/NpcPanel.jsx";
+import { PeersPanel } from "./components/PeersPanel.jsx";
 import { TtDesk } from "./components/TtDesk.jsx";
 import { InsuranceDesk } from "./components/InsuranceDesk.jsx";
 import { BBookDesk } from "./components/BBookDesk.jsx";
@@ -174,24 +177,64 @@ export default function App() {
   );
   const { toasts, history, addToast, clearHistory } = useToast();
   const [showTutorial, setShowTutorial] = useState(false);
+  // Multi-user counter — re-rendered every few seconds so the header
+  // chip reflects current peer count without prop-drilling the adapter.
+  const [peerCount, setPeerCount] = useState(0);
 
-  // OrderFlowAdapter — pluggable source of market flow. Default impl
-  // wraps the legacy NPCs (Whale / Degen / Hedger / Bot / Bear) for
-  // parity with prior behaviour. Swap in ReplayAdapter for backtests
-  // or BrokerAdapter for live-market wiring.
+  // OrderFlowAdapter — pluggable source of market flow. The default
+  // is now LocalBroadcastAdapter: each browser tab is one user in a
+  // shared room; bids broadcast across tabs via BroadcastChannel.
+  // The legacy DefaultBotAdapter (synthetic NPC flow) has been
+  // retired — Trading Tower is a real multi-user trading platform.
   //
-  // Held in a ref so the same instance persists across re-renders
-  // (the adapter holds NPC state internally — recreating would reset
-  // their margins / restock counters every render).
+  // The adapter is held in a ref so the same instance persists across
+  // re-renders. `getCurrentBid` reads from a live ref so each
+  // heartbeat broadcasts the player's latest config.
+  const playerRef = useRef(player);
+  playerRef.current = player;
+
+  const tabUserIdRef = useRef(null);
+  if (tabUserIdRef.current === null) {
+    tabUserIdRef.current = getOrCreateTabUserId(player?.id ?? "You");
+  }
+
   const flowAdapterRef = useRef(null);
   if (flowAdapterRef.current === null) {
-    flowAdapterRef.current = createDefaultBotAdapter({
-      pairKeys: ACTIVE_PAIRS,
-      realizedSigmaByPair: Object.fromEntries(
-        ACTIVE_PAIRS.map((pk) => [pk, pairStates[pk]?.realizedSigma ?? 0.02])
-      ),
+    flowAdapterRef.current = createLocalBroadcastAdapter({
+      tabUserId: tabUserIdRef.current,
+      roomId: "default",
+      getCurrentBid: () => {
+        const p = playerRef.current;
+        if (!p?.activePair) return null;
+        return {
+          pairKey: p.activePair,
+          leverage: p.leverage,
+          margin: p.margin,
+          side: p.side,
+          strategy: p.strategy,
+          tip_tiers: p.tip_tiers,
+        };
+      },
     });
   }
+
+  // Refresh the peer-count display every PRESENCE_INTERVAL_MS-ish so
+  // the room indicator updates as tabs join / leave.
+  useEffect(() => {
+    const id = setInterval(() => {
+      const a = flowAdapterRef.current;
+      if (a?.getPeerCount) setPeerCount(a.getPeerCount());
+    }, 2000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Tear down the adapter on unmount (close the BroadcastChannel and
+  // tell peers we're leaving).
+  useEffect(() => {
+    return () => {
+      flowAdapterRef.current?.dispose?.();
+    };
+  }, []);
 
   const { onPlayerEdit } = useEpochLoop({
     pairStates,
@@ -1212,6 +1255,21 @@ export default function App() {
           >
             reset
           </button>
+          <span
+            className={cx(
+              "text-[10px] font-mono px-2 py-0.5 rounded border",
+              peerCount > 0
+                ? "border-emerald-700 bg-emerald-950/60 text-emerald-300"
+                : "border-gray-800 bg-gray-900 text-gray-500"
+            )}
+            title={
+              peerCount > 0
+                ? `${peerCount} other user${peerCount === 1 ? "" : "s"} in this room — your auctions match against them`
+                : "Solo user. Open another browser tab to add a peer."
+            }
+          >
+            room · {peerCount === 0 ? "solo" : `${peerCount} peer${peerCount === 1 ? "" : "s"}`}
+          </span>
           <span className="text-[10px] font-mono text-gray-600">
             σ={((activePS?.realizedSigma ?? 0.02) * 100).toFixed(2)}%
           </span>
@@ -1385,7 +1443,11 @@ export default function App() {
                   shortCurve={activePS?.auctionResult?.shortCurve ?? []}
                   cap={cap}
                 />
-                <NpcPanel npcs={activePS?.npcs ?? []} />
+                <PeersPanel
+                  peers={flowAdapterRef.current?.getSnapshot?.() ?? []}
+                  peerCount={peerCount}
+                  roomId={flowAdapterRef.current?.getRoomId?.() ?? "default"}
+                />
                 <div className="rounded border border-gray-800 bg-gray-900 p-2">
                   <div className="text-[10px] text-gray-500 mb-1">Recent Matches</div>
                   {(activePS?.auctionResult?.matched ?? []).slice(0, 8).map((m, i) => (

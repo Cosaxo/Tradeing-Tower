@@ -72,6 +72,12 @@ directional bet.
 
 ## The trading venue (secondary value prop)
 
+Trading Tower is a real multi-user trading platform — there are no
+synthetic NPCs, no in-process bots. Every counterparty is another
+human user. Solo demo mode shows the protocol idle (T-bill yield +
+insurance + reinsurance still settle); auction matches require at
+least one peer.
+
 Because the auction uses a **geodesic** ideal leverage distribution
 with **entropy-weighted tips**, taking the unpopular side of the book
 is rewarded:
@@ -86,6 +92,18 @@ is rewarded:
 - **Transparent A/B classifier.** Every user sees their own score and
   whether they're being routed peer-to-peer (A) or against the B-book
   pool (B). No hidden conflict of interest.
+
+### Multi-user wiring
+
+The platform's order-flow seam (`OrderFlowAdapter`) is pluggable. The
+default in this codebase is **`LocalBroadcastAdapter`** — each browser
+tab is one user, and tabs in the same room exchange bids via
+`BroadcastChannel`. Two open tabs on the same machine give a working
+multi-user demo without any backend. A real production deployment
+swaps in a server-backed adapter (the same interface) and shares
+protocol-global state (insurance, reinsurance, B-book, TT) across
+users — the demo's known limitation is that protocol state is
+per-tab.
 
 ## Under the hood
 

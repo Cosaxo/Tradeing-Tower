@@ -1,9 +1,8 @@
 // Per-pair simulation state factory.
 // Each active pair carries its own price history, auction state,
-// NPC book, regime tracker, and insurance pool slice.
+// peer-bid mirror, regime tracker, and rental market slice.
 
 import { PAIRS } from "../constants/assets.js";
-import { buildNpcs } from "../lib/npcs.js";
 import { MAX_HISTORY } from "../constants/system.js";
 
 export function initPairState(pairKey) {
@@ -30,8 +29,11 @@ export function initPairState(pairKey) {
     prevSmoothFills: null,
     alpha: 0.5, // long/short ratio
 
-    // NPC participants.
-    npcs: buildNpcs(pairKey, initialSigma),
+    // Peer participants — mirrored from the broadcast adapter on each
+    // medium tick. The auction is agnostic to flow source: real users
+    // (LocalBroadcastAdapter) or recorded tape (ReplayAdapter). The
+    // legacy in-process bot pool has been retired.
+    npcs: [],
 
     // Regime.
     regime: null,

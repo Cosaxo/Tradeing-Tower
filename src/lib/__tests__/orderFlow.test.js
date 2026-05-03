@@ -6,7 +6,10 @@ import {
   filterValid,
   assertAdapter,
 } from "../orderFlow.js";
-import { createDefaultBotAdapter } from "../defaultBotAdapter.js";
+import {
+  createLocalBroadcastAdapter,
+  getOrCreateTabUserId,
+} from "../localBroadcastAdapter.js";
 import { createReplayAdapter } from "../replayAdapter.js";
 import { createBrokerAdapter } from "../brokerAdapter.js";
 
@@ -78,62 +81,54 @@ describe("assertAdapter", () => {
   });
 });
 
-describe("DefaultBotAdapter", () => {
-  function fakePairState({ realizedSigma = 0.02, prices = [100, 100] } = {}) {
-    return { realizedSigma, prices, returnHistory: [] };
-  }
-
-  it("produces participants and poolUsers from the legacy NPC roster", () => {
-    const a = createDefaultBotAdapter({ pairKeys: ["BTCUSD"] });
-    const r = a.run({
-      pairKey: "BTCUSD",
-      epoch: 0,
-      pairState: fakePairState(),
-      regime: { key: "CALM" },
-      yieldModel: {},
-      cap: 5,
-    });
-    expect(r.participants.length).toBeGreaterThan(0);
-    expect(r.poolUsers.length).toBeGreaterThan(0);
-    // Participants have full bid shape; pool users have minimal shape.
-    expect(r.participants.every(isValidAuctionBid)).toBe(true);
-    expect(r.poolUsers.every(isValidPoolUser)).toBe(true);
+describe("LocalBroadcastAdapter", () => {
+  it("falls back to a null adapter when BroadcastChannel is unavailable", () => {
+    // Vitest's default jsdom env doesn't ship BroadcastChannel — the
+    // factory should detect this and return a degraded but valid adapter.
+    const a = createLocalBroadcastAdapter({ tabUserId: "test-tab-1" });
+    expect(() => assertAdapter(a)).not.toThrow();
+    const r = a.run({ pairKey: "BTCUSD", cap: 3 });
+    expect(r.participants).toEqual([]);
+    expect(r.poolUsers).toEqual([]);
+    expect(a.getPeerCount()).toBe(0);
   });
 
-  it("applySettlement updates internal NPC state", () => {
-    const a = createDefaultBotAdapter({ pairKeys: ["BTCUSD"] });
-    const r1 = a.run({
-      pairKey: "BTCUSD",
-      epoch: 0,
-      pairState: fakePairState(),
-      regime: { key: "CALM" },
-      yieldModel: {},
-      cap: 5,
-    });
-    const target = r1.poolUsers[0];
-    a.applySettlement({
-      pairKey: "BTCUSD",
-      settledUsers: [{ id: target.id, margin: 0.0001, liquidated: true }],
-    });
-    const liq = a.detectLiquidationsFromSnapshot({
-      pairKey: "BTCUSD",
-      preSettlementSnapshot: r1.snapshot,
-    });
-    expect(liq.length).toBeGreaterThan(0);
-    expect(liq[0].id).toBe(target.id);
+  it("returns the same adapter shape regardless of availability", () => {
+    const a = createLocalBroadcastAdapter({ tabUserId: "test-tab-2" });
+    expect(typeof a.run).toBe("function");
+    expect(typeof a.applySettlement).toBe("function");
+    expect(typeof a.markRestockedFromSnapshot).toBe("function");
+    expect(typeof a.detectLiquidationsFromSnapshot).toBe("function");
+    expect(typeof a.getSnapshot).toBe("function");
+    expect(typeof a.getPeerCount).toBe("function");
+    expect(typeof a.dispose).toBe("function");
   });
 
-  it("auto-creates per-pair slot on first run for unknown pairs", () => {
-    const a = createDefaultBotAdapter({ pairKeys: [] }); // no slots seeded
-    const r = a.run({
-      pairKey: "NEWPAIR",
-      epoch: 0,
-      pairState: fakePairState(),
-      regime: { key: "CALM" },
-      yieldModel: {},
-      cap: 3,
-    });
-    expect(r.participants.length).toBeGreaterThan(0);
+  it("dispose is idempotent", () => {
+    const a = createLocalBroadcastAdapter({ tabUserId: "test-tab-3" });
+    expect(() => a.dispose()).not.toThrow();
+    expect(() => a.dispose()).not.toThrow();
+  });
+});
+
+describe("getOrCreateTabUserId", () => {
+  it("returns a string id", () => {
+    const id = getOrCreateTabUserId("Alice");
+    expect(typeof id).toBe("string");
+    expect(id.length).toBeGreaterThan(0);
+  });
+
+  it("uses the supplied prefix when sessionStorage is empty", () => {
+    // First call seeds sessionStorage; subsequent calls return the
+    // cached value regardless of prefix. The prefix is only honoured
+    // on first generation, so this assertion only holds before any
+    // other call has seeded the cache.
+    if (typeof window === "undefined" || typeof window.sessionStorage === "undefined") {
+      return;
+    }
+    window.sessionStorage.removeItem("tt.tabUserId");
+    const id = getOrCreateTabUserId("Bob");
+    expect(id.startsWith("Bob-")).toBe(true);
   });
 });
 

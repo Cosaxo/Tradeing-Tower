@@ -19,22 +19,27 @@ import { BASE_PREMIUM_RATE } from "../lib/insuranceMarket.js";
 // constants, not realised performance — use the "since you started"
 // chip below for realised yield once equity history exists.
 //
-// Components (per medium tick → annualised by × 365 sim-days):
+// Unit conventions (post-Sprint-4.5):
+//   - TBILL_RATE is already ANNUAL (used as TBILL_RATE/365 per tick
+//     in the loop).
+//   - BASE_PREMIUM_RATE is per medium tick (used directly per tick
+//     in settleMarketTick), so we ×365 to annualise.
 //
-//   Layer 1  T-bill         TBILL_RATE × 365
-//   Layer 2  Insurance prem BASE_PREMIUM_RATE × 365  (typical, no trigger)
-//   Layer 3  B-book yield   modeled from cumulativePoolPnl / totalStake / time
-//                           (proxy: 0.04 annual ≈ historic CFD broker margin)
-//   Layer 4  TT mint        adds optionality, no separate yield stream
+// Layers:
+//   Layer 1  T-bill            TBILL_RATE  (annual)
+//   Layer 2  Insurance premium BASE_PREMIUM_RATE × 365 × 0.5
+//                              (insurer-side share)
+//   Layer 3  B-book yield      historic-CFD-margin proxy (0.04 annual)
+//   Layer 4  TT mint           optionality; no separate yield stream
 //
 // The four are added because the same dollar earns each one in
 // parallel (the whole point of the protocol). Subtract a small
 // drag for stress-loss expectation.
 function projectAnnualYield({ atTier }) {
-  const tbillAnnual = TBILL_RATE * 365;
-  const insuranceAnnual = BASE_PREMIUM_RATE * 365 * 0.5; // half because insurer-side share
+  const tbillAnnual = TBILL_RATE; // already annual
+  const insuranceAnnual = BASE_PREMIUM_RATE * 365 * 0.5; // per-tick → annual
   const bbookAnnual = 0.04;
-  const stressDrag = 0.02; // empirical placeholder until Monte Carlo lands
+  const stressDrag = 0.005; // empirical placeholder; refine with Monte Carlo
 
   if (atTier === 1) return Math.max(0, tbillAnnual - stressDrag * 0.25);
   if (atTier === 2) return Math.max(0, tbillAnnual + insuranceAnnual - stressDrag * 0.5);

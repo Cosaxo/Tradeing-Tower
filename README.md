@@ -337,20 +337,42 @@ distribution across N seeded runs.
 | `CORRELATED_CRISIS` | Multiple correlated events (BTC + ETH + SPX + vol spike). Tests joint-stress survival. |
 | `REDEMPTION_PRESSURE` | User redeems 25% of TT each cycle. Tests staged redemption mechanics. |
 
-### Findings (default protocol calibration)
+### Sprint 4.5 calibration — empirically verified
 
-The harness has surfaced two structural calibration issues:
+Sprint 4 built the harness; Sprint 4.5 used it to find and fix four
+calibration bugs at the same time. The harness now reports
+**`P(joint outcome ≥ 0) = 100%`** across all four scenarios at
+n=200, mean joint outcome ≈ +2.5% over 200 sim-days
+(≈ +4.7% annualised). The safety claim is empirically met under
+default protocol settings.
 
-1. **`REINSURANCE_BASE_RATE = 0.010`** is per medium tick (≈ 365%
-   annualised). Reinsurance premium cost dominates every scenario,
-   driving joint outcome negative even in CALM where no events fire.
-2. **`TBILL_RATE = 0.001`** is annualised (≈ 0.1% per year), so
-   layer 1's contribution is negligible. The protocol's safety
-   claim depends on layer 1 being a meaningful positive yield.
+What was fixed:
 
-These are tuning targets for a future sprint — the harness's value
-is producing this empirical evidence so the calibration question is
-concrete rather than aspirational.
+1. `TBILL_RATE` 0.001 → 0.04 (was 0.1% annual; now 4% annual).
+2. `REINSURANCE_BASE_RATE` 0.010 → 0.0001 (was ≈365% annualised; now
+   ≈3.65% at base, scaling with cov/ins).
+3. `BASE_PREMIUM_RATE` 0.005 → 0.00005 (was ≈182% annualised; now
+   ≈1.8% at base).
+4. Auto-mint reinsurance face changed from `(amount × 1.5) / 3` per
+   product to `amount × coverageFraction` per product — total face
+   drops from 1.5× deposit to 1.0× deposit (the minimum
+   full-coverage configuration), removing ~50% of dead premium.
+5. **Insurance claim double-counting bug** (a separate finding the
+   harness surfaced): `useEpochLoop.js` was both debiting
+   `playerCashChanges -= claimOut` and calling `damageThread`,
+   charging the user twice for the same loss. Fixed — claim losses
+   on thread-backed insurer stakes are now captured once via
+   `damageThread` only.
+
+Future calibration work (a known gap, not yet exercised):
+
+- **B-book reinsurance pool**. Reinsurance currently only hedges the
+  insurance-seller leg (layer 2). Layer 3 — the B-book pool stake —
+  has no equivalent hedge, so a wave of profitable retail flow can
+  drain the B-book pool and damage the thread without any
+  reimbursement. Wiring active LAP/B-book flow into the harness
+  will surface this gap; a parallel reinsurance product covering
+  B-book drawdowns is the proposed fix.
 
 ## Testing
 

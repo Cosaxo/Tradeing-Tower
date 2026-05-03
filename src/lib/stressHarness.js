@@ -210,14 +210,17 @@ function setupWorld({ userId, deposit, buyerFace, sellerCapital }) {
     if (r.ok) markets = markets.map((m, i) => (i === idx ? r.market : m));
   }
 
-  //    c. user buys reinsurance: face = 1.5× deposit split equally
-  //       across products. Matches handleMintTT in App.jsx.
-  const reinsuranceFacePerProduct = (deposit * 1.5) / reinsurance.length;
+  //    c. user buys reinsurance: face per product = `deposit ×
+  //       coverageFraction`. Total face = deposit × 1.0 (minimum
+  //       full-coverage configuration). Matches handleMintTT in
+  //       App.jsx after the Sprint 4.5 fix.
   reinsurance = reinsurance.map((p) => {
+    const faceAmount = deposit * (p.coverageFraction ?? 0);
+    if (faceAmount <= 1e-6) return p;
     const r = postReinsuranceBuyer({
       product: p,
       userId,
-      faceAmount: reinsuranceFacePerProduct,
+      faceAmount,
     });
     return r.ok ? r.product : p;
   });
@@ -306,7 +309,12 @@ function simulateTick({
     const premOut = r.premiumOut?.[userId] ?? 0;
     const claimIn = r.claimIn?.[userId] ?? 0;
     const claimOut = r.claimOut?.[userId] ?? 0;
-    userMargin += premIn - premOut + claimIn - claimOut;
+    // claimOut is NOT debited from userMargin — it's paid out of
+    // thread principal, captured by damageThread below. Debiting it
+    // here too would double-count the same loss (this was a
+    // protocol-level bug surfaced by the harness in Sprint 4.5 and
+    // fixed in useEpochLoop.js + here at the same time).
+    userMargin += premIn - premOut + claimIn;
 
     metrics.premiumIn += premIn;
     metrics.premiumOut += premOut;

@@ -1,6 +1,15 @@
 // Reinsurance — three parallel two-sided products that protect insurance
 // SELLERS against the claims they have to pay out.
 //
+// FUTURE WORK (noted Sprint 4.5): the protocol's safety claim covers
+// the joint outcome across all four thread layers. Today reinsurance
+// only protects the insurance-seller leg (layer 2). Layer 3 — the
+// B-book pool stake — has no equivalent hedge, so a wave of profitable
+// retail flow can drain the B-book pool and damage the thread without
+// any reimbursement. A *B-book reinsurance pool* (or a generalisation
+// of these products to cover B-book drawdowns) is the next coverage
+// gap to close. Out of scope for this sprint.
+//
 // Structure
 // ---------
 //
@@ -54,7 +63,12 @@ export const REINSURANCE_PRODUCTS = [
 
 // Reinsurance is more expensive than primary insurance (it covers tail
 // risk). Base rate ≈ 2× primary base.
-export const REINSURANCE_BASE_RATE = 0.010;
+//
+// Calibrated in Sprint 4.5: previously 0.010/tick (≈365% annualised)
+// which made the auto-mint user's reinsurance premium cost dominate
+// every joint-outcome scenario. Reduced 100× — same per-tick unit,
+// same 2× ratio over BASE_PREMIUM_RATE.
+export const REINSURANCE_BASE_RATE = 0.0001;
 export const REINSURANCE_LOCKUP_EPOCHS = 200;
 
 // ---------------------------------------------------------------------------

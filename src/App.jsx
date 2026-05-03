@@ -931,17 +931,22 @@ export default function App() {
       }
     }
 
-    // 3b. Auto-buy reinsurance — face = 1.5 × amount split across the 3
-    //     products. Hedges the insurer-side exposure: if any market the
-    //     thread participates in triggers, reinsurance pays the
-    //     coverageFraction × loss back to the user.
-    const reinsuranceFacePerProduct = (amount * 1.5) / 3;
+    // 3b. Auto-buy reinsurance — face per product = `amount ×
+    //     coverageFraction`. Total face across the 3 products =
+    //     `amount × Σ coverageFraction = amount × 1.0`, the minimum
+    //     that gives full coverage on a worst-case insurer loss
+    //     equal to the deposit. Sprint 4.5 fix: previously face was
+    //     1.5× / 3 per product = 0.5 × deposit per product = 1.5 ×
+    //     deposit total, paying premium on 50% over-bought face that
+    //     never produced extra coverage.
     let nextReinsurance = insuranceState.reinsurance ?? [];
     nextReinsurance = nextReinsurance.map((p) => {
+      const faceAmount = amount * (p.coverageFraction ?? 0);
+      if (faceAmount <= 1e-6) return p;
       const r = postReinsuranceBuyer({
         product: p,
         userId: player.id,
-        faceAmount: reinsuranceFacePerProduct,
+        faceAmount,
       });
       return r.ok ? r.product : p;
     });

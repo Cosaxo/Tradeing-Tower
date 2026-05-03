@@ -267,34 +267,56 @@ export function StressHarnessPanel() {
         })}
       </div>
 
-      <div className="rounded border border-amber-800 bg-amber-950/30 p-3">
-        <span className="text-xs font-mono text-amber-200 font-bold block mb-1">
-          Known calibration findings (surfaced by the harness)
+      <div className="rounded border border-emerald-800 bg-emerald-950/30 p-3">
+        <span className="text-xs font-mono text-emerald-200 font-bold block mb-1">
+          Sprint 4.5 calibration — what the harness verified
         </span>
+        <p className="text-[10px] font-mono text-gray-300 leading-relaxed mb-2">
+          After Sprint 4 surfaced the calibration issues, Sprint 4.5
+          fixed all four. The harness now reports{" "}
+          <span className="text-emerald-300 font-bold">
+            P(joint outcome ≥ 0) = 100%
+          </span>{" "}
+          across CALM, SINGLE_EVENT, CORRELATED_CRISIS, and
+          REDEMPTION_PRESSURE at n=200, with mean joint outcome ≈ +2.5%
+          over 200 sim-days (≈ +4.7% annualised). The safety claim is
+          now empirically met under default protocol settings.
+        </p>
         <ul className="text-[10px] font-mono text-gray-300 list-disc pl-4 space-y-1 leading-relaxed">
           <li>
-            <span className="text-amber-300">REINSURANCE_BASE_RATE = 0.010</span>{" "}
-            (per medium tick) is ~365% annualised. The reinsurance premium
-            cost dominates every scenario, including CALM. Joint outcome
-            stays negative in default config.
+            <span className="text-emerald-300">TBILL_RATE</span> bumped
+            0.001 → 0.04 (annual). Layer 1 now contributes a real
+            positive yield.
           </li>
           <li>
-            <span className="text-amber-300">TBILL_RATE = 0.001</span>{" "}
-            (annual) is effectively zero. Layer 1's contribution to joint
-            outcome is negligible. Protocol's safety claim depends on this
-            being a meaningful positive yield.
+            <span className="text-emerald-300">REINSURANCE_BASE_RATE</span>{" "}
+            and{" "}
+            <span className="text-emerald-300">BASE_PREMIUM_RATE</span>{" "}
+            both reduced 100×. Per-tick rates now annualise to
+            realistic figures (≈3.6% and ≈1.8% at base, scaling with
+            supply/demand).
           </li>
           <li>
-            Auto-mint reinsurance face = 1.5× principal. With coverage
-            fractions summing to 1.0 this gives effective coverage of
-            ~50% of insurer-side exposure. Worth re-tuning relative to
-            the premium-rate calibration.
+            Auto-mint reinsurance face changed from{" "}
+            <span className="text-emerald-300">1.5× / 3 per product</span>{" "}
+            to{" "}
+            <span className="text-emerald-300">amount × coverageFraction per product</span>
+            . Total face = deposit × 1.0 (the minimum that gives full
+            worst-case coverage), eliminating ~50% of dead premium.
+          </li>
+          <li>
+            Insurance claim accounting double-bug fixed: claimOut on
+            thread-backed insurer stakes was being charged both to the
+            wallet and to the thread principal. Now charged once via
+            damageThread only.
           </li>
         </ul>
         <p className="text-[10px] font-mono text-gray-400 mt-2 leading-relaxed">
-          These are protocol-calibration tasks for a future sprint. The
-          harness's value is producing this evidence, not asserting that
-          the safety claim is currently met — it isn't, in default config.
+          Future work: a B-book reinsurance pool to protect layer-3
+          drawdowns (the harness doesn't currently exercise B-book
+          loss paths because the auto-mint user is passive on that
+          layer; once active LAP flow is wired into the harness the
+          B-book hedge gap will be the next thing to surface).
         </p>
       </div>
     </div>

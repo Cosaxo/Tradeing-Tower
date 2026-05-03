@@ -24,18 +24,15 @@ describe("runStressSession", () => {
     expect(r.jointOutcomeFraction).toBeLessThan(1.0);
   });
 
-  it("surfaces the reinsurance-premium drag finding in default config", () => {
-    // KNOWN FINDING: with the current auto-mint config (1.5× face
-    // reinsurance) and a balanced 1:1 insurance demand, reinsurance
-    // premium cost exceeds insurance premium income across a calm
-    // run. This is what the harness exists to expose; tuning is a
-    // future-sprint task.
+  it("CALM scenario delivers a positive joint outcome after Sprint 4.5 calibration", () => {
+    // Sprint 4.5 fixed three calibration issues: TBILL_RATE bumped to
+    // 4% annual, REINSURANCE_BASE_RATE reduced 100×, BASE_PREMIUM_RATE
+    // reduced 100×, and auto-mint face = amount × coverageFraction
+    // (was 1.5×/3). After these fixes, CALM should produce a
+    // positive joint outcome — the safety claim now holds in a
+    // benign market.
     const r = runStressSession({ scenario: SCENARIOS.CALM, seed: 1 });
-    const insuranceNet = r.metrics.premiumIn - r.metrics.premiumOut;
-    const reinsuranceNet =
-      r.metrics.reinsurancePayout - r.metrics.reinsurancePremiumOut;
-    const cashNet = insuranceNet + reinsuranceNet;
-    expect(cashNet).toBeLessThan(0);
+    expect(r.jointOutcomeFraction).toBeGreaterThan(0);
   });
 
   it("is deterministic given the same seed", () => {

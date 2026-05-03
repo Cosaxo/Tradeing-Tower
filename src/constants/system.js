@@ -1,7 +1,12 @@
 // System-wide constants. Grouped for easy tuning and documentation.
 
-// Risk-free rate applied per epoch (~1 day).
-export const TBILL_RATE = 0.001;
+// Risk-free rate (ANNUALISED). Applied per medium tick as
+// TBILL_RATE / 365 (the loop and pool both treat it as a per-year
+// rate). Calibrated to a realistic short-duration T-bill yield —
+// previously 0.001 (≈0.1% annual) which made layer 1 effectively
+// inert; bumped to 0.04 in Sprint 4.5 after the stress harness
+// flagged the calibration error.
+export const TBILL_RATE = 0.04;
 
 // Grace window after a user edit before the new config is picked up by the auction.
 export const GRACE_MS = 800;

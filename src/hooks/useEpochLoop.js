@@ -572,7 +572,17 @@ export function useEpochLoop({
             playerCashChanges[uid] = (playerCashChanges[uid] ?? 0) + v;
           }
           for (const [uid, v] of Object.entries(r.claimOut)) {
-            playerCashChanges[uid] = (playerCashChanges[uid] ?? 0) - v;
+            // claimOut is paid out of thread-backed insurer stake.
+            // The cash flow is captured by damageThread shrinking the
+            // thread principal (and the per-market layer-2 stake that
+            // funded the claim was the principal in the first place).
+            // Debiting playerCashChanges here as well would
+            // double-count the loss against the user's wallet.
+            //
+            // (If a future build adds non-thread-backed insurer
+            // stakes — direct wallet collateral — those WILL need a
+            // wallet debit here, gated on whether the user has any
+            // active thread covering this event.)
             buyerLossesByUser[uid] = (buyerLossesByUser[uid] ?? 0) + v;
           }
           if (Object.keys(r.claimOut).length > 0) {

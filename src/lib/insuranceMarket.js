@@ -24,12 +24,19 @@
 // Constants
 // ---------------------------------------------------------------------------
 
-// Base premium rate per epoch when insurer ≈ insured. Sensitivity controls
-// how aggressively imbalance shifts the rate.
-export const BASE_PREMIUM_RATE = 0.005;
+// Base premium rate per medium tick when insurer ≈ insured. Sensitivity
+// controls how aggressively imbalance shifts the rate.
+//
+// Calibrated in Sprint 4.5 against the stress harness output. Previous
+// values (BASE = 0.005/tick ≈ 182% annualised) were per-tick rates that
+// implicitly priced insurance at hundreds of percent per year; the
+// auto-mint user's joint outcome was negative even in CALM. Reduced
+// 100× to give realistic per-tick economics. Still per-tick — the
+// /tick → /year conversion is applied at the call site.
+export const BASE_PREMIUM_RATE = 0.00005;
 export const PREMIUM_SENSITIVITY = 0.5;
-export const MIN_PREMIUM_RATE = 0.0005;
-export const MAX_PREMIUM_RATE = 0.05;
+export const MIN_PREMIUM_RATE = 0.000005;
+export const MAX_PREMIUM_RATE = 0.0005;
 
 // ---------------------------------------------------------------------------
 // IDs

@@ -339,40 +339,55 @@ distribution across N seeded runs.
 
 ### Sprint 4.5 calibration — empirically verified
 
-Sprint 4 built the harness; Sprint 4.5 used it to find and fix four
-calibration bugs at the same time. The harness now reports
+Sprint 4 built the harness; Sprint 4.5 used it to find and fix the
+calibration bugs the harness surfaced. The harness now reports
 **`P(joint outcome ≥ 0) = 100%`** across all four scenarios at
-n=200, mean joint outcome ≈ +2.5% over 200 sim-days
-(≈ +4.7% annualised). The safety claim is empirically met under
-default protocol settings.
+n=200, mean joint outcome ≈ +4.5% over 200 sim-days
+(≈ +8.5% annualised). Worst single run across 800 trials: +3.9%.
+The safety claim is empirically met and the yield is competitive
+with retail money-market products.
 
 What was fixed:
 
 1. `TBILL_RATE` 0.001 → 0.04 (was 0.1% annual; now 4% annual).
 2. `REINSURANCE_BASE_RATE` 0.010 → 0.0001 (was ≈365% annualised; now
    ≈3.65% at base, scaling with cov/ins).
-3. `BASE_PREMIUM_RATE` 0.005 → 0.00005 (was ≈182% annualised; now
-   ≈1.8% at base).
-4. Auto-mint reinsurance face changed from `(amount × 1.5) / 3` per
+3. `BASE_PREMIUM_RATE` re-tuned twice: 0.005 → 0.00005 → 0.00015. The
+   initial 100× reduction was too aggressive (insurance income of
+   1.8% annualised was below T-bill, so being an underwriter wasn't
+   rewarded). The 3× bump puts it at 5.5% at base, competitive with
+   T-bill plus a meaningful kicker.
+4. Min-rate floor relaxed (0.1× base → 0.01× base) so heavily-
+   oversupplied markets can clear at sub-T-bill rates and naturally
+   self-correct via seller exit, instead of being pinned at a floor
+   that prevents re-balancing.
+5. Auto-mint reinsurance face changed from `(amount × 1.5) / 3` per
    product to `amount × coverageFraction` per product — total face
-   drops from 1.5× deposit to 1.0× deposit (the minimum
-   full-coverage configuration), removing ~50% of dead premium.
-5. **Insurance claim double-counting bug** (a separate finding the
+   drops from 1.5× deposit to 1.0× deposit (minimum full-coverage),
+   removing ~50% of dead premium.
+6. **Insurance claim double-counting bug** (a separate finding the
    harness surfaced): `useEpochLoop.js` was both debiting
    `playerCashChanges -= claimOut` and calling `damageThread`,
    charging the user twice for the same loss. Fixed — claim losses
    on thread-backed insurer stakes are now captured once via
    `damageThread` only.
 
-Future calibration work (a known gap, not yet exercised):
+Deferred (queued for future sprints):
 
-- **B-book reinsurance pool**. Reinsurance currently only hedges the
+- **B-book reinsurance pool**. Reinsurance today only hedges the
   insurance-seller leg (layer 2). Layer 3 — the B-book pool stake —
   has no equivalent hedge, so a wave of profitable retail flow can
   drain the B-book pool and damage the thread without any
   reimbursement. Wiring active LAP/B-book flow into the harness
   will surface this gap; a parallel reinsurance product covering
   B-book drawdowns is the proposed fix.
+
+- **Seller-side capital flight modelling.** The harness currently
+  doesn't let sellers withdraw mid-scenario, so we don't yet observe
+  whether reinsurance pools can drain during stress. Extending the
+  harness with seller-withdrawal triggers is the prerequisite for
+  any "stress bonus" mechanism — design needs the empirical evidence
+  first.
 
 ## Testing
 

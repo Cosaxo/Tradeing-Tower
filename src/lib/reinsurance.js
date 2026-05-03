@@ -61,13 +61,21 @@ export const REINSURANCE_PRODUCTS = [
 // Constants
 // ---------------------------------------------------------------------------
 
-// Reinsurance is more expensive than primary insurance (it covers tail
-// risk). Base rate ≈ 2× primary base.
+// Reinsurance base rate. Calibrated in Sprint 4.5: previously
+// 0.010/tick (≈365% annualised) which made the auto-mint user's
+// reinsurance premium cost dominate every joint-outcome scenario.
+// Reduced 100× to 0.0001/tick (≈3.65% annualised at base).
 //
-// Calibrated in Sprint 4.5: previously 0.010/tick (≈365% annualised)
-// which made the auto-mint user's reinsurance premium cost dominate
-// every joint-outcome scenario. Reduced 100× — same per-tick unit,
-// same 2× ratio over BASE_PREMIUM_RATE.
+// Note on the relative pricing: this base is now LOWER than
+// BASE_PREMIUM_RATE (0.00015 after Sprint 4.5b). That looks
+// counter-intuitive ("reinsurance should be more expensive — it
+// covers tail risk") but it's correct for diversified buyers like
+// the auto-mint user. Reinsurance pools many uncorrelated insurance
+// risks; the diversification benefit accrues to the seller pool, so
+// the per-buyer rate is below the price of any single primary
+// insurance product. A concentrated buyer hedging only one event
+// would be priced higher via the cov/ins √ scaling, restoring the
+// "tail risk costs more" relationship for that user.
 export const REINSURANCE_BASE_RATE = 0.0001;
 export const REINSURANCE_LOCKUP_EPOCHS = 200;
 
@@ -234,11 +242,14 @@ export function calcReinsurancePremiumRate(product) {
   const ins = product.sellerCapital;
   const cov = product.totalCoverage;
   if (ins <= 0 || cov <= 0) return base;
-  // Same √(cov/ins) shape as insurance markets, just on a higher base.
+  // Same √(cov/ins) shape as insurance markets, just on a different
+  // base. Floor relaxed in Sprint 4.5b from 0.1× to 0.01× so heavily-
+  // oversupplied reinsurance markets can clear at sub-T-bill rates
+  // and self-correct via seller exit. MAX stays at 10× base.
   const ratio = cov / ins;
   const SENS = 0.5;
   const raw = base * Math.pow(ratio, SENS);
-  return Math.max(base * 0.1, Math.min(base * 10, raw));
+  return Math.max(base * 0.01, Math.min(base * 10, raw));
 }
 
 // ---------------------------------------------------------------------------

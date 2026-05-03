@@ -1,29 +1,90 @@
 # Trading Tower
 
-In-browser simulator for a closed financial protocol where **one dollar
-plays four roles at once**. The protocol's mint unit ("a thread") is the
-hyper-rehypothecated atom: principal, insurance-seller stake,
-B-book pool stake, and stablecoin (TT) face — all backed by the same
-$1 of margin. Damage to any role shrinks all four in lockstep; growth
-fattens layers 1–3 (TT face is intentionally non-elastic so a
-collateral buffer accumulates).
+**A retail-yield product built on a single idea: the same $1 should be
+allowed to earn from four uncorrelated sources at the same time.**
 
-The simulator is conservation-tested end-to-end: every cash flow has a
-named counterparty, the books balance globally, and `Math.random()`
-appears in exactly one module (the GBM price stepper).
+You deposit one dollar. Without ever moving it, that dollar simultaneously:
+
+1. **Earns T-bill yield** as principal.
+2. **Earns insurance premium income** as an insurance seller across
+   diversified event markets.
+3. **Earns B-book pool yield** as the counterparty to losing trader
+   flow (passive underwriter — you don't trade, you absorb).
+4. **Backs Tower Tether (TT)**, a stablecoin you can spend like cash.
+
+These four roles are wired together as a single object — a *thread* —
+so the dollar is never duplicated and the protocol's accounting books
+balance globally. Damage in any role shrinks all four in lockstep;
+growth fattens layers 1–3 and accumulates as a buffer. The safety
+property is **not** "each layer never loses money" — it is **"the
+joint outcome across all four layers is positive with very high
+probability under realistic stress."** The four sources are chosen
+specifically to be uncorrelated so the joint distribution is much
+tighter than any single layer.
 
 ```
 npm install
 npm run dev   # → http://localhost:5173
 ```
 
-## What the protocol actually is
+## Two ways to use it
 
-Three independent design ideas wired into one closed system:
+**Easy mode (default for new users)** — one button. *Convert $X → TT*.
+The protocol auto-runs all four layers in the safe-by-default
+configuration: even allocation across diversified markets, full
+reinsurance coverage, B-book pool stake, TT mint. You see one number:
+today's yield. Withdraw at any time.
 
-1. **The thread** (`lib/towerTether.js`) — a stablecoin (Tower Tether)
-   minted 1:1 against free margin. Each minted dollar simultaneously
-   holds:
+**Advanced mode** — every layer is exposed as a separate desk:
+allocation editor, reinsurance buyer/seller flows, paired-LAP auction
+clearing, B-book underwriter desk, classifier breakdown. For users who
+want to actively trade, configure their own allocations, or run the
+protocol manually.
+
+## The four-tier ladder
+
+Capital climbs the ladder. Each rung adds an uncorrelated yield source
+on top of the previous rungs. Higher rungs require evidence that the
+position is safe enough to qualify.
+
+| Tier | What it does | Gate to enter |
+| :--: | :-- | :-- |
+| **1** | T-bill principal — the dollar itself | none |
+| **2** | Insurance-seller stake across event markets | none |
+| **3** | LAP exposure (active trading) | ≥3 markets allocated; max 50% in any one; reinsurance bought |
+| **4** | TT mint (the dollar plays all four roles) | layer-3 role is **B-book stake**, not active LAP |
+
+Tier 4 enforces an important separation: a thread that has been minted
+into TT cannot also be an active-LAP. Active trading and TT-backing are
+**per-thread** mutually exclusive — capital you've minted is locked as
+B-book underwriter; capital you haven't minted is free to actively
+trade. This is what makes the joint-outcome safety claim defensible:
+the layer-3 role of a TT thread is a passive yield source, not a
+directional bet.
+
+## The trading venue (secondary value prop)
+
+Because the auction uses a **geodesic** ideal leverage distribution
+with **entropy-weighted tips**, taking the unpopular side of the book
+is rewarded:
+
+- **No commissions, no spread.** The auction matches bids directly.
+- **Minority-side rebate.** When the book is tilted long, the entropy
+  multiplier pays shorts a tip premium proportional to KL divergence
+  from the ideal distribution. Same in reverse. Effectively negative
+  cost of leverage on the unpopular side.
+- **Fast, deterministic clearing.** Each medium tick closes one
+  auction with a single match-and-fill pass.
+- **Transparent A/B classifier.** Every user sees their own score and
+  whether they're being routed peer-to-peer (A) or against the B-book
+  pool (B). No hidden conflict of interest.
+
+## Under the hood
+
+Three design ideas wired into one conservation-tested system:
+
+1. **The thread** (`lib/towerTether.js`) — a stablecoin minted 1:1
+   against free margin. Each minted dollar simultaneously holds:
    - **Layer 1** — T-bill principal (the dollar itself).
    - **Layer 2** — insurance-seller stakes spread across reinsurance-
      covered event markets (`insuranceWeights[eventId]`, ∑ ≈ 1).
@@ -52,6 +113,10 @@ Three independent design ideas wired into one closed system:
    minimises Σ |L_long − L_short|), continuous fill at min(longMax,
    shortMax). Skew/kurtosis from the live book apply a Cornish-Fisher
    2nd-order correction to the ideal density.
+
+The simulator is conservation-tested end-to-end: every cash flow has a
+named counterparty, the books balance globally, and `Math.random()`
+appears in exactly one module (the GBM price stepper).
 
 ## Architecture
 

@@ -76,6 +76,7 @@ import { NotificationHistory } from "./components/NotificationHistory.jsx";
 import { Tutorial } from "./components/Tutorial.jsx";
 import { FeeFlow } from "./components/FeeFlow.jsx";
 import { RoleLedger } from "./components/RoleLedger.jsx";
+import { EasyMode } from "./components/EasyMode.jsx";
 
 // Generate a stable id for pool-funded LAPs so position close routes
 // the linkage record correctly. (The pre-Phase-5 makeLapId helper lived
@@ -138,6 +139,11 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [speed, setSpeed] = usePersistentState("tt.speed", 1);
   const [activeTab, setActiveTab] = useState("Chart");
+  // Easy mode is the default for new users — single screen with one
+  // "Convert $ → TT" button, the four-tier ladder, and a yield number.
+  // Power users can switch to advanced (the multi-tab desk view) at
+  // any time via the header toggle.
+  const [easyMode, setEasyMode] = usePersistentState("tt.easyMode", true);
   const [mobileNav, setMobileNav] = useState(null); // 'left' | 'right' | null
   const [shockResults, setShockResults] = useState(null);
   const [openPositions, setOpenPositions, clearPositions] = usePersistentState("tt.positions", []);
@@ -264,6 +270,34 @@ export default function App() {
         deployedCredit: deployedPoolCredit,
       }),
     [insuranceState.markets, player.id, deployedPoolCredit]
+  );
+
+  // Derived state for Easy Mode and the tier-ladder gate evaluator.
+  // - ttBalance:   live TT in the player's wallet (layer-4 face)
+  // - ttPrincipal: dollars committed across the player's open threads
+  //                (used to detect "currently exercising tier 4")
+  // - hasOpenLap:  any non-bbook position open (tier 3 active)
+  // - hasReinsurance: player has bought reinsurance face on any product
+  // - freeMarginAmount: untagged margin available for new role assignments
+  const ttBalance = ttState?.balances?.[player.id] ?? 0;
+  const ttPrincipal = useMemo(
+    () => totalThreadPrincipal(ttState, player.id),
+    [ttState, player.id]
+  );
+  const hasOpenLap = useMemo(
+    () => openPositions.some((p) => p?.type !== "bbook"),
+    [openPositions]
+  );
+  const hasReinsurance = useMemo(
+    () =>
+      (insuranceState?.reinsurance ?? []).some(
+        (p) => (p.coverage?.[player.id] ?? 0) > 0
+      ),
+    [insuranceState, player.id]
+  );
+  const freeMarginAmount = useMemo(
+    () => freeMargin(player.margin, player.tags),
+    [player.margin, player.tags]
   );
 
   // pairKey → { activeRentals, rentalOffers } slice for the rental UI.
@@ -1086,6 +1120,22 @@ export default function App() {
           />
         </div>
         <div className="ml-auto flex items-center gap-3">
+          <button
+            onClick={() => setEasyMode((m) => !m)}
+            className={cx(
+              "text-xs font-mono px-2 py-1 rounded border transition-colors",
+              easyMode
+                ? "border-emerald-700 bg-emerald-950 text-emerald-300 hover:bg-emerald-900"
+                : "border-indigo-700 bg-indigo-950 text-indigo-300 hover:bg-indigo-900"
+            )}
+            title={
+              easyMode
+                ? "Switch to advanced mode — every desk exposed"
+                : "Switch to easy mode — one yield number, one button"
+            }
+          >
+            {easyMode ? "easy" : "advanced"}
+          </button>
           <SpeedControl speed={speed} onSpeed={setSpeed} />
           <button
             onClick={() => setRunning((r) => !r)}
@@ -1167,6 +1217,24 @@ export default function App() {
 
         {/* Center: main view */}
         <main className="flex-1 flex flex-col overflow-hidden">
+          {easyMode ? (
+            <div className="flex-1 overflow-y-auto p-4 max-w-3xl mx-auto w-full">
+              <EasyMode
+                player={player}
+                freeMarginAmount={freeMarginAmount}
+                ttBalance={ttBalance}
+                ttPrincipal={ttPrincipal}
+                allocStats={allocStats}
+                hasReinsurance={hasReinsurance}
+                hasOpenLap={hasOpenLap}
+                equityHistory={equityHistory}
+                onConvertToTT={(amount) => handleMintTT(amount)}
+                onRedeem={(amount) => handleRedeem(amount, false)}
+                onJumpToAdvanced={() => setEasyMode(false)}
+              />
+            </div>
+          ) : (
+          <>
           <div className="flex gap-1 px-3 py-1 border-b border-gray-800 flex-wrap">
             {TABS.map((t) => {
               const isActive = activeTab === t;
@@ -1388,6 +1456,8 @@ export default function App() {
               </div>
             )}
           </div>
+          </>
+          )}
         </main>
 
         {/* Right: player panel (desktop) */}

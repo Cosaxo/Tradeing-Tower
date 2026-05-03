@@ -57,7 +57,7 @@ export const POOL_LTV_BREADTH_TARGET = 8;
 export function calcReinsuranceCoverageRatio({ totalInsurerExposure, reinsurance, userId }) {
   if (totalInsurerExposure <= 1e-9) return 0;
   const totalCovered = (reinsurance ?? []).reduce(
-    (s, p) => s + (p.coverage?.[userId] ?? 0) * (p.coverageFraction ?? 0),
+    (s, p) => s + (p.buyerCoverage?.[userId] ?? 0) * (p.coverageFraction ?? 0),
     0
   );
   return Math.max(0, Math.min(1, totalCovered / totalInsurerExposure));
@@ -296,7 +296,7 @@ export function evaluateTier3Gate({ markets, reinsurance = [], userId }) {
   }
 
   const totalReinsuranceFace = (reinsurance ?? []).reduce(
-    (s, p) => s + (p.coverage?.[userId] ?? 0),
+    (s, p) => s + (p.buyerCoverage?.[userId] ?? 0),
     0
   );
   if (totalReinsuranceFace <= 0) {

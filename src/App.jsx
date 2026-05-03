@@ -63,6 +63,7 @@ import { PlayerPanel } from "./components/PlayerPanel.jsx";
 import { PortfolioStructurer } from "./components/PortfolioStructurer.jsx";
 import { CreditDesk } from "./components/CreditDesk.jsx";
 import { StressPanel } from "./components/StressPanel.jsx";
+import { StressHarnessPanel } from "./components/StressHarnessPanel.jsx";
 import { LogicView } from "./components/LogicView.jsx";
 import { MetricsPanel } from "./components/MetricsPanel.jsx";
 import { PeersPanel } from "./components/PeersPanel.jsx";
@@ -368,7 +369,7 @@ export default function App() {
   const hasReinsurance = useMemo(
     () =>
       (insuranceState?.reinsurance ?? []).some(
-        (p) => (p.coverage?.[player.id] ?? 0) > 0
+        (p) => (p.buyerCoverage?.[player.id] ?? 0) > 0
       ),
     [insuranceState, player.id]
   );
@@ -1533,11 +1534,14 @@ export default function App() {
             )}
 
             {activeTab === "Stress" && (
-              <StressPanel
-                solvency={solvency}
-                shockResults={shockResults}
-                onRunShock={handleRunShock}
-              />
+              <>
+                <StressPanel
+                  solvency={solvency}
+                  shockResults={shockResults}
+                  onRunShock={handleRunShock}
+                />
+                <StressHarnessPanel />
+              </>
             )}
 
             {activeTab === "Markets" && (

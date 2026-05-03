@@ -303,6 +303,55 @@ path:
 7. **Pure lib, hooks isolated.** Every lib module is a pure function of
    its inputs. React lives only in `src/hooks/` and `src/components/`.
 
+## Stress harness — empirical safety evidence
+
+The protocol's safety claim is **"each user's joint outcome across
+all four layers is positive with very high probability under
+realistic stress."** That claim is empirically testable;
+`lib/stressHarness.js` is the test.
+
+```
+npm run stress                          # all scenarios, n=200
+npm run stress -- --n 1000              # 1000 runs per scenario
+npm run stress -- --scenario CALM       # one scenario only
+```
+
+Or open the **Stress** tab in the running app — the same harness
+runs in-browser and renders the joint-outcome distribution per
+scenario.
+
+Each session simulates a user who deposits $X, runs the easy-mode
+auto-mint flow (allocate insurer stakes, buy 1.5× face reinsurance,
+deposit principal as B-book stake, mint TT 1:1), then runs through
+200 medium epochs of a stress scenario. Joint outcome = (final cash
+margin + redeemable thread principal) − initial deposit. The
+harness aggregates `P(joint outcome ≥ 0)` and the percentile
+distribution across N seeded runs.
+
+### Scenarios
+
+| ID | Description |
+| -- | -- |
+| `CALM` | No event triggers, no redemption pressure. Tests baseline yield. |
+| `SINGLE_EVENT` | One major event has ~30% trigger probability. Tests reinsurance recovery. |
+| `CORRELATED_CRISIS` | Multiple correlated events (BTC + ETH + SPX + vol spike). Tests joint-stress survival. |
+| `REDEMPTION_PRESSURE` | User redeems 25% of TT each cycle. Tests staged redemption mechanics. |
+
+### Findings (default protocol calibration)
+
+The harness has surfaced two structural calibration issues:
+
+1. **`REINSURANCE_BASE_RATE = 0.010`** is per medium tick (≈ 365%
+   annualised). Reinsurance premium cost dominates every scenario,
+   driving joint outcome negative even in CALM where no events fire.
+2. **`TBILL_RATE = 0.001`** is annualised (≈ 0.1% per year), so
+   layer 1's contribution is negligible. The protocol's safety
+   claim depends on layer 1 being a meaningful positive yield.
+
+These are tuning targets for a future sprint — the harness's value
+is producing this empirical evidence so the calibration question is
+concrete rather than aspirational.
+
 ## Testing
 
 ```

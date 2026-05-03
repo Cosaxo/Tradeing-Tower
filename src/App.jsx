@@ -10,7 +10,7 @@ import { usePersistentState } from "./hooks/usePersistentState.js";
 import { calcPairCreditEligibility } from "./lib/credit.js";
 import { calcSystemSolvencyBuffer, propagateShock, applyShockToPositions } from "./lib/stress.js";
 import { calcYieldRouterSuggestions } from "./lib/yieldRouter.js";
-import { calcAllocationLtv, calcAvailableCredit } from "./lib/ltv.js";
+import { calcAllocationLtv, calcAvailableCredit, evaluateTier3Gate } from "./lib/ltv.js";
 import {
   setUserAllocation,
   applyAllocations,
@@ -258,18 +258,52 @@ export default function App() {
     );
   }, [openPositions, player.id]);
 
+  // Cross-pair correlation map from the active pair's slow-tick recompute.
+  // Used by the LTV independence term and by the stress propagation panel.
+  const activePairCorrMap = useMemo(
+    () => pairStates[player.activePair]?.correlationMap ?? {},
+    [pairStates, player.activePair]
+  );
+
   const poolLtvInfo = useMemo(
-    () => calcAllocationLtv({ markets: insuranceState.markets, userId: player.id }),
-    [insuranceState.markets, player.id]
+    () =>
+      calcAllocationLtv({
+        markets: insuranceState.markets,
+        userId: player.id,
+        reinsurance: insuranceState.reinsurance ?? [],
+        correlationMap: activePairCorrMap,
+      }),
+    [insuranceState.markets, insuranceState.reinsurance, player.id, activePairCorrMap]
   );
   const availablePoolCredit = useMemo(
     () =>
       calcAvailableCredit({
         markets: insuranceState.markets,
         userId: player.id,
+        reinsurance: insuranceState.reinsurance ?? [],
+        correlationMap: activePairCorrMap,
         deployedCredit: deployedPoolCredit,
       }),
-    [insuranceState.markets, player.id, deployedPoolCredit]
+    [
+      insuranceState.markets,
+      insuranceState.reinsurance,
+      player.id,
+      activePairCorrMap,
+      deployedPoolCredit,
+    ]
+  );
+
+  // Tier-3 gate state — pure read of allocations + reinsurance. The
+  // gate is enforced at handleOpenPosition; the UI also reads it via
+  // tier3Gate.missing to surface the "you can't open this yet" reason.
+  const tier3Gate = useMemo(
+    () =>
+      evaluateTier3Gate({
+        markets: insuranceState.markets,
+        reinsurance: insuranceState.reinsurance ?? [],
+        userId: player.id,
+      }),
+    [insuranceState.markets, insuranceState.reinsurance, player.id]
   );
 
   // Derived state for Easy Mode and the tier-ladder gate evaluator.
@@ -616,6 +650,20 @@ export default function App() {
   function handleOpenPosition(opts = {}) {
     const { usePoolCredit = false, paired = false } = opts;
     const priceNow = activePS?.prices?.slice(-1)[0] ?? 1;
+
+    // Tier-2 → Tier-3 hard gate. Active LAP exposure requires the user
+    // to have diversified across ≥3 markets, kept any single market
+    // ≤50% of stake, and bought at least some reinsurance coverage.
+    // Pool-credit and paired LAPs are still LAP-class exposure and go
+    // through the same gate — the protocol-level invariant is "no
+    // tier-3 entry without diversification + reinsurance".
+    if (!tier3Gate.open) {
+      addToast(
+        `Tier 3 (LAP / active trade) locked — ${tier3Gate.missing.join(" · ")}`,
+        "warning"
+      );
+      return;
+    }
 
     // For paired LAPs, the user funds BOTH legs — `requiredCapital` is
     // 2× the displayed size. We size the long-leg at the same default
@@ -1377,7 +1425,7 @@ export default function App() {
 
             {activeTab === "Credit" && (
               <>
-                <CreditDesk poolLtv={poolLtvInfo} />
+                <CreditDesk poolLtv={poolLtvInfo} tier3Gate={tier3Gate} />
                 <PortfolioStructurer
                   openPositions={openPositions}
                   creditEligibility={creditEligibility}

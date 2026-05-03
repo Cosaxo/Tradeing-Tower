@@ -1,8 +1,11 @@
-// LTV Desk — replaces the previous performance-gates Credit Desk.
+// LTV Desk — derived from the user's allocation across insurance
+// markets, the reinsurance coverage they've bought, and how
+// independent (uncorrelated) the underlying events are.
 //
-// Phase 5: LTV is now derived from the user's allocation across
-// insurance markets (not from their LAP portfolio). The breakdown
-// terms map onto the new components: concentration, diversity, breadth.
+// Sprint 2: LTV → 1.0 only when reinsurance covers enough of each
+// position AND positions are independent enough. Pure diversification
+// alone caps below the ceiling — the user has to actually buy the
+// hedge and choose uncorrelated exposures.
 import { HelpHint } from "./Tooltip.jsx";
 import {
   POOL_LTV_FLOOR,
@@ -13,6 +16,8 @@ const COMPONENTS = [
   { label: "Concentration (1 − HHI)", key: "concentration" },
   { label: "Diversity (Shannon)", key: "diversity" },
   { label: "Breadth (markets covered)", key: "breadth" },
+  { label: "Reinsurance coverage", key: "reinsuranceCoverage" },
+  { label: "Independence (1 − avg ρ)", key: "independence" },
 ];
 
 function ltvColor(ltv) {
@@ -21,20 +26,44 @@ function ltvColor(ltv) {
   return "#f87171";                   // red
 }
 
-export function CreditDesk({ poolLtv }) {
+export function CreditDesk({ poolLtv, tier3Gate = null }) {
   if (!poolLtv) return null;
 
   const { ltv, breakdown, stats } = poolLtv;
   const c = ltvColor(ltv);
+  const gateOpen = tier3Gate?.open ?? false;
+  const gateMissing = tier3Gate?.missing ?? [];
 
   return (
     <div className="flex flex-col gap-3 p-3 rounded border border-gray-700 bg-gray-900">
+      {/* Tier-3 gate banner. Sits at the top so users opening positions
+          see the requirement before they hunt for the LTV breakdown. */}
+      <div
+        className={`rounded border px-3 py-2 flex items-start gap-2 ${
+          gateOpen
+            ? "border-emerald-800 bg-emerald-950/40"
+            : "border-amber-800 bg-amber-950/30"
+        }`}
+      >
+        <span
+          className={`text-xs font-mono font-bold ${
+            gateOpen ? "text-emerald-300" : "text-amber-300"
+          }`}
+        >
+          {gateOpen ? "Tier 3 unlocked" : "Tier 3 locked"}
+        </span>
+        <span className="text-[10px] font-mono text-gray-400 leading-tight flex-1">
+          {gateOpen
+            ? "Active LAP exposure available — your allocations meet the diversification + reinsurance requirement."
+            : `To unlock active trading: ${gateMissing.join(" · ")}`}
+        </span>
+      </div>
       <div className="flex items-center justify-between">
         <span className="text-xs font-mono text-gray-300 flex items-center">
           LTV Desk
           <HelpHint
-            width={300}
-            text={`Allocation LTV — the fraction of your insurance-market stake you can extract as pool-backed credit. Floor ${POOL_LTV_FLOOR.toFixed(2)} (untested or single concentrated allocation), ceiling ${POOL_LTV_CEILING.toFixed(2)} (broadly diversified across many distinct event markets). Three additive terms: concentration (1−HHI on stake share), Shannon diversity, breadth (markets touched / total registry), minus a max-weight penalty if any single market > 50%.`}
+            width={320}
+            text={`Allocation LTV — the fraction of your insurance-market stake you can extract as pool-backed credit. Floor ${POOL_LTV_FLOOR.toFixed(2)}, ceiling ${POOL_LTV_CEILING.toFixed(2)}. Five additive terms: concentration (1−HHI), Shannon diversity, breadth (markets touched), reinsurance coverage (face × coverageFraction / exposure), independence (1 − weighted average pairwise |ρ| across allocations). Minus a max-weight penalty if any single market > 50%. Reinsurance + independence dominate the rise toward the ceiling — pure diversification alone caps below.`}
           />
         </span>
         <span
@@ -99,10 +128,26 @@ export function CreditDesk({ poolLtv }) {
         </div>
       </div>
 
+      <div className="flex items-center gap-3 text-[10px] font-mono text-gray-400 pt-1 border-t border-gray-800">
+        <span>
+          coverage{" "}
+          <span className="text-emerald-300">
+            {((stats.coverageRatio ?? 0) * 100).toFixed(0)}%
+          </span>
+        </span>
+        <span>
+          independence{" "}
+          <span className="text-sky-300">
+            {((stats.independenceScore ?? 0) * 100).toFixed(0)}%
+          </span>
+        </span>
+      </div>
+
       <div className="text-[10px] font-mono text-gray-500">
-        Higher LTV → more pool credit available. Add asset classes, hedge with
-        gold or volatility, keep leverage well below ESMA caps, and avoid one
-        position dominating &gt; 50% of the book.
+        Higher LTV → more pool credit available. Spread across distinct
+        underlying pairs (boosts independence), buy reinsurance to cover
+        your insurer-side stake, and avoid any single market dominating
+        &gt; 50% of your book.
       </div>
     </div>
   );

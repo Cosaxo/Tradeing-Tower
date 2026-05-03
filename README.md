@@ -51,8 +51,16 @@ position is safe enough to qualify.
 | :--: | :-- | :-- |
 | **1** | T-bill principal — the dollar itself | none |
 | **2** | Insurance-seller stake across event markets | none |
-| **3** | LAP exposure (active trading) | ≥3 markets allocated; max 50% in any one; reinsurance bought |
-| **4** | TT mint (the dollar plays all four roles) | layer-3 role is **B-book stake**, not active LAP |
+| **3** | LAP exposure (active trading) | ≥3 markets allocated; max 50% any single; reinsurance bought (enforced by `evaluateTier3Gate` at LAP open) |
+| **4** | TT mint (the dollar plays all four roles) | layer-3 role of the thread is **B-book stake**, not active LAP — capital you've minted is locked as passive underwriter; capital you haven't minted is free to actively trade |
+
+**LTV** (`lib/ltv.js`) tracks the user's progress toward the ceiling
+through five additive terms — concentration, diversity, breadth,
+reinsurance coverage, and correlation independence — minus a
+max-weight penalty if any single market dominates. Pure diversification
+caps below the ceiling; LTV → 1.0 only when the user *also* buys
+reinsurance covering enough of their insurer-side exposure AND the
+allocations span uncorrelated underlyings.
 
 Tier 4 enforces an important separation: a thread that has been minted
 into TT cannot also be an active-LAP. Active trading and TT-backing are

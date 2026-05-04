@@ -30,6 +30,101 @@ npm run dev   # → http://localhost:5173
 **Looking for the deeper design rationale, math, and forward-looking
 extensions?** See [`WHITEPAPER.md`](./WHITEPAPER.md).
 
+## What Trading Tower replaces
+
+Not a yield protocol. Not a stablecoin. Not a trading venue. *All
+three at once*, in a single product that targets the entire retail
+consumer-finance stack.
+
+### As an investment object
+
+Trading Tower delivers ~**8.5% annualised yield with empirically
+bounded downside** (worst single run across 800 stress simulations:
+−4%). That risk-adjusted profile beats:
+
+| Product | Annualised | Worst case | Spendable? |
+| :-- | --: | --: | :-: |
+| HYSA / T-bill | ~4% | ~0% | no |
+| S&P 500 index fund | ~7% real | −30 to −50% | no |
+| Yearn yvUSDC | ~5% | varies | no |
+| Ethena USDe / sUSDe | ~10% | varies | partially |
+| **Trading Tower** | **~8.5%** | **−4%** (empirical) | **yes** |
+
+For most retail investors who can't psychologically tolerate the
+30–50% drawdowns of equity index funds, Trading Tower's
+empirically-bounded outcome is genuinely better than what an index
+fund delivers in *practice*.
+
+### As a trading platform
+
+The LAP auction is structurally cheaper than every existing retail
+broker:
+
+| Venue | Round-trip cost ($10k notional) |
+| :-- | --: |
+| Plus500 / IG (CFD) | $5–15 + hidden spread |
+| Robinhood | ~$3 (hidden PFOF) |
+| Interactive Brokers | $1–5 |
+| dYdX, Hyperliquid | $3.5–5 |
+| **Trading Tower (popular side)** | **$0** |
+| **Trading Tower (unpopular side)** | **−$10 to −$50 (rebate)** |
+
+The protocol *pays you* to take the under-supplied side of the book
+via the entropy-weighted minority-side rebate. And the A/B
+classifier replaces the CFD industry's hidden conflict-of-interest
+with a transparent, opt-in, compensated marketplace.
+
+### As a stablecoin (and why it may avoid stablecoin regulation)
+
+TT is the protocol's stablecoin-shaped token: 1 TT redeemable for
+$1, freely transferable, spendable like cash. But its **issuance
+structure differs materially from USDC / USDT**:
+
+- **No central issuer.** The smart contract emits TT; no legal
+  entity is the "issuer" in a regulatory sense.
+- **Per-user collateral, not pooled reserves.** Each TT face is
+  backed by *that specific user's* thread principal. There is no
+  shared reserve a central party manages — the protocol cannot
+  become insolvent the way a fractional-reserve issuer can.
+- **T-bill backing**, structurally safer than crypto-collateralised
+  stablecoins like DAI.
+- **Permissionless redemption** enforced by smart contract.
+
+Under the EU's **MiCA** framework, TT may not qualify as either an
+e-money token (single-fiat backing + authorised issuer required) or
+an asset-referenced token (basket of assets maintained by an
+issuer). It plausibly falls outside both categories. Under proposed
+US frameworks (STABLE, Lummis-Gillibrand), the focus is on
+"payment stablecoins" with central issuers — which TT lacks
+entirely.
+
+We do not claim TT is *exempt* from stablecoin regulation. We argue
+that TT has **structurally stronger arguments for being outside
+stablecoin frameworks** than DAI does, because TT combines
+DAI-style decentralised issuance with USDC-quality collateral and
+per-user reserve identifiability. A formal legal opinion is the
+right next step before launching; the structural case is credible.
+
+If the legal analysis confirms this view, TT becomes **a
+yield-bearing spendable token without stablecoin regulation
+overhead** — a position no centralised stablecoin can occupy.
+
+### Combined market positioning
+
+Each use case maps onto a separate $1B+ retail market:
+
+| Replaces | US market size | Trading Tower advantage |
+| :-- | --: | :-- |
+| Checking accounts | $1.5T+ deposits | 8.5% yield on what's normally 0% |
+| Savings accounts | $7T+ savings | 8.5% beats HYSA 4% |
+| Brokerage trading | $40B+ commission revenue | Zero commissions + rebates for unpopular sides |
+| Conservative bond allocation | $5T+ bond funds | 8.5% with bounded downside vs ~4% with rate risk |
+
+Even capturing 0.1% of the combined market is $30B+ TVL. The
+product's defensibility comes from the integration — no competitor
+combines high yield + bounded downside + spendability + transparent
+trading venue + per-user collateral structure in one product.
+
 ## Two ways to use it
 
 **Easy mode (default for new users)** — one button. *Convert $X → TT*.

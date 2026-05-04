@@ -44,7 +44,7 @@
 //      Plus per-layer P&L decomposition (T-bill, premium income,
 //      claim losses, reinsurance payouts) for diagnostics.
 
-import { TBILL_RATE, REDEMPTION_EVERY } from "../constants/system.js";
+import { TBILL_RATE, REDEMPTION_EVERY, INSURANCE_STRIDE } from "../constants/system.js";
 import { STANDARD_EVENTS } from "./insuranceEvents.js";
 import {
   makeInsuranceMarket,
@@ -294,6 +294,20 @@ function simulateTick({
   const buyerLossesByUser = {};
   const tickClaimLosses = [];
 
+  // Epoch-separation invariant (Tier 1.0): the entire insurance path
+  // — market settlement, reinsurance settlement, and insurance-driven
+  // thread damage — runs only every INSURANCE_STRIDE medium ticks.
+  // LAP / B-book damage paths (when wired in Tier 1.1) run on the
+  // OFF-stride. This guarantees insurance damage and LAP damage
+  // never coincide on the same thread principal in the same tick.
+  const isInsuranceTick = tickIndex % INSURANCE_STRIDE === 0;
+  if (!isInsuranceTick) {
+    // Skip insurance settlement this tick. T-bill yield, redemption
+    // cycles, and (future) LAP-side damage still run below.
+    markets = state.markets;
+    reinsurance = state.reinsurance;
+  } else {
+
   // Settle each insurance market.
   for (let i = 0; i < markets.length; i++) {
     const m = markets[i];
@@ -410,6 +424,7 @@ function simulateTick({
       }
     }
   }
+  } // end isInsuranceTick block
 
   // T-bill yield on user's cash margin (matches the loop's per-tick
   // application).

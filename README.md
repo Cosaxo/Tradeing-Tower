@@ -146,14 +146,23 @@ appears in exactly one module (the GBM price stepper).
 
 ## Architecture
 
-### Epoch loop — three strides + a redemption stride
+### Epoch loop — strides + the epoch-separation invariant
 
 | Stride     | Cadence                       | Responsibility                                                         |
 | ---------- | ----------------------------- | ---------------------------------------------------------------------- |
 | Fast       | `FAST_MS` (~1 s)              | price advance + realised-σ update                                      |
-| Medium     | `MEDIUM_MS` (~6 s)            | order-flow ingest, auction, pool settle, rentals, insurance + reinsurance |
+| Medium     | `MEDIUM_MS` (~6 s)            | order-flow ingest, auction, pool settle, rentals, T-bill yield         |
+| **Insurance** | **every `INSURANCE_STRIDE` mediums** | **insurance + reinsurance settlement, insurance-driven thread damage** |
+| LAP / B-book damage | OFF-stride (every other medium tick) | LAP / B-book damage paths (wired in Tier 1.1) |
 | Slow       | every `SLOW_EVERY` mediums    | regime detection, cross-pair correlation                               |
 | Redemption | every `REDEMPTION_EVERY` mediums (~monthly in sim-days; coprime with slow) | TT redemption queue drain + thread unwinds + solvency recheck |
+
+**Epoch-separation invariant** (Tier 1.0): insurance settlement and
+LAP / B-book settlement run on coprime strides — they never coincide
+on the same medium tick. This guarantees one thread principal cannot
+be debited by two damage sources in the same tick. The doc-block in
+`towerTether.js` documents the invariant; `useEpochLoop.js` enforces
+it structurally via the `INSURANCE_STRIDE` constant.
 
 Speed control (½× / 1× / 2× / 5×) scales fast and medium intervals
 proportionally. The medium tick uses a strict pure-compute → side-effect

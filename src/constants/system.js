@@ -8,6 +8,20 @@
 // flagged the calibration error.
 export const TBILL_RATE = 0.04;
 
+// Epoch-separation invariant (Tier 1.0).
+//
+// Insurance settlement (markets, reinsurance, insurance-driven
+// thread damage) runs every INSURANCE_STRIDE medium ticks. LAP /
+// B-book settlement (when active-flow path is wired in Tier 1.1)
+// runs on the OFF-stride. They never coincide, so a single thread
+// principal cannot be debited by two damage paths in the same tick.
+//
+// Set to 2 (even ticks). Insurance rates (BASE_PREMIUM_RATE and
+// REINSURANCE_BASE_RATE) are doubled in this sprint to compensate
+// for the halved settlement frequency, keeping annualised yield
+// constant.
+export const INSURANCE_STRIDE = 2;
+
 // Grace window after a user edit before the new config is picked up by the auction.
 export const GRACE_MS = 800;
 

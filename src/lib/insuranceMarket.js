@@ -24,30 +24,25 @@
 // Constants
 // ---------------------------------------------------------------------------
 
-// Base premium rate per medium tick when insurer ≈ insured. Sensitivity
-// controls how aggressively imbalance shifts the rate.
+// Base premium rate PER INSURANCE SETTLEMENT (every INSURANCE_STRIDE
+// medium ticks, currently 2). Sensitivity controls how aggressively
+// imbalance shifts the rate.
 //
-// Sprint 4.5: 0.005/tick → 0.00005/tick (×100 reduction) so per-tick
-// rates correspond to realistic per-year rates instead of 182%
-// annualised.
+// Tier 1.0 (epoch-separation): insurance settles every other medium
+// tick now, so each settlement is for a 2-tick period. Base rate
+// doubled from 0.00015 (per-tick) to 0.0003 (per-settlement) to keep
+// annualised yield constant — total premium income per year is
+// unchanged, just collected in fewer larger chunks.
 //
-// Sprint 4.5b: 0.00005 → 0.00015 (×3 bump). At the previous rate the
-// user's net insurance income was 1.8% annualised, below T-bill —
-// being an underwriter wasn't rewarded vs. just holding cash. Bumped
-// to 5.5% annualised at base, which sits competitively above T-bill
-// and reflects realistic insurance underwriting yields.
-//
-// Sprint 4.5b also relaxed the MIN floor from 0.1× base to 0.01× base.
-// The previous floor pinned the rate at 0.55% annualised in heavily
-// oversupplied markets, *below T-bill*, which actively prevented
-// markets from self-correcting (sellers couldn't be incentivised to
-// leave even when oversupplied). The new floor is 0.055% annualised —
-// effectively zero — so excess supply naturally drives sellers out
-// until cov/ins re-balances. The MAX cap stays at 10× base.
-export const BASE_PREMIUM_RATE = 0.00015;
+// Sprint 4.5b: BASE was bumped from 0.00005/tick to 0.00015/tick to
+// put insurance underwriting yield (5.5% annualised at balance)
+// competitively above T-bill (4%), and the MIN floor was relaxed to
+// 0.01× base so heavily oversupplied markets can self-correct via
+// natural seller exit. MAX stays at 10× base.
+export const BASE_PREMIUM_RATE = 0.0003;
 export const PREMIUM_SENSITIVITY = 0.5;
-export const MIN_PREMIUM_RATE = 0.0000015;
-export const MAX_PREMIUM_RATE = 0.0015;
+export const MIN_PREMIUM_RATE = 0.000003;
+export const MAX_PREMIUM_RATE = 0.003;
 
 // ---------------------------------------------------------------------------
 // IDs

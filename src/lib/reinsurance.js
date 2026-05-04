@@ -61,22 +61,29 @@ export const REINSURANCE_PRODUCTS = [
 // Constants
 // ---------------------------------------------------------------------------
 
-// Reinsurance base rate. Calibrated in Sprint 4.5: previously
-// 0.010/tick (≈365% annualised) which made the auto-mint user's
-// reinsurance premium cost dominate every joint-outcome scenario.
-// Reduced 100× to 0.0001/tick (≈3.65% annualised at base).
+// Reinsurance base rate PER INSURANCE SETTLEMENT (every
+// INSURANCE_STRIDE medium ticks, currently 2). Same stride as
+// primary insurance — they settle together to maintain the
+// epoch-separation invariant.
 //
-// Note on the relative pricing: this base is now LOWER than
-// BASE_PREMIUM_RATE (0.00015 after Sprint 4.5b). That looks
-// counter-intuitive ("reinsurance should be more expensive — it
-// covers tail risk") but it's correct for diversified buyers like
-// the auto-mint user. Reinsurance pools many uncorrelated insurance
-// risks; the diversification benefit accrues to the seller pool, so
-// the per-buyer rate is below the price of any single primary
-// insurance product. A concentrated buyer hedging only one event
-// would be priced higher via the cov/ins √ scaling, restoring the
-// "tail risk costs more" relationship for that user.
-export const REINSURANCE_BASE_RATE = 0.0001;
+// Tier 1.0: doubled from 0.0001 (per-tick) to 0.0002 (per-settlement)
+// to keep annualised cost constant when settlement frequency halved.
+//
+// Sprint 4.5: previously 0.010/tick (≈365% annualised) which made
+// the auto-mint user's reinsurance premium cost dominate every
+// joint-outcome scenario. Reduced 100× to 0.0001/tick.
+//
+// Note on the relative pricing: this base is LOWER than
+// BASE_PREMIUM_RATE. That looks counter-intuitive ("reinsurance
+// should be more expensive — it covers tail risk") but it's correct
+// for diversified buyers like the auto-mint user. Reinsurance pools
+// many uncorrelated insurance risks; the diversification benefit
+// accrues to the seller pool, so the per-buyer rate is below the
+// price of any single primary insurance product. A concentrated
+// buyer hedging only one event would be priced higher via the
+// cov/ins √ scaling, restoring the "tail risk costs more"
+// relationship for that user.
+export const REINSURANCE_BASE_RATE = 0.0002;
 export const REINSURANCE_LOCKUP_EPOCHS = 200;
 
 // ---------------------------------------------------------------------------

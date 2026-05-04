@@ -5,7 +5,7 @@
 //  Slow   (every SLOW_EVERY medium ticks): analytics, insurance pool, regime, correlation
 
 import { useEffect, useRef, useCallback } from "react";
-import { FAST_MS, MEDIUM_MS, SLOW_EVERY, REDEMPTION_EVERY, GRACE_MS, SOFT_CLOSE_PCT } from "../constants/system.js";
+import { FAST_MS, MEDIUM_MS, SLOW_EVERY, REDEMPTION_EVERY, INSURANCE_STRIDE, GRACE_MS, SOFT_CLOSE_PCT } from "../constants/system.js";
 import { priceStep } from "../lib/priceModels.js";
 import { calcRealizedSigma, calcRatioBeta as calcRatioBetaStat, ratioEffectiveSigma } from "../lib/math.js";
 import { detectRegime } from "../lib/regime.js";
@@ -525,8 +525,18 @@ export function useEpochLoop({
       // All cash flows (premium in/out, claim in/out, reinsurance
       // payouts/seller losses) are aggregated on a per-user basis and
       // applied to the local player's margin at the end.
+      //
+      // EPOCH-SEPARATION INVARIANT (Tier 1.0): the entire insurance
+      // path — market settlement, reinsurance settlement, and
+      // insurance-driven thread damage — runs only every
+      // INSURANCE_STRIDE medium ticks. LAP / B-book damage paths,
+      // when wired in Tier 1.1, run on the OFF-stride. The two
+      // damage sources can never coincide on the same thread
+      // principal in the same tick.
       // -----------------------------------------------------------------
-      if (insuranceStateRef.current) {
+      const isInsuranceTick =
+        mediumCountRef.current % INSURANCE_STRIDE === 0;
+      if (insuranceStateRef.current && isInsuranceTick) {
         const pid = player?.id ?? "You";
         const tickEpoch = epochOfFirstPair(next);
         // Pull the active pair's correlation map as the cross-pair

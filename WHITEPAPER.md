@@ -2,7 +2,36 @@
 
 ### A Four-Layer Thread Stablecoin with Joint-Outcome Safety
 
-**Working draft · v0.1**
+**Working draft · v0.3**
+
+---
+
+## Contents
+
+1. [Introduction](#1-introduction)
+2. [The Four-Layer Thread](#2-the-four-layer-thread)
+3. [Layered Risk Architecture](#3-layered-risk-architecture)
+4. [Auto-Mint and the Tier Ladder](#4-auto-mint-and-the-tier-ladder)
+5. [The Trading Venue](#5-the-trading-venue-secondary-value-prop)
+6. [Safety Analysis](#6-safety-analysis)
+7. [Calibration](#7-calibration)
+8. [Theoretical Extensions](#8-theoretical-extensions)
+9. [Mathematical Foundations](#9-mathematical-foundations)
+10. [Additional Thread Layers](#10-additional-thread-layers)
+11. [Production Architecture](#11-production-architecture)
+12. [Technology Stack](#12-technology-stack)
+13. [Failure-Mode Taxonomy and Threat Model](#13-failure-mode-taxonomy-and-threat-model)
+14. [Welfare and Equilibrium Analysis](#14-welfare-and-equilibrium-analysis)
+15. [Competitive Landscape](#15-competitive-landscape)
+16. [Tokenomics and Governance](#16-tokenomics-and-governance)
+17. [Roadmap with Empirical Gates](#17-roadmap-with-empirical-gates)
+18. [Open Research Questions](#18-open-research-questions)
+19. [Limitations](#19-limitations)
+20. [Conclusion](#20-conclusion)
+- Appendix A — [Notation](#appendix-a--notation)
+- Appendix B — [Implementation modules](#appendix-b--implementation-modules)
+- Appendix C — [Reproducibility](#appendix-c--reproducibility)
+- Appendix D — [Glossary](#appendix-d--glossary)
 
 ---
 
@@ -1485,10 +1514,832 @@ and product spend.
 
 ---
 
-## 13. Limitations
+## 13. Failure-Mode Taxonomy and Threat Model
 
-The current implementation is a research artifact, not a
-production system. Specifically:
+A protocol's safety claim is only as strong as its failure-mode
+analysis. This section catalogues the ways Trading Tower can
+break, organised by failure category, with detection signals,
+mitigations, and recovery paths for each.
+
+### 13.1 Mechanism failures
+
+These are bugs or design flaws in the protocol itself.
+
+**Lockstep invariant violation.** Damage applied to one layer
+without propagating to the others. *Detection*: per-tick
+runtime check that for every active thread,
+$\sum_i \text{layer}_i$ is consistent. *Mitigation*: every
+damage path goes through `damageThread`, which returns deltas
+the loop must apply. *Recovery*: protocol auto-pauses on
+violation; manual state reconciliation.
+
+**Conservation invariant violation.** Net cash flow per tick
+deviates from $E(t)$ (T-bill external inflow). *Detection*:
+`conservation.test.js` runs on every commit; runtime check
+on settlement service. *Mitigation*: every cash flow has an
+explicit counterparty pair (in/out matched). *Recovery*:
+auto-pause + audit.
+
+**Epoch-separation violation.** Insurance and LAP damage fire
+on the same tick. *Detection*: structural — coprime strides
+prevent it. *Mitigation*: `INSURANCE_STRIDE = 2` constant
+gates the insurance settlement; LAP runs on the off-stride.
+*Recovery*: not needed under current design; was a manual
+discipline pre-Tier-1.0.
+
+**Insurance/B-book reinsurance double-payment.** Same loss
+triggers payouts from both reinsurance products. *Detection*:
+the harness tracks per-tick attribution; double-payment shows
+as inflated joint outcome. *Mitigation*: the B-book reinsurance
+takes per-tick B-book P&L explicitly, *not* pool stake — it
+ignores insurance-driven thread damage. *Recovery*: this was a
+real bug in development, fixed by separating the data feeds.
+
+### 13.2 Calibration failures
+
+Parameters tuned wrong such that the safety claim doesn't hold
+empirically.
+
+**Premium rate misset.** Base rates either too high (kills
+yield, drives users out) or too low (sellers underpaid, leave).
+*Detection*: harness joint-outcome metric drops below the
+acceptance threshold. *Mitigation*: parameter changes gated on
+harness validation before DAO ratification. *Recovery*: revert
+the parameter change.
+
+**Rate-floor misset.** MIN clamp pinned at sub-T-bill, prevents
+oversupplied markets from clearing. *Detection*: sustained
+seller pile-up, low premium rates. *Mitigation*: floor relaxed
+to 0.01× base in Sprint 4.5b. *Recovery*: parameter change.
+
+**Reinsurance face misset.** Auto-mint face fraction either
+under-covers (user takes uncovered loss) or over-pays (dead
+premium). *Detection*: per-tick reinsurance-net stays negative
+with no tail-risk realisation; or, claim losses exceed paid
+amounts in stress. *Mitigation*: face = $\sum c_k$ for full
+coverage at minimum cost. *Recovery*: parameter change.
+
+**Stride misset.** `INSURANCE_STRIDE` set to 1 (back to
+overlapping). *Detection*: epoch-separation invariant test
+fails. *Mitigation*: protocol-level constant; DAO-gated
+change requires harness re-validation.
+
+### 13.3 Adversarial failures
+
+Attacks by malicious actors.
+
+**Sybil attacks.** A user creates many identities to evade the
+whale exception or coordinate against the pool. *Detection*:
+classifier monitoring for anomalous inter-account correlation
+(same source funds, same trade timing, same withdrawal patterns).
+*Mitigation*: KYC/AML on identity creation; bind unique identity
+to deposits. *Recovery*: freeze affected accounts; clawback if
+provable.
+
+**Oracle manipulation.** Attacker corrupts a price feed to
+trigger a false insurance event. *Detection*: cross-source
+oracle aggregation; staleness detection; statistical
+divergence alerts. *Mitigation*: median-of-N from independent
+oracle networks; settlement waits for consensus. *Recovery*:
+disputed events resolved via UMA-style escalation; payouts
+held in escrow during dispute.
+
+**Front-running insurance triggers.** Attacker monitors
+event probabilities and posts insurance just before a trigger.
+*Detection*: deposit-then-immediately-trigger patterns.
+*Mitigation*: insurance lockup (200 ticks) prevents this.
+*Recovery*: not needed if lockup holds.
+
+**Coordinated B-book attack.** Multiple B-classified users
+coordinate the same trade to drain the pool. *Detection*:
+classifier monitoring for anomalous correlation in B-flow;
+pool drawdown rate vs. predicted. *Mitigation*: per-user
+notional cap inside the pool; regime-aware capacity (lower in
+stress); B-book reinsurance pool absorbs the loss.
+*Recovery*: pool circuit-breaker pauses new B-book contracts;
+existing positions settle normally.
+
+**Governance attack.** Attacker accumulates governance tokens
+to push a malicious parameter change. *Detection*: governance
+proposal review; concentration metrics on token holdings.
+*Mitigation*: timelock on parameter changes; harness validation
+gate; multi-sig veto for emergencies. *Recovery*: emergency
+veto; community fork if necessary.
+
+### 13.4 Correlated-stress failures
+
+Multiple layers fail simultaneously despite design intent.
+
+**Stress-correlation surprise.** A previously-uncorrelated layer
+becomes correlated in stress (e.g., catastrophe bonds become
+correlated with credit during a global pandemic). *Detection*:
+cross-layer realised correlation matrix monitored in
+real-time; flag when stress correlation > planned. *Mitigation*:
+each layer's reinsurance acts independently; user holds layered
+hedges. *Recovery*: re-calibrate correlation assumptions;
+potentially restrict the offending layer.
+
+**Cascade failure.** Layer-2 trigger damages thread, which
+damages layer-3 stake, which triggers a B-book classifier shift,
+which causes more layer-3 losses. *Detection*: per-thread
+feedback metric; cascade-rate alarm. *Mitigation*: epoch
+separation breaks immediate feedback loops; reinsurance breaks
+the wealth-loss cascade. *Recovery*: protocol auto-pause if
+cascade-rate exceeds threshold.
+
+**Fat-tail event beyond stop-loss.** A loss exceeds the
+reinsurance exhaustion. The user eats the difference.
+*Detection*: per-event severity ranking; flag events above
+historical max. *Mitigation*: this is the *intentional*
+boundary — the protocol promises bounded protection, not
+infinite. The exhaustion fraction is a calibrated trade-off
+between premium cost and worst-case coverage. *Recovery*:
+none — the user knew the deductible.
+
+### 13.5 Operational failures
+
+Infrastructure-level breaks.
+
+**Smart contract upgrade bug.** A bad upgrade introduces a
+state-machine flaw. *Detection*: continuous invariant tests
+run against post-upgrade state; user-facing bug reports.
+*Mitigation*: timelock on upgrades; multi-stage audit;
+canary deployments. *Recovery*: emergency multi-sig downgrade
+or guarded upgrade-and-fix.
+
+**Settlement service downtime.** The off-chain orchestrator
+goes down; medium ticks stop processing. *Detection*: tick
+liveness monitor. *Mitigation*: stateless replicated service;
+state is on-chain, so any replica can resume. *Recovery*:
+warm replica takes over; missed ticks roll into the next
+processed tick.
+
+**Oracle network downtime.** Price feeds become stale.
+*Detection*: staleness threshold per feed. *Mitigation*:
+multi-source aggregation; protocol auto-pauses settlement on
+sustained staleness. *Recovery*: oracle resumption +
+catch-up settlement.
+
+**Custody key compromise.** An attacker gets a custody key.
+*Detection*: anomalous transaction patterns; KYT
+(know-your-transaction) screening. *Mitigation*: hardware
+security modules; multi-sig with geographic distribution;
+withdrawal limits per signing event. *Recovery*: key
+rotation; insurance from custody provider.
+
+### 13.6 Liquidity failures
+
+Mass user behaviour breaking the protocol.
+
+**Run on TT (mass redemption).** All TT holders redeem at
+once. *Detection*: redemption queue depth metric.
+*Mitigation*: 10% standard cap per cycle bounds the rate;
+express redemptions cost 5% (deters panic); user mints
+cannot be reversed faster than the 10% cap. *Recovery*: the
+redemption queue clears on its own; no protocol intervention
+needed. *Trade-off*: redeemers wait their turn — they receive
+their dollars over multiple cycles, not instantly.
+
+**Reinsurance pool drain.** Reinsurance sellers withdraw en
+masse after a major payout. *Detection*: seller-side
+withdrawal rate; pool capacity utilisation. *Mitigation*:
+200-tick lockup; staggered withdrawal release; potential
+counter-cyclical bonus to retain capital. *Recovery*: the
+lockup gives time for replacement capital to enter; if
+capacity drops below threshold, protocol auto-pauses new
+mints (existing positions continue).
+
+**B-book pool drain (without reinsurance).** Coordinated
+retail wins drain the pool faster than stake replenishes.
+*Detection*: pool-NAV decline rate; classifier divergence.
+*Mitigation*: B-book reinsurance pool covers the
+attachment-to-exhaustion layer; regime-aware capacity caps;
+per-user notional cap. *Recovery*: same as reinsurance pool
+drain — circuit breaker, lockup, replenishment.
+
+### 13.7 Regulatory failures
+
+Outside the protocol's direct control.
+
+**Jurisdiction ban.** A regulator bans the protocol's
+operation in a major jurisdiction. *Detection*: legal
+monitoring. *Mitigation*: jurisdiction-aware routing at the
+KYC layer; users in banned jurisdictions cannot mint;
+existing positions are honoured (redemption always works).
+*Recovery*: re-domicile; legal challenge; or accept
+geographic restriction.
+
+**Reclassification of TT as a security.** Regulator
+reclassifies the stablecoin under securities law.
+*Detection*: legal monitoring. *Mitigation*: pre-emptive
+legal opinions; structuring TT to satisfy multiple
+classifications (e-money, stablecoin, security if needed).
+*Recovery*: legal restructuring; potentially separate the TT
+issuance from the protocol entity.
+
+**Sanctions / KYC mandate change.** New AML rules add
+verification requirements. *Detection*: regulatory
+monitoring. *Mitigation*: KYC integration is modular;
+upgradeable. *Recovery*: integrate new compliance vendor;
+re-verify affected users.
+
+### 13.8 Threat model summary
+
+The protocol is most exposed to:
+
+1. **Adversarial coordination** at scale (Sybil + B-book
+   coordination + governance capture). The current binary
+   classifier and the small number of test users limit
+   exposure today; production needs hardened detection.
+2. **Stress correlation surprises** in newly-added thread
+   layers. The harness's role as acceptance gate (Section
+   10.5) is the key mitigation.
+3. **Oracle manipulation** on event triggers. Robust oracle
+   network design is non-negotiable for production.
+4. **Operational and regulatory failures** are real but
+   conventional — handled by standard ops + compliance
+   playbooks.
+
+The protocol is *least* exposed to:
+
+1. **Conservation / lockstep bugs** — exhaustively tested
+   and structurally enforced.
+2. **Mass redemption runs** — bounded by the standard cap;
+   protocol cannot be drained faster than the cap allows.
+3. **Single-counterparty failure** — by design, no single
+   counterparty is load-bearing.
+
+---
+
+## 14. Welfare and Equilibrium Analysis
+
+A protocol is rational only if every participant has positive
+expected economic surplus from participating. This section
+walks through each role and shows the equilibrium conditions
+under which they rationally engage.
+
+### 14.1 The TT minter (retail user)
+
+**Expected surplus**:
+$\mu_{\text{T-bill}} + \mu_{\text{insurance net}} + \mu_{\text{B-book net}} - \mu_{\text{deductibles}}$.
+
+In current calibration, this is approximately
+$4\% + 3\% + 2.5\% - \text{deductibles}$ ≈ 8.5–9% annualised
+in calm conditions; bounded downside in stress.
+
+**Why rational**: dominates HYSA (4%) and most retail-grade
+yield products. The thread mechanic provides risk-adjusted
+return that's competitive with much riskier alternatives
+(perpetual yield farms, leveraged ETFs).
+
+**Equilibrium condition**: protocol's net yield > opportunity
+cost (HYSA, T-bill, alternative yield products at
+comparable risk). Currently met.
+
+### 14.2 The insurance buyer (synthetic counterparty in harness; real users in production)
+
+**Expected surplus**: $E[\text{coverage payout}] - \text{premium paid}$.
+For a sophisticated buyer with accurate event probability
+estimates, this nets to approximately zero in equilibrium —
+they're buying insurance for risk-shifting, not for expected
+profit. The premium they pay reflects the protocol's
+self-correcting price.
+
+**Why rational**: real-world institutional users buy
+insurance to hedge specific exposures (e.g., a crypto fund
+buys BTC-crash insurance to bound their drawdown). The
+expected NPV is negative, but the hedging value is real.
+
+**Equilibrium condition**: insurance premium ≤ buyer's
+willingness to pay for the risk-shifting service. Set by
+the supply/demand balance via $r = r_0 \sqrt{C/S}$.
+
+### 14.3 The reinsurance seller
+
+**Expected surplus**: $\text{premium income} \cdot (1 - \text{expected loss ratio}) - \text{capital opportunity cost}$.
+
+For a typical 200-tick lockup at 3.65% annualised premium
+with full reinsurance coverage, the seller earns roughly
+2–3% annualised on locked capital after expected losses,
+assuming realistic event probabilities. This is below T-bill
+in calm conditions — sellers participate because:
+- The premium income is *uncorrelated* with their other
+  portfolio holdings (insurance event yield diversifies
+  across portfolio).
+- Stress-correlated yield (premiums rise during high
+  realised stress) provides a counter-cyclical kicker.
+- For institutional capital, the diversification benefit
+  is the primary attractant.
+
+**Equilibrium condition**: reinsurance premium ≥
+opportunity cost of locked capital + expected loss + risk
+premium. The protocol's current calibration may be tight
+on this; a stress-bonus mechanism (Section 8.3) would
+ensure equilibrium across regimes.
+
+### 14.4 The B-book underwriter (voluntary)
+
+**Expected surplus**: pool's tip income + losing-trader P&L
+minus winning-trader P&L. Historically, retail-classified
+flow loses ~70–85% of the time (this is well-documented in
+CFD industry data), so B-book underwriting is positive-EV
+for the pool over time. Subject to drawdowns when retail is
+right.
+
+**Why rational**: the same business model as a regulated
+B-book CFD broker (Plus500 reports ~60–70% of customers
+losing money), but transparently structured. Underwriters
+explicitly sign up to absorb losing-trader flow.
+
+**Equilibrium condition**: pool yield ≥ opportunity cost +
+risk premium for absorbing tail risk. The B-book reinsurance
+hedge bounds the tail; the pool's yield comes from
+sustained slight edge.
+
+### 14.5 Surplus distribution under stress
+
+**Calm regime**: every role earns approximately their
+expected surplus. Total surplus comes from T-bill yield
+(external inflow) plus the *trade-off compensation* the
+counterparties pay to the user (premium for risk-shifting).
+
+**Stress regime**: surplus shifts. The TT minter's outcome
+becomes more variable; insurance buyers' expected
+realisation rises; reinsurance sellers' realised loss
+rises; B-book underwriters either gain (most retail loses)
+or take a coordinated hit (covered by reinsurance).
+
+The protocol's empirical safety claim is precisely that the
+TT minter's *worst-case* surplus stays positive across
+stress regimes, even if their *median* surplus drops. The
+trade-off: in stress, the minter accepts a lower realised
+yield, but never a negative one (with the harness's 96%+
+empirical bound).
+
+### 14.6 Why the protocol is socially welfare-improving
+
+Compared to alternatives:
+
+- **Vs. HYSA / T-bill**: the user gets equivalent downside
+  protection plus a meaningful yield kicker. Welfare-positive.
+- **Vs. CFD broker B-booking**: B-book exposure is *opt-in
+  and transparent* rather than hidden. The CFD broker's
+  conflict of interest is replaced with a market mechanism
+  where underwriters explicitly accept the role. The CFD
+  customer's worst-case has historically been ~95% drawdown;
+  the TT minter's worst-case is bounded at the deductible.
+- **Vs. DeFi yield aggregators**: Trading Tower's reinsurance
+  layer provides explicit downside protection that
+  yield-aggregators don't. Welfare-positive for the user;
+  welfare-negative for the systemic-risk-loving
+  aggregator-yield-chaser.
+
+The protocol's existence creates *new* welfare via the
+diversification benefit of stacking uncorrelated yields
+on the same capital. This is the fundamental social-welfare
+case for the design.
+
+---
+
+## 15. Competitive Landscape
+
+Trading Tower sits at the intersection of three established
+markets. This section positions it relative to the most
+relevant existing protocols.
+
+### 15.1 Stablecoin protocols
+
+| Protocol | Collateral | Yield | Distinguishing property |
+| :-- | :-- | :--: | :-- |
+| **USDC / USDT** | T-bills + cash | 0% (issuer keeps yield) | Centralised, regulated |
+| **DAI (Maker)** | Crypto + RWA | ~5% (sDAI) | Overcollateralised crypto |
+| **USDe (Ethena)** | ETH + perp short basis | ~10% | Delta-neutral basis trade |
+| **USD0 (Usual)** | Tokenised T-bills (RWA) | ~4% | Pure RWA backing |
+| **Trading Tower TT** | Four-layer thread | ~9% | One $ in 4 uncorrelated roles |
+
+Closest in yield: **USDe** at ~10% via basis trade. Closest
+in safety positioning: **USD0** with RWA backing. Trading
+Tower is unique in *deriving yield from the collateral
+playing multiple roles simultaneously* rather than from a
+single mechanism (basis trade, RWA, or crypto leverage).
+
+### 15.2 Insurance protocols
+
+| Protocol | Coverage scope | Underwriter incentive | Distinguishing property |
+| :-- | :-- | :-- | :-- |
+| **Nexus Mutual** | Smart-contract failure | NXM token rewards | Mutual-assurance model |
+| **InsurAce** | Multi-protocol coverage | Premium income | Cross-chain |
+| **Solv** | Yield protection | Embedded in product | Vault-style |
+| **Trading Tower** | Per-event protocol-defined risks | Premium + thread yield | Integrated with stablecoin |
+
+Insurance protocols traditionally suffer from **underwriter
+attrition** — sellers leave during high-loss regimes,
+breaking coverage exactly when it's needed. Trading Tower
+mitigates this by:
+- Reinsurance lockup (200 ticks).
+- Counter-cyclical yield via the stress-correlation
+  mechanism (Section 8.3, future).
+- Underwriter capital being *part of a larger thread*, not
+  standalone — the dollar isn't only doing insurance, so
+  attrition is lower.
+
+### 15.3 Leveraged-trading protocols
+
+| Protocol | Model | Liquidity | Distinguishing property |
+| :-- | :-- | :-- | :-- |
+| **dYdX v4** | CLOB on Cosmos appchain | $1B+ TVL | Order book |
+| **Hyperliquid** | CLOB on custom L1 | $5B+ daily volume | Performance |
+| **GMX** | Trader-vs-pool (GLP) | $500M+ TVL | Pool absorbs trader P&L |
+| **Plus500 / IG (CFD)** | Hidden B-book | Centralised | Regulated retail |
+| **Trading Tower (LAP)** | Geodesic auction with entropy weights | Pre-launch | Transparent A/B classifier; minority-side rebate |
+
+GMX's GLP model is the closest analogue to Trading Tower's
+B-book pool mechanic: passive LPs underwrite trader losses.
+The differences:
+- GMX's GLP has no equivalent to the four-layer thread —
+  LPs are exposed only to the trading P&L.
+- Trading Tower's classifier is transparent; GMX has no
+  per-user classification.
+- The minority-side entropy rebate is unique: it
+  structurally pays users to take the unpopular side,
+  improving book balance.
+
+### 15.4 Yield aggregators
+
+| Protocol | Yield source | Risk model | Distinguishing property |
+| :-- | :-- | :-- | :-- |
+| **Yearn** | Strategy rotation across DeFi | Market | Vault aggregation |
+| **Pendle** | Yield tokenisation / fixed rate | Term | PT/YT split |
+| **Spark / sDAI** | Maker DSR | Conservative | Maker-backed |
+| **Trading Tower** | Multi-role yield stacking | Layered | Reinsurance-protected |
+
+Yield aggregators chain yields *sequentially* (deposit in A,
+A's yield deposits in B, etc.) — risk compounds. Trading
+Tower stacks yields *in parallel* on the same dollar — risk
+is bounded by the lowest-correlated layer.
+
+### 15.5 What Trading Tower uniquely brings
+
+1. **Four-layer thread**: a single primitive that produces
+   four uncorrelated yields with lockstep solvency
+   accounting. No competitor has this.
+2. **Joint-outcome safety claim**: empirically verified
+   across stress scenarios. Most competitors verify only
+   per-product safety; Trading Tower verifies
+   user-level wealth.
+3. **Transparent A/B classifier**: directly addresses the
+   moral failing of CFD B-book trading. No competitor
+   exposes this.
+4. **Minority-side rebate via entropy**: structural fix
+   to imbalanced order books.
+5. **Layered reinsurance** (insurance + B-book) covering
+   each risk surface independently.
+
+What's *not* unique:
+- Stablecoin issuance (many protocols).
+- Insurance markets (Nexus, InsurAce, etc.).
+- Leverage trading (dYdX, Hyperliquid, GMX, etc.).
+- T-bill-backed stable yield (USD0, USDC's BUIDL).
+
+The protocol's defensibility rests on the *integration*
+rather than any single component. The integration's hardest
+property to copy is the empirical safety claim — that takes
+months of harness work to reproduce, and the harness itself
+becomes a competitive moat.
+
+---
+
+## 16. Tokenomics and Governance
+
+This section sketches a token-economic structure for a
+production deployment. It is *not* finalised — different
+launch strategies (institutional-first vs. retail-first,
+permissionless vs. permissioned) imply different token
+designs.
+
+### 16.1 TT supply mechanics
+
+TT is the protocol's stablecoin. Supply is governed
+mechanically by mint and redemption events:
+
+- **Mint**: 1 TT created per $1 of free margin committed
+  to a thread. Supply increases.
+- **Standard redemption**: TT face shrinks by the redeemed
+  amount; user receives dollars proportional to thread
+  principal. Supply decreases.
+- **Express redemption**: same with 5% penalty routed to
+  reinsurance sellers. Supply decreases.
+- **Solvency clawback**: TT face exceeds backing principal
+  → clawback from wallet balance + soft debt.
+
+There is **no protocol-controlled mint or burn** of TT.
+The supply is a deterministic function of user actions and
+solvency state.
+
+### 16.2 Optional governance token (TWR)
+
+A separate governance token, tentatively named TWR, would
+control protocol parameters. Two designs are possible:
+
+**(a) No governance token.** Parameters are immutable at
+launch. Changes require coordinated consensus among
+participants (protocol fork, social signal). Maximally
+conservative; minimum governance attack surface;
+inflexible.
+
+**(b) Governance token with timelock.** TWR holders propose
+and vote on parameter changes. Each proposal must pass:
+1. Voting threshold (e.g., 4% TWR participation, 60%
+   approval).
+2. Harness validation gate — the proposed parameter set
+   must pass `npm run stress` with $\Pr(\text{joint} \geq 0)$
+   above the floor across all scenarios.
+3. Timelock (7 days) before activation.
+
+(b) is more standard for DeFi protocols. The
+harness-validation gate is unusual — it makes empirical
+verification a hard prerequisite for any change, which
+materially limits attack vectors compared to standard DAO
+governance.
+
+### 16.3 Governance scope
+
+What TWR holders should and shouldn't control:
+
+**In scope** (parameters with defined safe ranges):
+- Premium rates (`BASE_PREMIUM_RATE`,
+  `REINSURANCE_BASE_RATE`)
+- Lockup periods
+- Reinsurance face fractions
+- Stride values
+- Risk monitor thresholds
+- Treasury allocations
+
+**Out of scope** (load-bearing invariants):
+- The lockstep damage propagation
+- The conservation invariants
+- The four-layer thread structure
+- Adding new layers (requires a protocol upgrade, not a
+  parameter change)
+
+### 16.4 Treasury
+
+The protocol accumulates revenue from:
+- Express redemption penalties (5% of expressed amount).
+- A small fraction of premium income (say, 2%) skimmed
+  into the treasury — calibrated to be invisible at user
+  level but meaningful at protocol scale.
+- Trading fees (if any) on the LAP auction.
+
+Treasury uses:
+- Bug bounties.
+- Audit fees.
+- Counter-cyclical reinsurance subsidies during stress.
+- Governance distribution (if TWR exists).
+- Protocol development.
+
+### 16.5 What about TT yield to holders?
+
+A common question: why doesn't TT pay yield to holders the
+way Ethena's USDe does (via sUSDe)?
+
+The answer is that TT's yield *already accrues to the
+minter via the thread*. A separate sTT-style token would
+double-count yield. A holder who wants the yield should
+either:
+- Hold TT and the underlying thread (i.e., be the minter
+  themselves), or
+- Buy TT in secondary, knowing they're holding a stable
+  unit-of-account that doesn't yield (like a regular
+  stablecoin).
+
+This separation is intentional — it preserves TT's role as
+*money* (transactional, payments) while keeping yield with
+the user who provided the collateral.
+
+---
+
+## 17. Roadmap with Empirical Gates
+
+The protocol moves through phases, each gated by an
+empirical or regulatory milestone. The harness — extended
+phase-by-phase to model new conditions — is the canonical
+acceptance test.
+
+### Phase 0 — Research artifact (current)
+
+**Status**: complete.
+
+**Gates passed**:
+- Conservation invariants tested on every commit (364
+  tests).
+- $\Pr(\text{joint outcome} \geq 0) = 100\%$ in 6 / 7
+  stress scenarios; 96% in BBOOK_TAIL_EVENT.
+- Multi-user demo via `BroadcastChannel`.
+- Calibration validated empirically (TBILL_RATE,
+  BASE_PREMIUM_RATE, REINSURANCE_BASE_RATE,
+  BBOOK_REINS_BASE_RATE).
+- B-book reinsurance pool restoring layer-3 safety claim.
+
+**Deliverables**: working simulator, whitepaper v0.2,
+roadmap.
+
+### Phase 1 — Institutional pilot
+
+**Targets**: < 100 users, single jurisdiction (Switzerland
+or Singapore), TVL < $10M.
+
+**Gates required**:
+- Two independent smart-contract audits passed.
+- Real-historical-data replay (Tier 1.4) added to harness;
+  $\Pr(\text{joint} \geq 0)$ verified against COVID-March
+  2020, August 2024 yen-carry, and one credit-stress event.
+- Backend service architecture (Section 11) deployed.
+- KYC integration live for the chosen jurisdiction.
+- Insurance / e-money licence in target jurisdiction.
+- 3-month testnet bug-bounty program with no critical
+  findings.
+- Manual oversight + circuit breaker operational.
+
+**Headcount**: ~10 (engineers + ops + compliance).
+**Budget**: ~$3M.
+**Timeline**: 9–12 months from Phase 0.
+
+### Phase 2 — Institutional scale
+
+**Targets**: < 10k users, multi-jurisdiction (3+),
+TVL < $500M.
+
+**Gates required**:
+- Phase-1 stability (no critical incidents for 6 months).
+- Capacity audit at production scale (Section 9.6).
+- Stress-bonus mechanism validated empirically (after
+  observing seller-flight failure modes in Phase 1).
+- Adversarial-coordination defenses validated against
+  red-team exercises.
+- Regulatory framework for multi-jurisdiction routing.
+
+**Headcount**: ~25.
+**Budget**: ~$5M.
+**Timeline**: Phase 1 + 12 months.
+
+### Phase 3 — Retail expansion
+
+**Targets**: 100k+ users, full Easy mode public, TVL
+$1B+.
+
+**Gates required**:
+- Retail-grade compliance framework (per-jurisdiction).
+- Mobile app live.
+- Risk visualisation in Easy mode (median, p5, p95
+  outcomes shown to users).
+- Customer-protection regulatory sign-off in target
+  jurisdictions.
+- Insurance reserve fund established at protocol level.
+
+**Headcount**: ~50.
+**Budget**: ~$10M.
+**Timeline**: Phase 2 + 18 months.
+
+### Phase 4 — Extended layers (5+)
+
+**Targets**: catastrophe-bond, weather-derivative, and
+mortality-underwriting layers added.
+
+**Gates required**:
+- Each new layer passes the harness acceptance gate
+  (Section 10.5) — adding it does not worsen
+  $\Pr(\text{joint} \geq 0)$ in any existing scenario.
+- Real underwriting partnerships (Munich Re, Swiss Re,
+  or equivalent) for off-chain risk capacity.
+- Oracle network for parametric event triggers (NWS,
+  USGS, weather data).
+
+**Timeline**: Phase 3 + 12–24 months per layer added.
+
+### Empirical-gate principle
+
+Every transition between phases requires the harness
+demonstrating that the safety claim holds under conditions
+representative of the next phase. The empirical evidence
+*is* the gate — not protocol-team consensus, not external
+opinion, not subjective judgement. This builds in a
+self-correcting mechanism: if the protocol's behaviour at
+production scale diverges from its testnet behaviour,
+deployment doesn't proceed until the divergence is
+resolved.
+
+---
+
+## 18. Open Research Questions
+
+This section documents what we don't know, in the spirit of
+inviting external research.
+
+### 18.1 Optimal calibration
+
+The current parameters were tuned empirically against the
+harness, not derived from first principles. Open questions:
+
+- What's the optimal value of `BBOOK_REINS_ATTACHMENT_FRAC`
+  (currently 0.10) as a function of expected B-book
+  volatility? A formal Pareto analysis of premium cost vs.
+  worst-case-coverage would settle this.
+- How should the four base rates relate to each other in
+  steady state? Currently the relationship is intuitive
+  (T-bill ≈ reinsurance < primary insurance) but not
+  derived.
+- What's the protocol's optimal $\beta_E$ (entropy
+  coefficient)? Higher → stronger minority-side rebate,
+  more market-correcting. Lower → less distortion. The
+  current value (0.3) is a guess.
+
+### 18.2 Stress-correlation modelling
+
+The harness's synthetic event probabilities are a poor
+substitute for real stress dynamics. Open questions:
+
+- How should insurance event probabilities be calibrated
+  from real historical data, accounting for non-stationary
+  underlying processes?
+- What's the right way to model joint distributions of
+  insurance triggers (e.g., a market crash event and a
+  vol-spike event are not independent)?
+- Catastrophe / weather event correlations to financial
+  layers in tail scenarios — the standard assumption is
+  zero, but is this true under climate-change-driven
+  insurance market repricing?
+
+### 18.3 Mechanism design
+
+The current mechanisms (auction, classifier, B-book pool)
+are hand-tuned. Open questions:
+
+- Is the geodesic distribution the *optimal* idealised
+  density for an LAP auction? Other distributions (Tukey,
+  Gumbel mixture) might handle leveraged tails better.
+- Is the current classifier specification (rolling 10-close
+  + whale exception) optimal? An information-theoretic
+  approach (treat classification as a hypothesis test on
+  P&L) might give better separation.
+- Should the entropy weighting use KL divergence as it does,
+  or a different f-divergence (Hellinger, total variation)?
+
+### 18.4 Composability
+
+When TT is used as collateral in another DeFi protocol,
+how does damage propagate? Open questions:
+
+- What's the right way to model cross-protocol
+  thread composition? If Protocol B accepts TT as
+  collateral and TT face damages from a Trading Tower
+  event, does Protocol B's user see the damage?
+- Can multiple Trading-Tower-style protocols *share* a
+  reinsurance pool, gaining diversification benefits?
+- How should secondary-market trading of thread positions
+  affect the protocol's solvency accounting?
+
+### 18.5 Scale dynamics
+
+Behaviour at small scale (hundreds of users) may differ
+qualitatively from behaviour at large scale (millions).
+Open questions:
+
+- At what scale does the entropy-weighted minority-side
+  rebate become large enough to be a real signal vs.
+  noise?
+- How does the classifier's stability scale with the
+  number of B-classified users? Is there a critical
+  density above which mass coordination becomes
+  detectable?
+- What's the appropriate liquidity-provider concentration
+  limit? Real markets have rules limiting any single LP
+  to (say) 5% of pool capital — does Trading Tower need
+  similar?
+
+### 18.6 Theoretical limits
+
+The protocol's safety claim is empirically verified but not
+formally bounded. Open questions:
+
+- What's the closed-form upper bound on
+  $\Pr(\text{joint outcome} < 0)$ given parameter
+  $(\rho, \sigma, \mu)$ vectors? A formal bound would let
+  the protocol *prove* its safety claim mathematically,
+  not just empirically.
+- Can the four-layer thread mechanism be shown to be
+  capital-efficiency-optimal in some axiomatic sense?
+  (E.g., maximum yield given a downside-protection
+  constraint.)
+
+These are the kinds of questions that academic finance
+research could meaningfully address. The protocol's open-
+source codebase + harness are deliberately structured to
+make external research tractable.
+
+---
+
+## 19. Limitations
 
 - **Pre-production code.** State is per-browser localStorage, not
   a real backend. Multi-user works via `BroadcastChannel` (same
@@ -1511,7 +2362,7 @@ production system. Specifically:
 
 ---
 
-## 14. Conclusion
+## 20. Conclusion
 
 Trading Tower demonstrates that capital efficiency and bounded
 downside are not necessarily in tension. The four-layer thread
@@ -1581,6 +2432,32 @@ npm run stress -- --n 200 --scenario CORRELATED_CRISIS
 The output reports `P(joint outcome ≥ 0)`, mean, percentile
 distribution, and per-layer flow decomposition. Same seed → same
 result, bit-for-bit.
+
+## Appendix D — Glossary
+
+| Term | Definition |
+| :-- | :-- |
+| **Thread** | The protocol's atomic unit. A single $1 of free margin committed via mint, simultaneously playing four (or more) yield-producing roles with lockstep solvency accounting. |
+| **Layer** | One of the roles a thread's principal plays. Layer 1 (T-bill), 2 (insurance seller), 3 (B-book pool stake), 4 (TT face). Future extensions add layers 5+. |
+| **Lockstep** | The invariant that damage to any layer propagates proportionally across all layers in the same tick; growth fattens layers 1–3 while leaving layer 4 (TT face) unchanged. |
+| **Buffer** | $P - F$, the gap between a thread's principal and outstanding TT face. Built up by growth events; absorbs damage before TT face shrinks. |
+| **TT** | Tower Tether, the protocol's stablecoin. 1 TT = 1 USD claim, redeemable via the queue. Minted 1:1 against thread principal. |
+| **Mint** | Atomic operation that opens a new thread: tags margin, posts insurer stakes, buys reinsurance + B-book reinsurance, deposits B-book stake, mints TT. |
+| **Standard redemption** | Slow exit: 10% of TT supply per cycle (~monthly), no penalty. |
+| **Express redemption** | Fast exit: 5% penalty, bypasses the cap, rerouted to reinsurance sellers. |
+| **Solvency clawback** | When $\sum F > \sum P$ for a user's threads, extra TT is clawed back from wallet to wipe phantom face. Residual becomes soft debt. |
+| **Joint outcome** | $\text{wealth}_T - \text{deposit}_0$. The end-of-period wealth change for a user, summed across wallet + thread principal. |
+| **Epoch-separation invariant** | Insurance damage and LAP/B-book damage never coincide on the same tick (coprime strides). |
+| **Conservation invariant** | Per-tick net cash flow across all participants equals only the exogenous T-bill yield inflow. All internal flows zero-sum. |
+| **Tier-3 gate** | Hard requirement to open active LAP exposure: ≥3 markets allocated, max 50% in any single, reinsurance bought. |
+| **Geodesic distribution** | The auction's idealised leverage density — bimodal log-normal mixture in log-leverage space, with Cornish-Fisher 2nd-order correction. |
+| **Entropy weight** | Per-bucket KL-divergence-based multiplier that boosts under-supplied-bucket tip rates. The mechanism behind "paid for the unpopular side". |
+| **A/B classifier** | Per-user skill-based routing: A-classified users peer-match in the auction, B-classified route to the B-book pool. Whale exception forces A regardless of score. |
+| **Whale exception** | A single position $> 2 \times$ rolling-average-margin force-classes to A. Prevents lose-small / bet-big gaming. |
+| **Reinsurance** | Three-product layer-2 hedge: covers insurance-seller losses with summed coverage fraction = 1. Auto-bought at mint; lockup 200 ticks. |
+| **B-book reinsurance** | Single-product layer-3 hedge: high-water-mark stop-loss on user's cumulative B-book P&L; attachment 10% of face, exhaustion 100% of face. |
+| **Stress harness** | The Monte Carlo simulator (`lib/stressHarness.js`) that runs seeded scenarios and reports the joint-outcome distribution. The empirical safety-claim verifier. |
+| **Acceptance gate** | The harness's role in protocol governance: any parameter change or new layer must demonstrably *not worsen* P(joint outcome ≥ 0) before adoption. |
 
 ---
 

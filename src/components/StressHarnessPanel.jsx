@@ -332,42 +332,40 @@ export function StressHarnessPanel() {
         </p>
       </div>
 
-      <div className="rounded border border-rose-800 bg-rose-950/30 p-3">
-        <span className="text-xs font-mono text-rose-200 font-bold block mb-1">
-          Tier 1.1 — layer-3 stress now exercised (and the safety
-          claim partially fails)
+      <div className="rounded border border-emerald-800 bg-emerald-950/30 p-3">
+        <span className="text-xs font-mono text-emerald-200 font-bold block mb-1">
+          Tier 1.2 — B-book reinsurance pool restores the safety
+          claim under layer-3 stress
         </span>
         <p className="text-[10px] font-mono text-gray-300 leading-relaxed mb-2">
-          The harness now applies layer-3 (B-book) P&L per LAP-stride
-          tick to expose the active-trader counterparty risk path.
-          With no B-book reinsurance in place, three new scenarios
-          break the safety claim in different ways:
+          The B-book reinsurance pool (single product,
+          high-water-mark stop-loss on the user's cumulative B-book
+          P&L, attachment 10% of face / exhaustion 100% of face,
+          auto-bought during TT mint at face = 30% of principal)
+          dramatically improves the layer-3 stress outcomes:
         </p>
         <ul className="text-[10px] font-mono text-gray-300 list-disc pl-4 space-y-1 leading-relaxed">
           <li>
-            <span className="text-rose-300">BBOOK_VOLATILE</span>{" "}
-            (zero-mean ±0.5%/tick) — P(joint ≥ 0) drops to ~86%. Some
-            users on unlucky paths lose despite zero average drift.
+            <span className="text-emerald-300">BBOOK_VOLATILE</span>{" "}
+            — 86% → <strong>100% positive</strong>; worst -8.4% → +1.5%.
           </li>
           <li>
-            <span className="text-rose-300">BBOOK_LOSING_STREAK</span>{" "}
-            (mean -0.1%/tick) — P(joint ≥ 0) collapses to ~2%. A
-            sustained period of profitable retail flow drains the
-            pool and damages threads with no compensating mechanism.
+            <span className="text-emerald-300">BBOOK_LOSING_STREAK</span>{" "}
+            — 2% → <strong>100% positive</strong>; worst -12.3% → +1.5%.
           </li>
           <li>
-            <span className="text-rose-300">BBOOK_TAIL_EVENT</span>{" "}
-            (1%/tick chance of -5% spike) — P(joint ≥ 0) ~14%. Fat-
-            tailed coordinated wins (GME, COVID-rally style) are
-            catastrophic for the unhedged thread.
+            <span className="text-emerald-300">BBOOK_TAIL_EVENT</span>{" "}
+            — 14% → <strong>96% positive</strong>; worst -31.2% → -4.0%.
+            The 4% who still take losses are absorbing the deductible
+            (10% of face) — a bounded, intentional cost.
           </li>
         </ul>
         <p className="text-[10px] font-mono text-gray-400 mt-2 leading-relaxed">
-          This is the empirical evidence for Tier 1.2 (B-book
-          reinsurance pool). The harness reproduces the failure mode
-          we designed against in the roadmap; the next sprint adds
-          the hedge and the harness verifies whether the safety claim
-          is restored.
+          The pool's loss path is decoupled from insurance-driven
+          thread damage (which has its own reinsurance) — the
+          harness explicitly tracks per-tick B-book P&L and feeds
+          only that into the new product's settlement, so a single
+          loss never triggers two reinsurance payouts.
         </p>
       </div>
     </div>

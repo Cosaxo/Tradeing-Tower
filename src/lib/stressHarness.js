@@ -59,6 +59,13 @@ import {
   postReinsuranceSeller,
   settleReinsuranceTick,
 } from "./reinsurance.js";
+import {
+  makeBBookReinsuranceProduct,
+  postBBookReinsuranceBuyer,
+  postBBookReinsuranceSeller,
+  settleBBookReinsuranceTick,
+  BBOOK_REINS_DEFAULT_FACE_FRACTION,
+} from "./bBookReinsurance.js";
 import { initBBookState, adjustThreadDerived } from "./bBookPool.js";
 import {
   initTtState,
@@ -314,6 +321,28 @@ function setupWorld({ userId, deposit, buyerFace, sellerCapital }) {
   });
   if (adj.ok) bBookState = adj.state;
 
+  // 5b. B-book reinsurance: synthetic seller posts capital, user
+  //     auto-buys face = principal × default face fraction (0.30 by
+  //     default — covers the 10–40% drawdown layer).
+  let bBookReinsurance = makeBBookReinsuranceProduct();
+  {
+    const seller = postBBookReinsuranceSeller({
+      product: bBookReinsurance,
+      userId: "S",
+      amount: sellerCapital,
+      currentEpoch: 0,
+    });
+    if (seller.ok) bBookReinsurance = seller.product;
+  }
+  {
+    const buyer = postBBookReinsuranceBuyer({
+      product: bBookReinsurance,
+      userId,
+      faceAmount: deposit * BBOOK_REINS_DEFAULT_FACE_FRACTION,
+    });
+    if (buyer.ok) bBookReinsurance = buyer.product;
+  }
+
   // 6. Open thread (1:1 TT mint into user wallet).
   let ttState = initTtState();
   const opened = openThread({
@@ -331,6 +360,7 @@ function setupWorld({ userId, deposit, buyerFace, sellerCapital }) {
     markets,
     reinsurance,
     bBookState,
+    bBookReinsurance,
     weights,
   };
 }
@@ -354,7 +384,7 @@ function simulateTick({
     if (rng() < prob) triggered.push(eventId);
   }
 
-  let { userMargin, ttState, markets, reinsurance, bBookState } = state;
+  let { userMargin, ttState, markets, reinsurance, bBookState, bBookReinsurance } = state;
   const buyerLossesByUser = {};
   const tickClaimLosses = [];
 
@@ -506,6 +536,10 @@ function simulateTick({
   // coincide with insurance damage (which only runs on insurance
   // ticks). One tick → one damage source max.
   // -----------------------------------------------------------------
+  // Track this tick's B-book P&L (signed) for the reinsurance
+  // high-water-mark stop-loss settlement below. Only B-book P&L is
+  // included — insurance damage is not (it has its own reinsurance).
+  const bBookPnlByUser = {};
   if (
     !isInsuranceTick &&
     (scenario.bBookPnlStdPerTick > 0 ||
@@ -527,6 +561,8 @@ function simulateTick({
       }
       const pnlAmount = userStake * pnlFrac;
       metrics.bBookPnlApplied += pnlAmount;
+      // Record signed P&L for the reinsurance settlement.
+      bBookPnlByUser[userId] = pnlAmount;
 
       const userThread = (ttState.threads ?? []).find(
         (t) => !t.closed && t.ownerId === userId && t.principal > 1e-9
@@ -599,6 +635,30 @@ function simulateTick({
         }
       }
     }
+  }
+
+  // -----------------------------------------------------------------
+  // B-book reinsurance settlement — runs on the LAP stride after the
+  // layer-3 P&L has been applied. The product reads the current pool
+  // totalStake and triggers payouts on drawdowns from peak.
+  //
+  // Cash flows:
+  //   - payouts to the user (covered drawdown layer) → wallet margin
+  //   - premium paid by user → wallet margin
+  //   - premium income to seller → seller's wallet (unmodelled here)
+  // -----------------------------------------------------------------
+  if (!isInsuranceTick && bBookReinsurance) {
+    const r = settleBBookReinsuranceTick({
+      product: bBookReinsurance,
+      bBookPnlByUser,
+      currentEpoch: tickIndex,
+    });
+    bBookReinsurance = r.product;
+    const payout = r.payouts?.[userId] ?? 0;
+    const premOut = r.premiumOut?.[userId] ?? 0;
+    userMargin += payout - premOut;
+    metrics.bBookReinsurancePayout += payout;
+    metrics.bBookReinsurancePremiumOut += premOut;
   }
 
   // T-bill yield on user's cash margin (matches the loop's per-tick
@@ -702,7 +762,7 @@ function simulateTick({
     metrics.debtTotal = (ttState.debtByUser?.[userId] ?? 0);
   }
 
-  return { userMargin, ttState, markets, reinsurance, bBookState };
+  return { userMargin, ttState, markets, reinsurance, bBookState, bBookReinsurance };
 }
 
 // ---------------------------------------------------------------------------
@@ -776,6 +836,7 @@ export function runStressSession({
     markets: setup.markets,
     reinsurance: setup.reinsurance,
     bBookState: setup.bBookState,
+    bBookReinsurance: setup.bBookReinsurance,
   };
 
   const metrics = {
@@ -796,6 +857,8 @@ export function runStressSession({
     triggerCount: 0,
     bBookPnlApplied: 0,
     bBookTailShocksFired: 0,
+    bBookReinsurancePayout: 0,
+    bBookReinsurancePremiumOut: 0,
   };
 
   for (let t = 0; t < scenario.ticks; t++) {

@@ -14,7 +14,7 @@
 //      path: post insurer stakes evenly across reinsurance-covered
 //      events, buy reinsurance face = 1.5× X split across the 3
 //      products, deposit X into B-book pool as thread-derived stake,
-//      open one TT thread (1:1 mint).
+//      open one FLOAT thread (1:1 mint).
 //
 //   2. COUNTERPARTIES. Synthetic insurance buyers and reinsurance
 //      sellers are seeded so the markets actually settle. Without
@@ -33,9 +33,9 @@
 //        - T-bill yield on the user's wallet margin.
 //        - Periodic redemption cycle (REDEMPTION_EVERY ticks): if
 //          scenario.redemptionPressure > 0, queue that fraction of
-//          the user's TT for standard redemption and drain the queue.
+//          the user's FLOAT for standard redemption and drain the queue.
 //
-//   4. FINAL REDEMPTION. At the end, queue the user's remaining TT
+//   4. FINAL REDEMPTION. At the end, queue the user's remaining FLOAT
 //      for standard redemption and drain. This converts layer-4 face
 //      back to dollars so the joint outcome reflects realised
 //      wealth.
@@ -68,7 +68,7 @@ import {
 } from "./bBookReinsurance.js";
 import { initBBookState, adjustThreadDerived } from "./bBookPool.js";
 import {
-  initTtState,
+  initFloatsState,
   openThread,
   damageThread,
   growThread,
@@ -76,7 +76,7 @@ import {
   submitRedemption,
   runRedemptionCycle,
   applySolvencyCheck,
-} from "./towerTether.js";
+} from "./floats.js";
 
 // ---------------------------------------------------------------------------
 // Seeded RNG
@@ -113,7 +113,7 @@ function gaussian(rng) {
 //   - eventProbabilities: per-medium-tick probability that each named
 //     event triggers, evaluated against the seeded RNG. Events not
 //     listed have probability 0.
-//   - redemptionPressure: fraction of the user's wallet TT to queue
+//   - redemptionPressure: fraction of the user's wallet FLOAT to queue
 //     for standard redemption on each redemption cycle. 0 = no
 //     redemption stress.
 //   - ticks: how long the scenario runs (medium epochs).
@@ -161,7 +161,7 @@ export const SCENARIOS = {
     id: "REDEMPTION_PRESSURE",
     name: "Sustained redemption pressure",
     description:
-      "User redeems 25% of wallet TT each redemption cycle through the run. Tests the redemption mechanic — does staged unwind preserve principal?",
+      "User redeems 25% of wallet FLOAT each redemption cycle through the run. Tests the redemption mechanic — does staged unwind preserve principal?",
     eventProbabilities: {},
     redemptionPressure: 0.25,
     ticks: 200,
@@ -283,7 +283,7 @@ function setupWorld({ userId, deposit, buyerFace, sellerCapital }) {
 
   //    c. user buys reinsurance: face per product = `deposit ×
   //       coverageFraction`. Total face = deposit × 1.0 (minimum
-  //       full-coverage configuration). Matches handleMintTT in
+  //       full-coverage configuration). Matches handleMintFloats in
   //       App.jsx after the Sprint 4.5 fix.
   reinsurance = reinsurance.map((p) => {
     const faceAmount = deposit * (p.coverageFraction ?? 0);
@@ -343,20 +343,20 @@ function setupWorld({ userId, deposit, buyerFace, sellerCapital }) {
     if (buyer.ok) bBookReinsurance = buyer.product;
   }
 
-  // 6. Open thread (1:1 TT mint into user wallet).
-  let ttState = initTtState();
+  // 6. Open thread (1:1 FLOAT mint into user wallet).
+  let floatsState = initFloatsState();
   const opened = openThread({
-    ttState,
+    floatsState,
     ownerId: userId,
     principal: deposit,
     insuranceWeights: weights,
     currentEpoch: 0,
   });
-  if (opened.ok) ttState = opened.ttState;
+  if (opened.ok) floatsState = opened.floatsState;
 
   return {
     userMargin: 0, // pure cash margin; deposit is committed to the thread
-    ttState,
+    floatsState,
     markets,
     reinsurance,
     bBookState,
@@ -384,7 +384,7 @@ function simulateTick({
     if (rng() < prob) triggered.push(eventId);
   }
 
-  let { userMargin, ttState, markets, reinsurance, bBookState, bBookReinsurance } = state;
+  let { userMargin, floatsState, markets, reinsurance, bBookState, bBookReinsurance } = state;
   const buyerLossesByUser = {};
   const tickClaimLosses = [];
 
@@ -465,7 +465,7 @@ function simulateTick({
     for (const { eventId, lossesByUser } of tickClaimLosses) {
       const lossAmt = lossesByUser[userId] ?? 0;
       if (lossAmt <= 0) continue;
-      const userThreads = (ttState.threads ?? []).filter(
+      const userThreads = (floatsState.threads ?? []).filter(
         (t) =>
           !t.closed &&
           t.ownerId === userId &&
@@ -483,12 +483,12 @@ function simulateTick({
         const t = userThreads[i];
         const share = exposure[i] / totalExposure;
         const dmg = damageThread({
-          ttState,
+          floatsState,
           threadId: t.id,
           delta: damageBudget * share,
         });
         if (dmg.deltaApplied <= 1e-9) continue;
-        ttState = dmg.ttState;
+        floatsState = dmg.floatsState;
         // Layer 2: withdraw per-market layer deltas (skip the
         // triggering market — claimOut already debited it).
         for (const [eid, cut] of Object.entries(
@@ -564,19 +564,19 @@ function simulateTick({
       // Record signed P&L for the reinsurance settlement.
       bBookPnlByUser[userId] = pnlAmount;
 
-      const userThread = (ttState.threads ?? []).find(
+      const userThread = (floatsState.threads ?? []).find(
         (t) => !t.closed && t.ownerId === userId && t.principal > 1e-9
       );
       if (userThread) {
         if (pnlAmount > 0) {
           // Gain: grow the thread; layers 1, 2, 3 fatten in lockstep.
           const grown = growThread({
-            ttState,
+            floatsState,
             threadId: userThread.id,
             gain: pnlAmount,
           });
           if (grown.gainApplied > 1e-9) {
-            ttState = grown.ttState;
+            floatsState = grown.floatsState;
             for (const [eid, add] of Object.entries(
               grown.insuranceLayerAdds ?? {}
             )) {
@@ -602,12 +602,12 @@ function simulateTick({
         } else if (pnlAmount < 0) {
           // Loss: damage the thread; layers 1, 2, 3, 4 shrink in lockstep.
           const dmg = damageThread({
-            ttState,
+            floatsState,
             threadId: userThread.id,
             delta: -pnlAmount,
           });
           if (dmg.deltaApplied > 1e-9) {
-            ttState = dmg.ttState;
+            floatsState = dmg.floatsState;
             for (const [eid, cut] of Object.entries(
               dmg.insuranceLayerDeltas ?? {}
             )) {
@@ -674,13 +674,13 @@ function simulateTick({
   // testable we model the design here: each tick, principal grows
   // by TBILL_RATE/365 and the corresponding layer-2 (insurance) and
   // layer-3 (B-book) stakes are also fattened via growThread.
-  for (const t of ttState.threads ?? []) {
+  for (const t of floatsState.threads ?? []) {
     if (t.closed || t.ownerId !== userId) continue;
     const gain = t.principal * (TBILL_RATE / 365);
     if (gain <= 1e-9) continue;
-    const grown = growThread({ ttState, threadId: t.id, gain });
+    const grown = growThread({ floatsState, threadId: t.id, gain });
     if (grown.gainApplied <= 1e-9) continue;
-    ttState = grown.ttState;
+    floatsState = grown.floatsState;
     metrics.threadPrincipalGain += grown.gainApplied;
 
     // Materialize layer-2 stake additions on each insurance market.
@@ -712,21 +712,21 @@ function simulateTick({
     tickIndex % REDEMPTION_EVERY === 0 &&
     scenario.redemptionPressure > 0
   ) {
-    const wallet = ttState.balances?.[userId] ?? 0;
+    const wallet = floatsState.balances?.[userId] ?? 0;
     if (wallet > 1e-6) {
       const redeemAmt = wallet * scenario.redemptionPressure;
       const submitted = submitRedemption({
-        ttState,
+        floatsState,
         userId,
         amount: redeemAmt,
         express: false,
         currentEpoch: tickIndex,
       });
-      if (submitted.ok) ttState = submitted.ttState;
+      if (submitted.ok) floatsState = submitted.floatsState;
     }
 
-    const cycle = runRedemptionCycle({ ttState, currentEpoch: tickIndex });
-    ttState = cycle.ttState;
+    const cycle = runRedemptionCycle({ floatsState, currentEpoch: tickIndex });
+    floatsState = cycle.floatsState;
 
     for (const u of cycle.threadUnwinds) {
       if (u.ownerId !== userId) continue;
@@ -756,41 +756,41 @@ function simulateTick({
     userMargin += dollarsOut;
     metrics.redemptionDollars += dollarsOut;
 
-    const solvency = applySolvencyCheck({ ttState, userId });
-    ttState = solvency.ttState;
+    const solvency = applySolvencyCheck({ floatsState, userId });
+    floatsState = solvency.floatsState;
     metrics.clawbackTotal += solvency.clawback ?? 0;
-    metrics.debtTotal = (ttState.debtByUser?.[userId] ?? 0);
+    metrics.debtTotal = (floatsState.debtByUser?.[userId] ?? 0);
   }
 
-  return { userMargin, ttState, markets, reinsurance, bBookState, bBookReinsurance };
+  return { userMargin, floatsState, markets, reinsurance, bBookState, bBookReinsurance };
 }
 
 // ---------------------------------------------------------------------------
-// Final wealth — value remaining TT at face after a solvency check.
+// Final wealth — value remaining FLOAT at face after a solvency check.
 // ---------------------------------------------------------------------------
 //
 // Forcing express redemption at the end of the session distorts the
 // joint outcome by ~5% (the express penalty). A real user holding
-// TT through a stress run would either redeem standard over time
+// FLOAT through a stress run would either redeem standard over time
 // (modelled when scenario.redemptionPressure > 0) or simply continue
 // to hold. We approximate "continue to hold" as: solvency-check the
-// ttState (claws back any TT face above its principal backing) and
-// then value remaining wallet TT at $1.
+// floatsState (claws back any FLOAT face above its principal backing) and
+// then value remaining wallet FLOAT at $1.
 
 function finaliseWealth({ state, userId, metrics }) {
-  let { userMargin, ttState, markets, bBookState } = state;
-  // Solvency: any phantom TT (face > principal after damage) is
+  let { userMargin, floatsState, markets, bBookState } = state;
+  // Solvency: any phantom FLOAT (face > principal after damage) is
   // clawed back from the wallet first; residual becomes debt.
-  const solvency = applySolvencyCheck({ ttState, userId });
-  ttState = solvency.ttState;
+  const solvency = applySolvencyCheck({ floatsState, userId });
+  floatsState = solvency.floatsState;
   metrics.clawbackTotal += solvency.clawback ?? 0;
-  metrics.debtTotal = ttState.debtByUser?.[userId] ?? 0;
+  metrics.debtTotal = floatsState.debtByUser?.[userId] ?? 0;
 
   // Value the user's threads at their PRINCIPAL — this is the dollars
-  // the user could redeem out (the buffer above ttFace can be unlocked
-  // by minting more TT, then redeeming; we collapse that two-step into
+  // the user could redeem out (the buffer above floatFace can be unlocked
+  // by minting more FLOAT, then redeeming; we collapse that two-step into
   // one valuation). Subtract any soft debt.
-  const userThreads = (ttState.threads ?? []).filter(
+  const userThreads = (floatsState.threads ?? []).filter(
     (t) => !t.closed && t.ownerId === userId
   );
   const totalPrincipal = userThreads.reduce((s, t) => s + t.principal, 0);
@@ -798,7 +798,7 @@ function finaliseWealth({ state, userId, metrics }) {
   metrics.finalThreadPrincipal = totalPrincipal;
   metrics.expressPenalty = 0;
 
-  return { userMargin, ttState, markets, bBookState };
+  return { userMargin, floatsState, markets, bBookState };
 }
 
 // ---------------------------------------------------------------------------
@@ -832,7 +832,7 @@ export function runStressSession({
 
   let state = {
     userMargin: setup.userMargin,
-    ttState: setup.ttState,
+    floatsState: setup.floatsState,
     markets: setup.markets,
     reinsurance: setup.reinsurance,
     bBookState: setup.bBookState,
@@ -881,7 +881,7 @@ export function runStressSession({
     0
   );
 
-  // Finalise: solvency-check + value remaining TT at face.
+  // Finalise: solvency-check + value remaining FLOAT at face.
   state = finaliseWealth({ state, userId, metrics });
 
   // Joint outcome.

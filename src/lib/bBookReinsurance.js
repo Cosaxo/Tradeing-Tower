@@ -1,5 +1,5 @@
 // B-book reinsurance pool — protects layer-3 (B-book underwriter)
-// drawdowns on a TT thread.
+// drawdowns on a FLOAT thread.
 //
 // Why this exists
 // ---------------
@@ -23,7 +23,7 @@
 // inside the single product instead.
 //
 // Two sides:
-//   - Buyer (= TT minter, auto-bought during mint): pays per-tick
+//   - Buyer (= FLOAT minter, auto-bought during mint): pays per-tick
 //     premium proportional to coverage face. Receives payouts when
 //     pool NAV drops below the trigger threshold.
 //   - Seller (= capital provider): posts capital that funds payouts.
@@ -90,7 +90,7 @@ export const BBOOK_REINS_ATTACHMENT_FRAC = 0.10;
 // of face = 90% of face in dollars.
 export const BBOOK_REINS_EXHAUSTION_FRAC = 1.0;
 
-// Default auto-buy face fraction during TT mint. face = principal ×
+// Default auto-buy face fraction during FLOAT mint. face = principal ×
 // this fraction. Default 0.30 covers a 30% drawdown layer of the
 // user's threadDerivedStake.
 export const BBOOK_REINS_DEFAULT_FACE_FRACTION = 0.30;

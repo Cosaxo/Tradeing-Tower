@@ -199,7 +199,7 @@ export function StressHarnessPanel() {
         </div>
         <p className="text-[10px] font-mono text-gray-400 leading-tight">
           Each run drives a single user through the auto-mint flow
-          (allocate → buy reinsurance → mint TT) and applies a stress
+          (allocate → buy reinsurance → mint FLOAT) and applies a stress
           scenario for 200 medium epochs. Joint outcome = (final cash
           margin + redeemable thread principal) − initial deposit.
           The headline metric P(joint outcome ≥ 0) tells you whether
@@ -341,7 +341,7 @@ export function StressHarnessPanel() {
           The B-book reinsurance pool (single product,
           high-water-mark stop-loss on the user's cumulative B-book
           P&L, attachment 10% of face / exhaustion 100% of face,
-          auto-bought during TT mint at face = 30% of principal)
+          auto-bought during FLOAT mint at face = 30% of principal)
           dramatically improves the layer-3 stress outcomes:
         </p>
         <ul className="text-[10px] font-mono text-gray-300 list-disc pl-4 space-y-1 leading-relaxed">

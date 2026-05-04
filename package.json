@@ -1,9 +1,9 @@
 {
-  "name": "trading-tower",
+  "name": "hyperfloat",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "LAP (Leveraged Auction Protocol) simulator - ESMA-compliant leveraged trading auction with geodesic leverage distribution, entropy-weighted yield, and risk-weighted cascade settlement.",
+  "description": "Hyperfloat — five-tier thread protocol that captures float at every layer: T-bill, insurance, B-book, FLOAT stablecoin, and purchase-intent. The same $1 earns from five uncorrelated sources.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

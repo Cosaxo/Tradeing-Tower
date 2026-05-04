@@ -384,7 +384,7 @@ export function settleReinsuranceTick({
 // ---------------------------------------------------------------------------
 
 // Total reinsurance coverage held by `userId` across all 3 products.
-// Useful for the 1.5× rule: TT-mint can only enter insurance markets
+// Useful for the 1.5× rule: FLOAT-mint can only enter insurance markets
 // where potential payout < 1.5 × user's reinsurance coverage on that
 // loss.
 export function totalReinsuranceCoverage(products, userId) {

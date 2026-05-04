@@ -1,11 +1,11 @@
 // EasyMode — single-screen retail view.
 //
-// Shows one yield number, one "Convert $ → TT" button, one "Redeem
-// TT → $" button, and the four-tier ladder. Hides allocation editor,
+// Shows one yield number, one "Convert $ → FLOAT" button, one "Redeem
+// FLOAT → $" button, and the four-tier ladder. Hides allocation editor,
 // reinsurance buyers, paired-LAP desk, B-book deposit form, classifier
 // breakdown — all of those live in advanced mode.
 //
-// The "Convert $X → TT" button calls the same handleMintTT in App.jsx
+// The "Convert $X → FLOAT" button calls the same handleMintFloats in App.jsx
 // that advanced mode uses. The protocol-level orchestration is
 // identical; this just hides the surface.
 
@@ -30,7 +30,7 @@ import { BASE_PREMIUM_RATE } from "../lib/insuranceMarket.js";
 //   Layer 2  Insurance premium BASE_PREMIUM_RATE × 365 × 0.5
 //                              (insurer-side share)
 //   Layer 3  B-book yield      historic-CFD-margin proxy (0.04 annual)
-//   Layer 4  TT mint           optionality; no separate yield stream
+//   Layer 4  FLOAT mint           optionality; no separate yield stream
 //
 // The four are added because the same dollar earns each one in
 // parallel (the whole point of the protocol). Subtract a small
@@ -54,9 +54,9 @@ export function EasyMode({
   // Player state
   player,
   freeMarginAmount,
-  // TT state
-  ttBalance,
-  ttPrincipal,
+  // FLOAT state
+  floatsBalance,
+  floatsPrincipal,
   // Insurance / allocation state
   allocStats,
   hasReinsurance,
@@ -65,7 +65,7 @@ export function EasyMode({
   // Equity for "since you started" realised yield
   equityHistory = [],
   // Action handlers
-  onConvertToTT,         // (amount) => void  — wraps handleMintTT
+  onConvertToFloats,         // (amount) => void  — wraps handleMintFloats
   onRedeem,              // (amount) => void  — wraps handleRedeem(false)
   onJumpToAdvanced,      // () => void        — toggles easyMode off
 }) {
@@ -76,7 +76,7 @@ export function EasyMode({
   const tier = currentTierOf({
     totalAllocated,
     hasOpenLap,
-    ttPrincipal,
+    floatsPrincipal,
   });
 
   const gates = evaluateGates({
@@ -96,7 +96,7 @@ export function EasyMode({
   const convertNum = parseFloat(convertAmount);
   const redeemNum = parseFloat(redeemAmount);
   const canConvert = Number.isFinite(convertNum) && convertNum > 0 && convertNum <= freeMarginAmount + 1e-6;
-  const canRedeem = Number.isFinite(redeemNum) && redeemNum > 0 && redeemNum <= ttBalance + 1e-6;
+  const canRedeem = Number.isFinite(redeemNum) && redeemNum > 0 && redeemNum <= floatsBalance + 1e-6;
 
   return (
     <div className="flex flex-col gap-4">
@@ -134,11 +134,11 @@ export function EasyMode({
 
       {/* ----- Two action cards side by side ----- */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        {/* Convert to TT */}
+        {/* Convert to FLOAT */}
         <div className="rounded border border-violet-800 bg-violet-950/30 p-4 flex flex-col gap-2">
           <div className="flex items-baseline justify-between">
             <span className="text-xs font-mono text-violet-200 font-bold">
-              Convert $ → TT
+              Convert $ → FLOAT
             </span>
             <span className="text-[10px] font-mono text-gray-500">
               free: ${freeMarginAmount?.toFixed(0) ?? "0"}
@@ -147,7 +147,7 @@ export function EasyMode({
           <p className="text-[10px] font-mono text-gray-400 leading-tight">
             Auto-runs all four tiers in the safe configuration: even
             allocation across diversified markets, full reinsurance,
-            B-book stake, TT mint. One step.
+            B-book stake, FLOAT mint. One step.
           </p>
           <div className="flex gap-2 mt-1">
             <input
@@ -162,7 +162,7 @@ export function EasyMode({
             <button
               onClick={() => {
                 if (!canConvert) return;
-                onConvertToTT?.(convertNum);
+                onConvertToFloats?.(convertNum);
                 setConvertAmount("");
               }}
               disabled={!canConvert}
@@ -196,14 +196,14 @@ export function EasyMode({
           </div>
         </div>
 
-        {/* Redeem TT */}
+        {/* Redeem FLOAT */}
         <div className="rounded border border-amber-800 bg-amber-950/30 p-4 flex flex-col gap-2">
           <div className="flex items-baseline justify-between">
             <span className="text-xs font-mono text-amber-200 font-bold">
-              Redeem TT → $
+              Redeem FLOAT → $
             </span>
             <span className="text-[10px] font-mono text-gray-500">
-              wallet: {ttBalance?.toFixed(0) ?? "0"} TT
+              wallet: {floatsBalance?.toFixed(0) ?? "0"} FLOAT
             </span>
           </div>
           <p className="text-[10px] font-mono text-gray-400 leading-tight">
@@ -240,7 +240,7 @@ export function EasyMode({
           <div className="flex gap-1 flex-wrap mt-1">
             <button
               onClick={() =>
-                setRedeemAmount(String(Math.floor((ttBalance ?? 0) / 4)))
+                setRedeemAmount(String(Math.floor((floatsBalance ?? 0) / 4)))
               }
               className="text-[10px] font-mono text-gray-400 hover:text-amber-200 border border-gray-700 hover:border-amber-700 rounded px-1.5 py-0.5"
             >
@@ -248,14 +248,14 @@ export function EasyMode({
             </button>
             <button
               onClick={() =>
-                setRedeemAmount(String(Math.floor((ttBalance ?? 0) / 2)))
+                setRedeemAmount(String(Math.floor((floatsBalance ?? 0) / 2)))
               }
               className="text-[10px] font-mono text-gray-400 hover:text-amber-200 border border-gray-700 hover:border-amber-700 rounded px-1.5 py-0.5"
             >
               50%
             </button>
             <button
-              onClick={() => setRedeemAmount(String(Math.floor(ttBalance ?? 0)))}
+              onClick={() => setRedeemAmount(String(Math.floor(floatsBalance ?? 0)))}
               className="text-[10px] font-mono text-gray-400 hover:text-amber-200 border border-gray-700 hover:border-amber-700 rounded px-1.5 py-0.5"
             >
               all
@@ -279,7 +279,7 @@ export function EasyMode({
         Easy mode auto-allocates evenly across diversified event markets,
         auto-buys reinsurance to cover the insurer-side exposure, deposits
         principal into the B-book pool as passive underwriter stake, and
-        mints TT 1:1 against your dollar. Damage in any layer shrinks all
+        mints FLOAT 1:1 against your dollar. Damage in any layer shrinks all
         four atomically — but the four sources are deliberately
         uncorrelated, so the joint distribution stays positive in the
         vast majority of stress scenarios. Switch to advanced mode to

@@ -1,6 +1,6 @@
 # Hyperfloat
 
-### *(formerly Trading Tower — codebase identifiers still use the old name)*
+### *(formerly Trading Tower)*
 
 **The financial system captures float at every step. Hyperfloat
 returns it to you.**
@@ -16,7 +16,7 @@ the yield to *you*:
 | Checking balances | Banks (earn spread) | **1** — T-bill yield |
 | Insurance reserves | Insurance companies (premium float) | **2** — premium income |
 | Brokerage cash | Brokers (float + PFOF) | **3** — B-book pool income |
-| Stablecoin reserves | USDC / USDT issuers | **4** — TT face yield |
+| Stablecoin reserves | USDC / USDT issuers | **4** — FLOAT face yield |
 | Gift-card / prepaid balances | Merchants + card issuers | **5** — purchase-intent float |
 
 You deposit one dollar. Without ever moving it, that dollar
@@ -27,7 +27,7 @@ simultaneously:
    diversified event markets.
 3. **Earns B-book pool yield** as the counterparty to losing trader
    flow (passive underwriter — you don't trade, you absorb).
-4. **Backs Tower Tether (TT)**, a stablecoin you can spend like cash.
+4. **Backs Float (FLOAT)**, a stablecoin you can spend like cash.
 5. **Earns float yield while earmarked for spending** via the
    purchase-intent auction layer (Tier 5 — see [`WHITEPAPER.md`
    §1.5](./WHITEPAPER.md)).
@@ -50,7 +50,7 @@ npm run dev   # → http://localhost:5173
 **Looking for the deeper design rationale, math, and forward-looking
 extensions?** See [`WHITEPAPER.md`](./WHITEPAPER.md).
 
-## What Trading Tower replaces
+## What Hyperfloat replaces
 
 Not a yield protocol. Not a stablecoin. Not a trading venue. *All
 three at once*, in a single product that targets the entire retail
@@ -58,7 +58,7 @@ consumer-finance stack.
 
 ### As an investment object
 
-Trading Tower delivers ~**8.5% annualised yield with empirically
+Hyperfloat delivers ~**8.5% annualised yield with empirically
 bounded downside** (worst single run across 800 stress simulations:
 −4%). That risk-adjusted profile beats:
 
@@ -68,10 +68,10 @@ bounded downside** (worst single run across 800 stress simulations:
 | S&P 500 index fund | ~7% real | −30 to −50% | no |
 | Yearn yvUSDC | ~5% | varies | no |
 | Ethena USDe / sUSDe | ~10% | varies | partially |
-| **Trading Tower** | **~8.5%** | **−4%** (empirical) | **yes** |
+| **Hyperfloat** | **~8.5%** | **−4%** (empirical) | **yes** |
 
 For most retail investors who can't psychologically tolerate the
-30–50% drawdowns of equity index funds, Trading Tower's
+30–50% drawdowns of equity index funds, Hyperfloat's
 empirically-bounded outcome is genuinely better than what an index
 fund delivers in *practice*.
 
@@ -86,8 +86,8 @@ broker:
 | Robinhood | ~$3 (hidden PFOF) |
 | Interactive Brokers | $1–5 |
 | dYdX, Hyperliquid | $3.5–5 |
-| **Trading Tower (popular side)** | **$0** |
-| **Trading Tower (unpopular side)** | **−$10 to −$50 (rebate)** |
+| **Hyperfloat (popular side)** | **$0** |
+| **Hyperfloat (unpopular side)** | **−$10 to −$50 (rebate)** |
 
 The protocol *pays you* to take the under-supplied side of the book
 via the entropy-weighted minority-side rebate. And the A/B
@@ -107,9 +107,9 @@ Tier 5 captures this float and returns it to the user:
 1. User auctions a purchase intent (item + max price + time
    window).
 2. Sellers bid below max, competing on price.
-3. User accepts a bid → that portion of TT face is locked,
+3. User accepts a bid → that portion of FLOAT face is locked,
    designated for that seller.
-4. **The locked TT keeps earning ~8.5% APY** while it's earmarked
+4. **The locked FLOAT keeps earning ~8.5% APY** while it's earmarked
    for spending — the user's float is captured by the user, not
    by the merchant.
 5. Settlement on use; small penalty (1–3%) on time-out instead of
@@ -128,13 +128,13 @@ on cash held in advance.
 
 ### As a stablecoin (and why it may avoid stablecoin regulation)
 
-TT is the protocol's stablecoin-shaped token: 1 TT redeemable for
+FLOAT is the protocol's stablecoin-shaped token: 1 FLOAT redeemable for
 $1, freely transferable, spendable like cash. But its **issuance
 structure differs materially from USDC / USDT**:
 
-- **No central issuer.** The smart contract emits TT; no legal
+- **No central issuer.** The smart contract emits FLOAT; no legal
   entity is the "issuer" in a regulatory sense.
-- **Per-user collateral, not pooled reserves.** Each TT face is
+- **Per-user collateral, not pooled reserves.** Each FLOAT face is
   backed by *that specific user's* thread principal. There is no
   shared reserve a central party manages — the protocol cannot
   become insolvent the way a fractional-reserve issuer can.
@@ -142,22 +142,22 @@ structure differs materially from USDC / USDT**:
   stablecoins like DAI.
 - **Permissionless redemption** enforced by smart contract.
 
-Under the EU's **MiCA** framework, TT may not qualify as either an
+Under the EU's **MiCA** framework, FLOAT may not qualify as either an
 e-money token (single-fiat backing + authorised issuer required) or
 an asset-referenced token (basket of assets maintained by an
 issuer). It plausibly falls outside both categories. Under proposed
 US frameworks (STABLE, Lummis-Gillibrand), the focus is on
-"payment stablecoins" with central issuers — which TT lacks
+"payment stablecoins" with central issuers — which FLOAT lacks
 entirely.
 
-We do not claim TT is *exempt* from stablecoin regulation. We argue
-that TT has **structurally stronger arguments for being outside
-stablecoin frameworks** than DAI does, because TT combines
+We do not claim FLOAT is *exempt* from stablecoin regulation. We argue
+that FLOAT has **structurally stronger arguments for being outside
+stablecoin frameworks** than DAI does, because FLOAT combines
 DAI-style decentralised issuance with USDC-quality collateral and
 per-user reserve identifiability. A formal legal opinion is the
 right next step before launching; the structural case is credible.
 
-If the legal analysis confirms this view, TT becomes **a
+If the legal analysis confirms this view, FLOAT becomes **a
 yield-bearing spendable token without stablecoin regulation
 overhead** — a position no centralised stablecoin can occupy.
 
@@ -165,7 +165,7 @@ overhead** — a position no centralised stablecoin can occupy.
 
 Each use case maps onto a separate $1B+ retail market:
 
-| Replaces | US market size | Trading Tower advantage |
+| Replaces | US market size | Hyperfloat advantage |
 | :-- | --: | :-- |
 | Checking accounts | $1.5T+ deposits | 8.5% yield on what's normally 0% |
 | Savings accounts | $7T+ savings | 8.5% beats HYSA 4% |
@@ -179,10 +179,10 @@ trading venue + per-user collateral structure in one product.
 
 ## Two ways to use it
 
-**Easy mode (default for new users)** — one button. *Convert $X → TT*.
+**Easy mode (default for new users)** — one button. *Convert $X → FLOAT*.
 The protocol auto-runs all four layers in the safe-by-default
 configuration: even allocation across diversified markets, full
-reinsurance coverage, B-book pool stake, TT mint. You see one number:
+reinsurance coverage, B-book pool stake, FLOAT mint. You see one number:
 today's yield. Withdraw at any time.
 
 **Advanced mode** — every layer is exposed as a separate desk:
@@ -202,7 +202,7 @@ position is safe enough to qualify.
 | **1** | T-bill principal — the dollar itself | none |
 | **2** | Insurance-seller stake across event markets | none |
 | **3** | LAP exposure (active trading) | ≥3 markets allocated; max 50% any single; reinsurance bought (enforced by `evaluateTier3Gate` at LAP open) |
-| **4** | TT mint (the dollar plays all four roles) | layer-3 role of the thread is **B-book stake**, not active LAP — capital you've minted is locked as passive underwriter; capital you haven't minted is free to actively trade |
+| **4** | FLOAT mint (the dollar plays all four roles) | layer-3 role of the thread is **B-book stake**, not active LAP — capital you've minted is locked as passive underwriter; capital you haven't minted is free to actively trade |
 
 **LTV** (`lib/ltv.js`) tracks the user's progress toward the ceiling
 through five additive terms — concentration, diversity, breadth,
@@ -213,16 +213,16 @@ reinsurance covering enough of their insurer-side exposure AND the
 allocations span uncorrelated underlyings.
 
 Tier 4 enforces an important separation: a thread that has been minted
-into TT cannot also be an active-LAP. Active trading and TT-backing are
+into FLOAT cannot also be an active-LAP. Active trading and FLOAT-backing are
 **per-thread** mutually exclusive — capital you've minted is locked as
 B-book underwriter; capital you haven't minted is free to actively
 trade. This is what makes the joint-outcome safety claim defensible:
-the layer-3 role of a TT thread is a passive yield source, not a
+the layer-3 role of a FLOAT thread is a passive yield source, not a
 directional bet.
 
 ## The trading venue (secondary value prop)
 
-Trading Tower is a real multi-user trading platform — there are no
+Hyperfloat is a real multi-user trading platform — there are no
 synthetic NPCs, no in-process bots. Every counterparty is another
 human user. Solo demo mode shows the protocol idle (T-bill yield +
 insurance + reinsurance still settle); auction matches require at
@@ -251,7 +251,7 @@ tab is one user, and tabs in the same room exchange bids via
 `BroadcastChannel`. Two open tabs on the same machine give a working
 multi-user demo without any backend. A real production deployment
 swaps in a server-backed adapter (the same interface) and shares
-protocol-global state (insurance, reinsurance, B-book, TT) across
+protocol-global state (insurance, reinsurance, B-book, FLOAT) across
 users — the demo's known limitation is that protocol state is
 per-tab.
 
@@ -266,11 +266,11 @@ Three design ideas wired into one conservation-tested system:
      covered event markets (`insuranceWeights[eventId]`, ∑ ≈ 1).
    - **Layer 3** — B-book pool underwriter stake
      (`bBookState.underwriters[uid].threadDerivedStake`).
-   - **Layer 4** — TT face in circulation (`thread.ttFace`).
+   - **Layer 4** — FLOAT face in circulation (`thread.ttFace`).
 
    Loss to any layer → `damageThread` writes down all four in lockstep.
    Gain → `growThread` fattens layers 1–3 only; `ttFace` is unchanged
-   so subsequent damage eats the buffer before TT supply contracts.
+   so subsequent damage eats the buffer before FLOAT supply contracts.
 
 2. **The transparent A/B classifier** (`lib/userClassifier.js`) — every
    user's rolling 10-close score is fully visible: components, current
@@ -305,7 +305,7 @@ appears in exactly one module (the GBM price stepper).
 | **Insurance** | **every `INSURANCE_STRIDE` mediums** | **insurance + reinsurance settlement, insurance-driven thread damage** |
 | LAP / B-book damage | OFF-stride (every other medium tick) | LAP / B-book damage paths (wired in Tier 1.1) |
 | Slow       | every `SLOW_EVERY` mediums    | regime detection, cross-pair correlation                               |
-| Redemption | every `REDEMPTION_EVERY` mediums (~monthly in sim-days; coprime with slow) | TT redemption queue drain + thread unwinds + solvency recheck |
+| Redemption | every `REDEMPTION_EVERY` mediums (~monthly in sim-days; coprime with slow) | FLOAT redemption queue drain + thread unwinds + solvency recheck |
 
 **Epoch-separation invariant** (Tier 1.0): insurance settlement and
 LAP / B-book settlement run on coprime strides — they never coincide
@@ -393,7 +393,7 @@ allocations + classifier state — single object shared across all pairs.
 | `TipTierEditor`       | Per-tier tip configuration.                                                                        |
 | `PortfolioStructurer` | Open / close paired LAPs against allocations; eligibility checks.                                  |
 | `InsuranceDesk`       | Allocation editor, market browser, reinsurance buyer/seller flows.                                 |
-| `TtDesk`              | Mint / transfer / redeem TT; thread inspector; merchant simulator.                                 |
+| `TtDesk`              | Mint / transfer / redeem FLOAT; thread inspector; merchant simulator.                                 |
 | `BBookDesk`           | Underwriter deposit / withdraw, capacity, pool P&L + utilisation; classifier breakdown.            |
 | `CreditDesk`          | LTV breakdown driven by allocation diversification.                                                |
 | `FeeFlow`             | Visual flow of cash between counterparties this tick.                                              |
@@ -407,7 +407,7 @@ allocations + classifier state — single object shared across all pairs.
 | `TradeHistory`        | Closed-trade ledger with P&L.                                                                      |
 | `LogicView`           | Scrollable epoch log with tag-coloured lines.                                                      |
 | `SpeedControl`        | ½× / 1× / 2× / 5× tempo.                                                                           |
-| `GettingStarted`      | Four-step onboarding (allocate → open position → mint TT → spend at merchant).                     |
+| `GettingStarted`      | Four-step onboarding (allocate → open position → mint FLOAT → spend at merchant).                     |
 | `Tutorial`            | First-run walkthrough overlay.                                                                     |
 | `Sparkline` / `Tooltip` / `ErrorBoundary` | UI primitives.                                                                |
 
@@ -420,9 +420,9 @@ path:
    your effective LTV.
 2. **Open a position** — single or paired LAP, funded against the
    allocation.
-3. **Mint Tower Tether** — once your LTV ≥ 0.6, mint TT. Reinsurance is
+3. **Mint Float** — once your LTV ≥ 0.6, mint FLOAT. Reinsurance is
    auto-purchased to hedge the insurer-side exposure.
-4. **Send TT to the merchant** — simulates a real-world payment;
+4. **Send FLOAT to the merchant** — simulates a real-world payment;
    merchant queues redemption pro-rata each cycle so you can watch the
    thread unwind.
 
@@ -481,7 +481,7 @@ scenario.
 
 Each session simulates a user who deposits $X, runs the easy-mode
 auto-mint flow (allocate insurer stakes, buy 1.5× face reinsurance,
-deposit principal as B-book stake, mint TT 1:1), then runs through
+deposit principal as B-book stake, mint FLOAT 1:1), then runs through
 200 medium epochs of a stress scenario. Joint outcome = (final cash
 margin + redeemable thread principal) − initial deposit. The
 harness aggregates `P(joint outcome ≥ 0)` and the percentile
@@ -494,7 +494,7 @@ distribution across N seeded runs.
 | `CALM` | No event triggers, no redemption pressure. Tests baseline yield. |
 | `SINGLE_EVENT` | One major event has ~30% trigger probability. Tests reinsurance recovery. |
 | `CORRELATED_CRISIS` | Multiple correlated events (BTC + ETH + SPX + vol spike). Tests joint-stress survival. |
-| `REDEMPTION_PRESSURE` | User redeems 25% of TT each cycle. Tests staged redemption mechanics. |
+| `REDEMPTION_PRESSURE` | User redeems 25% of FLOAT each cycle. Tests staged redemption mechanics. |
 
 ### Sprint 4.5 calibration — empirically verified
 
@@ -561,7 +561,7 @@ rentals, paired LAPs, B-book pool (open/close/capacity), classifier
 scoring + whale exception, allocations, LTV, capital tags, role
 ledger, NPC markets, order-flow guards, regime detection,
 cross-market correlation, stress propagation, conservation invariants,
-yield model, yield router, and Tower Tether (mint, damage, growth,
+yield model, yield router, and Float (mint, damage, growth,
 redemption cycle, solvency clawback).
 
 ## Scripts
@@ -579,7 +579,7 @@ redemption cycle, solvency clawback).
 ## State persistence
 
 `usePersistentState` saves player config, open positions, equity
-history, closed trades, TT state, insurance state, B-book state, and
+history, closed trades, FLOAT state, insurance state, B-book state, and
 the role ledger to `localStorage` under `tt.*` keys. Press **`r`** (or
 the reset button in the header) to wipe the session.
 

@@ -29,7 +29,7 @@
 // in-and-out-around-trigger gaming where a user deposits, collects
 // premium, then withdraws right before a likely trigger.
 //
-// Thread-backed insurer stakes — those posted as part of a TT mint —
+// Thread-backed insurer stakes — those posted as part of a FLOAT mint —
 // are governed by the redemption mechanics (10% cycle cap or 5%
 // express penalty), not this lockup, so withdrawInsurer accepts a
 // `bypassLockup: true` flag for those paths.
@@ -132,7 +132,7 @@ export function postInsurer({ market, userId, amount, currentEpoch }) {
 //
 // bypassLockup paths (thread-driven, gated by redemption mechanics):
 //   - insurance damage propagation across covered markets
-//   - TT redemption thread unwinds
+//   - FLOAT redemption thread unwinds
 // Direct-user withdrawal paths leave bypassLockup false and pass
 // `currentEpoch` so the lockup is enforced.
 export function withdrawInsurer({
@@ -364,7 +364,7 @@ export function totalCoverageHeld(markets, userId) {
 }
 
 // Maximum loss the user faces across all markets if every event triggers
-// today. Caller uses this to gate solvency / TT mint constraints.
+// today. Caller uses this to gate solvency / FLOAT mint constraints.
 export function maxInsurerLossExposure(markets, userId) {
   let s = 0;
   for (const m of markets) {

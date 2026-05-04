@@ -1,7 +1,7 @@
 // Global insurance system state — replaces the per-pair `insurancePool`
 // from the pre-Phase-5 architecture.
 //
-// This object is persisted at the App level (parallel to ttState) so
+// This object is persisted at the App level (parallel to floatsState) so
 // every pair can refer to it without each carrying a duplicate slice.
 //
 // Shape:

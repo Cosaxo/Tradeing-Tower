@@ -7,7 +7,7 @@
 // Tier 1: T-bill principal               — automatic, always unlocked
 // Tier 2: Insurance-seller stake         — automatic
 // Tier 3: LAP active-trade access        — gate: ≥3 markets, max 50% any single, reinsurance bought
-// Tier 4: TT mint (full thread)          — gate: layer-3 role is B-book stake (per-thread)
+// Tier 4: FLOAT mint (full thread)          — gate: layer-3 role is B-book stake (per-thread)
 //
 // `principal` is the user's free + tagged margin total in dollars.
 // `currentTier` is computed from gate evaluation (the highest unlocked
@@ -41,7 +41,7 @@ const TIER_INFO = [
   },
   {
     n: 4,
-    label: "TT Mint",
+    label: "FLOAT Mint",
     sub: "$1 plays all 4 roles · stablecoin",
     color: "from-violet-700 to-violet-900",
     border: "border-violet-700",
@@ -190,9 +190,9 @@ export function evaluateGates({ allocStats, hasReinsurance, hasFreeMargin }) {
 export function currentTierOf({
   totalAllocated,    // dollars staked in insurance markets
   hasOpenLap,        // boolean — any active LAP position open
-  ttPrincipal,       // dollars committed to TT threads
+  floatsPrincipal,       // dollars committed to FLOAT threads
 }) {
-  if ((ttPrincipal ?? 0) > 0) return 4;
+  if ((floatsPrincipal ?? 0) > 0) return 4;
   if (hasOpenLap) return 3;
   if ((totalAllocated ?? 0) > 0) return 2;
   return 1;

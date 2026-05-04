@@ -3,11 +3,11 @@
 // Capital does not move between floors. It accumulates roles. The same
 // dollar of margin can simultaneously be tagged as:
 //
-//   - poolDeposit    (loose insurance-market allocation, no TT thread)
+//   - poolDeposit    (loose insurance-market allocation, no FLOAT thread)
 //   - auctionMargin  (backing an open LAP position)
-//   - threadStake    (locked into a Tower Tether thread — same dollar
+//   - threadStake    (locked into a Float thread — same dollar
 //                     covers the T-bill, insurance fill, paired LAP,
-//                     and minted TT simultaneously; released only when
+//                     and minted FLOAT simultaneously; released only when
 //                     the thread is redeemed or fully damaged)
 //   - bBookStake     (deposited as B-book underwriter capital — earns
 //                     B-classified user tip flow + absorbs their
@@ -25,7 +25,7 @@ export const TAG_KEYS = ["poolDeposit", "auctionMargin", "threadStake", "bBookSt
 export const TAG_LABELS = {
   poolDeposit: "Pool Collateral",
   auctionMargin: "Auction Margin",
-  threadStake: "TT Thread",
+  threadStake: "FLOAT Thread",
   bBookStake: "B-book Underwriter",
 };
 

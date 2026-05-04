@@ -61,7 +61,7 @@ a real category of float in the legacy system:
 | Checking balances | Banks (earn spread) | **Tier 1** — T-bill yield |
 | Insurance reserves | Insurance companies (premium float) | **Tier 2** — premium income |
 | Brokerage cash | Brokers (float + PFOF) | **Tier 3** — B-book pool income |
-| Stablecoin reserves | USDC / USDT issuers | **Tier 4** — TT face yield |
+| Stablecoin reserves | USDC / USDT issuers | **Tier 4** — FLOAT face yield |
 | Gift-card / prepaid balances | Merchants + card issuers | **Tier 5** — purchase-intent float |
 
 The four-layer thread of v0.5 captured tiers 1–4. Tier 5 — the
@@ -74,7 +74,7 @@ The pitch in one sentence:
 
 ## Abstract
 
-Trading Tower is a financial protocol in which one dollar of user
+Hyperfloat is a financial protocol in which one dollar of user
 deposit simultaneously plays four roles — risk-free principal,
 insurance-seller stake, B-book pool stake, and stablecoin face — via
 a single mint operation that creates a *thread*. Damage to any role
@@ -111,7 +111,7 @@ stablecoin, etc. Each layer adds yield but also adds correlated
 exposure to the same underlying. When the underlying moves, all
 layers move together.
 
-### 1.2 The Trading Tower thesis
+### 1.2 The Hyperfloat thesis
 
 The protocol's thesis is that capital efficiency can be improved
 substantially without stacking risk, by stacking *uncorrelated yield
@@ -123,7 +123,7 @@ a different mechanism:
 | 1 | T-bill principal | — (baseline) |
 | 2 | Insurance premium income from event-market sellers | low (idiosyncratic event risk) |
 | 3 | B-book pool yield from underwriting unprofitable retail flow | low (cross-asset, cross-direction) |
-| 4 | TT optionality (stablecoin face usable as payment) | — (no yield, optionality) |
+| 4 | FLOAT optionality (stablecoin face usable as payment) | — (no yield, optionality) |
 
 The same dollar fills all four roles simultaneously. There is no
 duplication: the conservation invariants (Section 6) guarantee
@@ -146,7 +146,7 @@ seven scenarios at n=200:
 | Calm market | 100% | +4.5% | +4.5% |
 | Single insurance event triggers (~30% chance per run) | 100% | +4.5% | +4.3% |
 | Correlated multi-pair crisis | 100% | +4.4% | +3.9% |
-| Sustained TT redemption pressure | 100% | +4.5% | +4.5% |
+| Sustained FLOAT redemption pressure | 100% | +4.5% | +4.5% |
 | Layer-3 zero-mean volatility | 100% | +7.3% | +1.5% |
 | Layer-3 sustained losing streak | 100% | +2.2% | +1.5% |
 | Layer-3 fat-tail catastrophe | 96% | +7.0% | −4.0% |
@@ -158,7 +158,7 @@ loss-with-reinsurance.
 
 ### 1.4 Value as a multi-product replacement
 
-Trading Tower is not "a yield product" or "a stablecoin" or "a
+Hyperfloat is not "a yield product" or "a stablecoin" or "a
 trading venue" individually. It is a candidate replacement for
 the **entire retail consumer-finance stack**: checking, savings,
 brokerage, and conservative bond-fund allocation, in one
@@ -197,8 +197,8 @@ notional leveraged position):
 | Interactive Brokers | minimal | $1–5 | $0 | $1–5 |
 | dYdX | $0 | $5 | $0 | $5 |
 | Hyperliquid | $0 | $3.5 | $0 | $3.5 |
-| **Trading Tower (popular side)** | $0 | $0 | $0 | **$0** |
-| **Trading Tower (unpopular side)** | $0 | $0 | $0 | **−$10 to −$50 (rebate)** |
+| **Hyperfloat (popular side)** | $0 | $0 | $0 | **$0** |
+| **Hyperfloat (unpopular side)** | $0 | $0 | $0 | **−$10 to −$50 (rebate)** |
 
 The unpopular-side rebate flips the cost from positive to
 negative. A retail trader who systematically takes
@@ -220,7 +220,7 @@ better than any existing retail investment.
 | AGG (US Aggregate Bond) | ~3.5% | ~5% | ~0.3 |
 | Yearn yvUSDC | ~5% | ~3% | ~1.0 |
 | Ethena USDe (sUSDe) | ~10% | ~5% (regime-dependent) | ~1.0 |
-| **Trading Tower** (if safety claim holds) | **~8.5%** | **~3%** | **~2.7** |
+| **Hyperfloat** (if safety claim holds) | **~8.5%** | **~3%** | **~2.7** |
 
 A Sharpe of 2.7 is institutional-quant-fund territory. The
 arithmetic comes from the four-layer thread's diversification
@@ -231,27 +231,27 @@ single layer's.
 **Spendability is a category change, not a feature.** An S&P
 500 fund returns 7% real but is unspendable — to use it for
 purchases you must sell, wait T+2 to settle, deal with
-capital gains, then move cash. Trading Tower's TT face is
+capital gains, then move cash. Hyperfloat's FLOAT face is
 spendable directly. You're not choosing between *investing*
 and *having spending money* — you have both in the same
 dollar. The only existing comparable thing is a checking
 account at 0% yield (or Apple Cash at 4%, or USDC at 0%).
-**TT at 8.5% with checking-account spendability is unique.**
+**FLOAT at 8.5% with checking-account spendability is unique.**
 
 **Behavioural realism**. ~80% of retail investors sell at the
 bottom of equity drawdowns and lose to their own behaviour
 rather than to the market. An index fund's 7% theoretical
 return is what disciplined long-horizon investors achieve;
 the typical retail investor's *realised* return is much
-lower. Trading Tower's bounded-downside profile (worst
+lower. Hyperfloat's bounded-downside profile (worst
 observed −4% in stress) eliminates the behavioural-failure
-mode. **For most retail investors, Trading Tower's
+mode. **For most retail investors, Hyperfloat's
 empirically-bounded outcome is genuinely better than an
 index fund's theoretical superior return.**
 
 #### 1.4.3 As a stablecoin (and why it may avoid stablecoin regulation)
 
-TT is the protocol's stablecoin-shaped token: 1 TT redeemable
+FLOAT is the protocol's stablecoin-shaped token: 1 FLOAT redeemable
 for $1 of underlying collateral, freely transferable, usable
 as a medium of exchange. But its **issuance structure is
 materially different from centrally-issued stablecoins
@@ -277,21 +277,21 @@ historically):
 - Has historically navigated stablecoin regulation by being
   *structurally non-issued* — there's no issuer to license.
 
-**Trading Tower (TT) model**:
-- No central issuer; the smart contract emits TT face.
-- Each TT face is backed by an *identifiable thread principal*
+**Hyperfloat (FLOAT) model**:
+- No central issuer; the smart contract emits FLOAT face.
+- Each FLOAT face is backed by an *identifiable thread principal*
   belonging to the user who minted it.
-- The user is, in effect, *issuing TT to themselves* against
+- The user is, in effect, *issuing FLOAT to themselves* against
   their own collateral.
 - The protocol is the rule-engine, not an issuer.
 
-This places TT structurally closer to DAI / LUSD than to USDC
+This places FLOAT structurally closer to DAI / LUSD than to USDC
 / USDT. Three properties strengthen the regulatory argument
 beyond DAI's:
 
 1. **Per-user collateral (not pooled reserves).** Unlike
    USDC where Circle holds a pooled reserve backing all
-   supply, each TT face is backed by *that specific user's*
+   supply, each FLOAT face is backed by *that specific user's*
    thread principal. There is no shared reserve the protocol
    maintains. The protocol cannot become insolvent in the
    way a fractional-reserve issuer can — the collateral is
@@ -299,12 +299,12 @@ beyond DAI's:
 
 2. **Higher-quality underlying collateral.** DAI is
    criticised because much of its backing is volatile crypto
-   (ETH, USDC). TT's principal is a **T-bill** — the safest
+   (ETH, USDC). FLOAT's principal is a **T-bill** — the safest
    form of dollar-denominated collateral that exists. From a
    regulatory perspective, this is *more* conservative than
    DAI, not less.
 
-3. **Permissionless redemption.** A TT holder can always
+3. **Permissionless redemption.** A FLOAT holder can always
    redeem against their thread (subject to queue mechanics).
    There is no central party that can refuse redemption, no
    "issuer discretion." The redemption right is enforced by
@@ -312,21 +312,21 @@ beyond DAI's:
 
 #### 1.4.3.1 The regulatory argument, stated carefully
 
-We do not claim TT is *exempt* from stablecoin regulation —
+We do not claim FLOAT is *exempt* from stablecoin regulation —
 that determination depends on jurisdiction-specific
-analysis we are not qualified to make. We argue that TT has
+analysis we are not qualified to make. We argue that FLOAT has
 **stronger structural arguments for being outside
 stablecoin frameworks** than DAI or LUSD, because:
 
-- TT lacks a central issuer (unlike USDC, USDT, USDP).
-- TT's reserve isn't pooled — backing is per-token, not
+- FLOAT lacks a central issuer (unlike USDC, USDT, USDP).
+- FLOAT's reserve isn't pooled — backing is per-token, not
   protocol-wide.
-- TT's underlying collateral is T-bill, structurally safer
+- FLOAT's underlying collateral is T-bill, structurally safer
   than crypto-collateralised stablecoins.
 - The protocol's smart contracts are publishable as
   immutable code — no central party to hold liable.
 
-Under the EU's **MiCA** framework, TT may not qualify as
+Under the EU's **MiCA** framework, FLOAT may not qualify as
 either an "e-money token" (EMT — requires single-fiat
 backing and an authorised issuer) or an "asset-referenced
 token" (ART — requires a basket of reference assets
@@ -338,7 +338,7 @@ a stablecoin in the regulatory sense.
 Under proposed US frameworks (**STABLE Act**,
 **Lummis-Gillibrand**), the focus is on "payment
 stablecoins" with an issuer maintaining $1 fiat reserves
-per token. TT lacks an issuer entirely; the smart contract
+per token. FLOAT lacks an issuer entirely; the smart contract
 mints and burns based on user-locked collateral. The
 proposed legislation explicitly excludes
 overcollateralized debt-position tokens of the DAI shape
@@ -347,12 +347,12 @@ from stablecoin classification in some drafts.
 **Action implication**: a competent legal opinion from a
 DeFi-experienced firm (recommended: Cooley, A&O Shearman,
 Walkers) is the right next step before launching. The
-opinion should specifically address whether TT's structure
+opinion should specifically address whether FLOAT's structure
 falls outside the relevant jurisdictional stablecoin
 framework. The arguments above suggest a credible *yes*;
 formal validation requires legal work.
 
-If the legal analysis confirms this view, **TT becomes a
+If the legal analysis confirms this view, **FLOAT becomes a
 yield-bearing spendable token without stablecoin
 regulation overhead** — a position no centralised
 stablecoin can occupy.
@@ -362,7 +362,7 @@ stablecoin can occupy.
 The four use cases above each map onto a separate existing
 $1B+ retail market:
 
-| Replaces | Existing market size | TT advantage |
+| Replaces | Existing market size | FLOAT advantage |
 | :-- | --: | :-- |
 | Checking accounts | $1.5T+ US retail deposits | 8.5% yield on what's normally 0% |
 | Savings accounts | $7T+ US savings | 8.5% beats HYSA 4–5% with comparable downside |
@@ -397,7 +397,7 @@ and returns it to the user.
 #### 1.5.1 Mechanism
 
 The mechanic is a **reverse auction with smart-contract escrow**
-on the user's TT face:
+on the user's FLOAT face:
 
 1. **User auctions a purchase intent.** Specifies item (or SKU),
    maximum acceptable price, time window for fulfilment, and any
@@ -406,16 +406,16 @@ on the user's TT face:
    their inventory; they submit bids below the user's max,
    competing on price + terms.
 3. **User accepts a bid.** The smart contract locks the bid amount
-   of the user's TT face, designating it for that specific
+   of the user's FLOAT face, designating it for that specific
    seller for the agreed time window.
-4. **Locked TT keeps earning yield.** Crucially, the locked TT face
+4. **Locked FLOAT keeps earning yield.** Crucially, the locked FLOAT face
    is still backed by the user's underlying thread principal. The
    thread continues to earn from layers 1–3 (T-bill, insurance,
    B-book) during the entire lock period. The user's float is
    *captured by the user themselves*, not by the merchant.
 5. **Settlement on use.** When the user triggers the purchase
    (proof of delivery confirmed via oracle network, e.g. UMA
-   optimistic oracle for off-chain delivery), the locked TT
+   optimistic oracle for off-chain delivery), the locked FLOAT
    transfers to the seller; the lock releases.
 6. **Time-out path.** If the user doesn't trigger the purchase
    within the time window, the lock releases automatically. User
@@ -484,11 +484,11 @@ Worked example for a $1,000 purchase with 30-day lock:
 Tier 5 is purely additive — it does not modify layers 1–4 in any
 way. The user's thread principal stays in place, still earning
 T-bill + insurance + B-book yield. The auction mechanic attaches a
-*spending designation* to a portion of TT face during the lock
-window. When the purchase settles, the TT transfers to the seller
+*spending designation* to a portion of FLOAT face during the lock
+window. When the purchase settles, the FLOAT transfers to the seller
 and the corresponding portion of the user's thread is unwound (via
 the standard redemption path, but routed to the seller instead of
-the user). When the auction times out, the TT returns to the
+the user). When the auction times out, the FLOAT returns to the
 user's free balance.
 
 The existing damage / growth / lockstep invariants are unchanged.
@@ -511,7 +511,7 @@ Likely first sellers:
   integrations (Shopify-shaped plug-ins, point-of-sale partners).
 
 The protocol's bid-side liquidity (i.e., users wanting to commit
-purchase intents) bootstraps from existing TT minters. The
+purchase intents) bootstraps from existing FLOAT minters. The
 sell-side liquidity bootstraps from token-incentive emissions to
 early sellers — same pattern as Curve's CRV emissions to LPs.
 
@@ -529,7 +529,7 @@ $$
 
 where
 - $P \in \mathbb{R}_{\geq 0}$ is the *principal* (layer 1, T-bill),
-- $F \in \mathbb{R}_{\geq 0}$ is the *outstanding TT face* (layer 4),
+- $F \in \mathbb{R}_{\geq 0}$ is the *outstanding FLOAT face* (layer 4),
 - $\mathbf{w} = (w_1, \dots, w_n)$ are the *insurance fill weights* across markets, with $\sum w_i \approx 1$ (layer 2),
 - $\tau_0$ is the creation epoch.
 
@@ -554,7 +554,7 @@ atomically:
 4. Auto-buys B-book reinsurance face equal to $X \cdot 0.30$.
 5. Increments the user's `threadDerivedStake` in the B-book pool by
    $X$.
-6. Mints $X$ TT into the user's wallet (so $F = X$ at $\tau_0$).
+6. Mints $X$ FLOAT into the user's wallet (so $F = X$ at $\tau_0$).
 
 The mint is 1:1 against free margin; there is no LTV gate or
 coefficient. The gating constraint is whether the user has $X$ of
@@ -580,9 +580,9 @@ $$
 P \rightarrow P + G \quad\text{but}\quad F \rightarrow F
 $$
 
-Layer-1, 2, 3 fatten by $G$; layer 4 (TT face) is intentionally
+Layer-1, 2, 3 fatten by $G$; layer 4 (FLOAT face) is intentionally
 non-elastic. Gains accumulate as a *buffer* $P - F \geq 0$, which
-absorbs subsequent damage before TT face starts shrinking.
+absorbs subsequent damage before FLOAT face starts shrinking.
 
 ### 2.4 Buffer asymmetry
 
@@ -590,7 +590,7 @@ The asymmetry $G \to P, F$ unchanged versus $L \to P, F$ both
 shrink (when $L$ exceeds the buffer) is a deliberate design choice
 that gives the protocol a preferred direction:
 
-- TT supply only expands on a deliberate mint event, never from
+- FLOAT supply only expands on a deliberate mint event, never from
   passive yield. This keeps the stablecoin's monetary base
   predictable.
 - Accumulated yield is *first-loss capital* — it absorbs damage
@@ -606,7 +606,7 @@ difference.
 
 The phrase "one dollar in four roles" might evoke shadow-banking
 re-pledging where the same collateral backs multiple uncorrelated
-claims that all default in stress. Trading Tower is structurally
+claims that all default in stress. Hyperfloat is structurally
 different:
 
 - Conservation invariants (§6.1) are enforced and tested. Every
@@ -717,24 +717,24 @@ yield source:
 | 1 | T-bill principal | none |
 | 2 | Insurance-seller stake across event markets | none |
 | 3 | LAP active-trade access | ≥3 markets allocated; max 50% in any one; reinsurance bought |
-| 4 | TT mint (full thread) | layer-3 role is *passive* B-book stake, not active LAP |
+| 4 | FLOAT mint (full thread) | layer-3 role is *passive* B-book stake, not active LAP |
 
 Tier 3 enforces *diversified, hedged* allocation as a hard gate
 (`evaluateTier3Gate` in `lib/ltv.js`). Tier 4 is per-thread
 mutually exclusive with active LAP trading: capital you've minted
-into TT is locked as a passive B-book underwriter; capital you
+into FLOAT is locked as a passive B-book underwriter; capital you
 haven't minted is free to actively trade.
 
 ### 4.2 Easy mode and minting irreversibility
 
-The retail user interacts with one button: *Convert $X to TT*.
+The retail user interacts with one button: *Convert $X to FLOAT*.
 This auto-runs the entire ladder in the safe configuration —
 allocate evenly across reinsurance-covered markets, buy
-reinsurance, deposit B-book stake, mint TT.
+reinsurance, deposit B-book stake, mint FLOAT.
 
 Minting is *deliberately reversal-resistant*:
 
-- Standard redemption is capped at 10% of TT supply per
+- Standard redemption is capped at 10% of FLOAT supply per
   redemption cycle (every ≈31 ticks ≈ monthly in sim time).
 - Express redemption bypasses the cap but costs a 5% penalty,
   routed to reinsurance sellers.
@@ -973,7 +973,7 @@ on credit risk.
 **Multi-asset thread layers.** Extend beyond insurance markets
 to include real-world assets (RWA), credit, sovereign debt as
 additional layers. The same dollar could simultaneously be a
-T-bill, an insurance stake, a B-book stake, a TT face, *and* a
+T-bill, an insurance stake, a B-book stake, a FLOAT face, *and* a
 fractional claim on a tokenised RWA portfolio. Each additional
 uncorrelated layer tightens the joint distribution further.
 
@@ -993,7 +993,7 @@ realised yield but less protection. Implement as a per-thread
 parameter $\gamma \in [0, 1]$:
 
 $$
-\Delta F = \gamma \cdot G \quad\text{(fraction of gain that auto-mints additional TT)}
+\Delta F = \gamma \cdot G \quad\text{(fraction of gain that auto-mints additional FLOAT)}
 $$
 
 ### 8.3 Robustness
@@ -1028,7 +1028,7 @@ when the system needs it most.
 
 **Cross-protocol thread composition.** Threads from Trading
 Tower used as collateral in another DeFi protocol. The thread's
-TT face is already stable-token-shaped, but the *underlying
+FLOAT face is already stable-token-shaped, but the *underlying
 principal* could also be exposed as collateral via a redemption
 proof. Damage in either protocol propagates through the thread.
 
@@ -1580,14 +1580,14 @@ it becomes the *acceptance gate* for new layers.
 
 ### 10.6 Worked example: 7-layer thread
 
-A plausible Trading Tower v2 thread:
+A plausible Hyperfloat v2 thread:
 
 | # | Layer | Yield (typical) | Stress correlation to layer 1 |
 | :--: | :-- | :--: | :--: |
 | 1 | Multi-sovereign T-bill basket (60%) + MMF (20%) + commercial paper (20%) | 4.0% | — |
 | 2 | Insurance-seller stakes across 16 standard events | 3.5% net | low |
 | 3 | B-book pool stake (passive underwriter) | 2.5% net | low |
-| 4 | TT face (stablecoin optionality) | — | n/a |
+| 4 | FLOAT face (stablecoin optionality) | — | n/a |
 | 5 | Catastrophe-bond underwriting | 4.0% | near-zero |
 | 6 | Weather-derivative underwriting | 2.5% | near-zero |
 | 7 | Mortality / longevity underwriting | 2.5% | near-zero |
@@ -1913,7 +1913,7 @@ and product spend.
 ## 13. Failure-Mode Taxonomy and Threat Model
 
 A protocol's safety claim is only as strong as its failure-mode
-analysis. This section catalogues the ways Trading Tower can
+analysis. This section catalogues the ways Hyperfloat can
 break, organised by failure category, with detection signals,
 mitigations, and recovery paths for each.
 
@@ -2087,7 +2087,7 @@ rotation; insurance from custody provider.
 
 Mass user behaviour breaking the protocol.
 
-**Run on TT (mass redemption).** All TT holders redeem at
+**Run on FLOAT (mass redemption).** All FLOAT holders redeem at
 once. *Detection*: redemption queue depth metric.
 *Mitigation*: 10% standard cap per cycle bounds the rate;
 express redemptions cost 5% (deters panic); user mints
@@ -2125,12 +2125,12 @@ existing positions are honoured (redemption always works).
 *Recovery*: re-domicile; legal challenge; or accept
 geographic restriction.
 
-**Reclassification of TT as a security.** Regulator
+**Reclassification of FLOAT as a security.** Regulator
 reclassifies the stablecoin under securities law.
 *Detection*: legal monitoring. *Mitigation*: pre-emptive
-legal opinions; structuring TT to satisfy multiple
+legal opinions; structuring FLOAT to satisfy multiple
 classifications (e-money, stablecoin, security if needed).
-*Recovery*: legal restructuring; potentially separate the TT
+*Recovery*: legal restructuring; potentially separate the FLOAT
 issuance from the protocol entity.
 
 **Sanctions / KYC mandate change.** New AML rules add
@@ -2174,7 +2174,7 @@ expected economic surplus from participating. This section
 walks through each role and shows the equilibrium conditions
 under which they rationally engage.
 
-### 14.1 The TT minter (retail user)
+### 14.1 The FLOAT minter (retail user)
 
 **Expected surplus**:
 $\mu_{\text{T-bill}} + \mu_{\text{insurance net}} + \mu_{\text{B-book net}} - \mu_{\text{deductibles}}$.
@@ -2259,14 +2259,14 @@ expected surplus. Total surplus comes from T-bill yield
 (external inflow) plus the *trade-off compensation* the
 counterparties pay to the user (premium for risk-shifting).
 
-**Stress regime**: surplus shifts. The TT minter's outcome
+**Stress regime**: surplus shifts. The FLOAT minter's outcome
 becomes more variable; insurance buyers' expected
 realisation rises; reinsurance sellers' realised loss
 rises; B-book underwriters either gain (most retail loses)
 or take a coordinated hit (covered by reinsurance).
 
 The protocol's empirical safety claim is precisely that the
-TT minter's *worst-case* surplus stays positive across
+FLOAT minter's *worst-case* surplus stays positive across
 stress regimes, even if their *median* surplus drops. The
 trade-off: in stress, the minter accepts a lower realised
 yield, but never a negative one (with the harness's 96%+
@@ -2283,8 +2283,8 @@ Compared to alternatives:
   conflict of interest is replaced with a market mechanism
   where underwriters explicitly accept the role. The CFD
   customer's worst-case has historically been ~95% drawdown;
-  the TT minter's worst-case is bounded at the deductible.
-- **Vs. DeFi yield aggregators**: Trading Tower's reinsurance
+  the FLOAT minter's worst-case is bounded at the deductible.
+- **Vs. DeFi yield aggregators**: Hyperfloat's reinsurance
   layer provides explicit downside protection that
   yield-aggregators don't. Welfare-positive for the user;
   welfare-negative for the systemic-risk-loving
@@ -2299,7 +2299,7 @@ case for the design.
 
 ## 15. Competitive Landscape
 
-Trading Tower sits at the intersection of three established
+Hyperfloat sits at the intersection of three established
 markets. This section positions it relative to the most
 relevant existing protocols.
 
@@ -2311,7 +2311,7 @@ relevant existing protocols.
 | **DAI (Maker)** | Crypto + RWA | ~5% (sDAI) | Overcollateralised crypto |
 | **USDe (Ethena)** | ETH + perp short basis | ~10% | Delta-neutral basis trade |
 | **USD0 (Usual)** | Tokenised T-bills (RWA) | ~4% | Pure RWA backing |
-| **Trading Tower TT** | Four-layer thread | ~9% | One $ in 4 uncorrelated roles |
+| **Hyperfloat FLOAT** | Four-layer thread | ~9% | One $ in 4 uncorrelated roles |
 
 Closest in yield: **USDe** at ~10% via basis trade. Closest
 in safety positioning: **USD0** with RWA backing. Trading
@@ -2326,11 +2326,11 @@ single mechanism (basis trade, RWA, or crypto leverage).
 | **Nexus Mutual** | Smart-contract failure | NXM token rewards | Mutual-assurance model |
 | **InsurAce** | Multi-protocol coverage | Premium income | Cross-chain |
 | **Solv** | Yield protection | Embedded in product | Vault-style |
-| **Trading Tower** | Per-event protocol-defined risks | Premium + thread yield | Integrated with stablecoin |
+| **Hyperfloat** | Per-event protocol-defined risks | Premium + thread yield | Integrated with stablecoin |
 
 Insurance protocols traditionally suffer from **underwriter
 attrition** — sellers leave during high-loss regimes,
-breaking coverage exactly when it's needed. Trading Tower
+breaking coverage exactly when it's needed. Hyperfloat
 mitigates this by:
 - Reinsurance lockup (200 ticks).
 - Counter-cyclical yield via the stress-correlation
@@ -2347,14 +2347,14 @@ mitigates this by:
 | **Hyperliquid** | CLOB on custom L1 | $5B+ daily volume | Performance |
 | **GMX** | Trader-vs-pool (GLP) | $500M+ TVL | Pool absorbs trader P&L |
 | **Plus500 / IG (CFD)** | Hidden B-book | Centralised | Regulated retail |
-| **Trading Tower (LAP)** | Geodesic auction with entropy weights | Pre-launch | Transparent A/B classifier; minority-side rebate |
+| **Hyperfloat (LAP)** | Geodesic auction with entropy weights | Pre-launch | Transparent A/B classifier; minority-side rebate |
 
-GMX's GLP model is the closest analogue to Trading Tower's
+GMX's GLP model is the closest analogue to Hyperfloat's
 B-book pool mechanic: passive LPs underwrite trader losses.
 The differences:
 - GMX's GLP has no equivalent to the four-layer thread —
   LPs are exposed only to the trading P&L.
-- Trading Tower's classifier is transparent; GMX has no
+- Hyperfloat's classifier is transparent; GMX has no
   per-user classification.
 - The minority-side entropy rebate is unique: it
   structurally pays users to take the unpopular side,
@@ -2367,21 +2367,21 @@ The differences:
 | **Yearn** | Strategy rotation across DeFi | Market | Vault aggregation |
 | **Pendle** | Yield tokenisation / fixed rate | Term | PT/YT split |
 | **Spark / sDAI** | Maker DSR | Conservative | Maker-backed |
-| **Trading Tower** | Multi-role yield stacking | Layered | Reinsurance-protected |
+| **Hyperfloat** | Multi-role yield stacking | Layered | Reinsurance-protected |
 
 Yield aggregators chain yields *sequentially* (deposit in A,
 A's yield deposits in B, etc.) — risk compounds. Trading
 Tower stacks yields *in parallel* on the same dollar — risk
 is bounded by the lowest-correlated layer.
 
-### 15.5 What Trading Tower uniquely brings
+### 15.5 What Hyperfloat uniquely brings
 
 1. **Four-layer thread**: a single primitive that produces
    four uncorrelated yields with lockstep solvency
    accounting. No competitor has this.
 2. **Joint-outcome safety claim**: empirically verified
    across stress scenarios. Most competitors verify only
-   per-product safety; Trading Tower verifies
+   per-product safety; Hyperfloat verifies
    user-level wealth.
 3. **Transparent A/B classifier**: directly addresses the
    moral failing of CFD B-book trading. No competitor
@@ -2413,22 +2413,22 @@ launch strategies (institutional-first vs. retail-first,
 permissionless vs. permissioned) imply different token
 designs.
 
-### 16.1 TT supply mechanics
+### 16.1 FLOAT supply mechanics
 
-TT is the protocol's stablecoin. Supply is governed
+FLOAT is the protocol's stablecoin. Supply is governed
 mechanically by mint and redemption events:
 
-- **Mint**: 1 TT created per $1 of free margin committed
+- **Mint**: 1 FLOAT created per $1 of free margin committed
   to a thread. Supply increases.
-- **Standard redemption**: TT face shrinks by the redeemed
+- **Standard redemption**: FLOAT face shrinks by the redeemed
   amount; user receives dollars proportional to thread
   principal. Supply decreases.
 - **Express redemption**: same with 5% penalty routed to
   reinsurance sellers. Supply decreases.
-- **Solvency clawback**: TT face exceeds backing principal
+- **Solvency clawback**: FLOAT face exceeds backing principal
   → clawback from wallet balance + soft debt.
 
-There is **no protocol-controlled mint or burn** of TT.
+There is **no protocol-controlled mint or burn** of FLOAT.
 The supply is a deterministic function of user actions and
 solvency state.
 
@@ -2494,22 +2494,22 @@ Treasury uses:
 - Governance distribution (if TWR exists).
 - Protocol development.
 
-### 16.5 What about TT yield to holders?
+### 16.5 What about FLOAT yield to holders?
 
-A common question: why doesn't TT pay yield to holders the
+A common question: why doesn't FLOAT pay yield to holders the
 way Ethena's USDe does (via sUSDe)?
 
-The answer is that TT's yield *already accrues to the
+The answer is that FLOAT's yield *already accrues to the
 minter via the thread*. A separate sTT-style token would
 double-count yield. A holder who wants the yield should
 either:
-- Hold TT and the underlying thread (i.e., be the minter
+- Hold FLOAT and the underlying thread (i.e., be the minter
   themselves), or
-- Buy TT in secondary, knowing they're holding a stable
+- Buy FLOAT in secondary, knowing they're holding a stable
   unit-of-account that doesn't yield (like a regular
   stablecoin).
 
-This separation is intentional — it preserves TT's role as
+This separation is intentional — it preserves FLOAT's role as
 *money* (transactional, payments) while keeping yield with
 the user who provided the collateral.
 
@@ -2683,12 +2683,12 @@ are hand-tuned. Open questions:
 
 ### 18.4 Composability
 
-When TT is used as collateral in another DeFi protocol,
+When FLOAT is used as collateral in another DeFi protocol,
 how does damage propagate? Open questions:
 
 - What's the right way to model cross-protocol
-  thread composition? If Protocol B accepts TT as
-  collateral and TT face damages from a Trading Tower
+  thread composition? If Protocol B accepts FLOAT as
+  collateral and FLOAT face damages from a Hyperfloat
   event, does Protocol B's user see the damage?
 - Can multiple Trading-Tower-style protocols *share* a
   reinsurance pool, gaining diversification benefits?
@@ -2710,7 +2710,7 @@ Open questions:
   detectable?
 - What's the appropriate liquidity-provider concentration
   limit? Real markets have rules limiting any single LP
-  to (say) 5% of pool capital — does Trading Tower need
+  to (say) 5% of pool capital — does Hyperfloat need
   similar?
 
 ### 18.6 Theoretical limits
@@ -2750,7 +2750,7 @@ actual harness runs, rounded to two significant figures.
   reinsurance face $3k / $3k / $4k across the three reinsurance
   products (total $10,000); buys B-book reinsurance face
   $3,000; deposits $10,000 as B-book threadDerivedStake; mints
-  10,000 TT into wallet.
+  10,000 FLOAT into wallet.
 - Synthetic counterparties: insurance buyers with matched
   $10,000 face; reinsurance + B-book reinsurance sellers each
   with $100,000 capital.
@@ -2799,7 +2799,7 @@ settlement):
 | Thread damage propagated | $1,250 across 4 layers |
 | Layer 2 (other markets) withdrawn pro-rata | -$1,094 (other 7 markets × weight) |
 | Layer 3 (B-book stake) shrunk | -$1,250 |
-| Layer 4 (TT face) | -$0 if buffer absorbs; else partial |
+| Layer 4 (FLOAT face) | -$0 if buffer absorbs; else partial |
 | Reinsurance payouts (3 products) | +$1,250 (full coverage) |
 
 **Net effect on user wealth at tick 87**:
@@ -2977,7 +2977,7 @@ into pairs (in to one party, out from another). Specifically:
   voluntaryStake to wallet for outside underwriters,
   threadDerivedStake to thread principal for thread holders.
   Sum: 0 within the pool.
-- **TT redemption**: $X TT destroyed → $(1 - \text{penalty})
+- **FLOAT redemption**: $X FLOAT destroyed → $(1 - \text{penalty})
   received as cash. Penalty routed to reinsurance sellers.
   Sum: 0 ($X face on the thread shrinks; $X dollars enter the
   user's wallet, less penalty, plus penalty to sellers).
@@ -3065,10 +3065,10 @@ redemptions yields a guaranteed risk-free profit beyond
 T-bill yield.
 
 **Sketch**: The candidate arbitrages would be:
-- Mint TT, immediately redeem for cash: cost > 0 (express
+- Mint FLOAT, immediately redeem for cash: cost > 0 (express
   penalty 5%; standard waits 31+ ticks at 10% per cycle).
   Bounded loss, no arbitrage.
-- Mint TT, take premium income, withdraw before trigger:
+- Mint FLOAT, take premium income, withdraw before trigger:
   insurance lockup (200 ticks) prevents this; thread
   redemption mechanics also prevent this.
 - Buy insurance, never claim, collect coverage on a fake
@@ -3176,7 +3176,7 @@ Incident response:
 
 A serious auditor will ask:
 
-1. *What's the worst-case loss for a TT holder under any
+1. *What's the worst-case loss for a FLOAT holder under any
    sequence of valid protocol operations?* — Bounded by the
    reinsurance deductibles plus express-redemption penalty.
    Closed-form bound is open work (§20.3).
@@ -3213,10 +3213,10 @@ the comparison in more detail than §15.1 allowed.
 - Both rely on a *non-traditional collateral mechanism* rather
   than overcollateralisation.
 - Both deliver yield via *income from a market mechanism*
-  (Ethena: perp funding; Trading Tower: insurance premiums +
+  (Ethena: perp funding; Hyperfloat: insurance premiums +
   B-book P&L).
 - Both have a *holder-separate-from-yield* design (sUSDe is
-  the yield-bearing version of USDe; Trading Tower's TT is
+  the yield-bearing version of USDe; Hyperfloat's FLOAT is
   fixed face, with yield going to the minter via the thread).
 
 ### 22.2 What's structurally different
@@ -3225,27 +3225,27 @@ the comparison in more detail than §15.1 allowed.
 in one mechanism — the basis trade between spot ETH and the
 ETH perp futures. When perp funding goes negative (bear
 markets, mid-2022 to mid-2023 conditions), USDe's yield drops
-sharply or goes negative. Trading Tower's yield is from four
+sharply or goes negative. Hyperfloat's yield is from four
 uncorrelated sources, so a regime shift in any one (e.g.,
 insurance triggers spike) has bounded impact on the others.
 
 **Single-counterparty concentration**: USDe relies on
 centralised perp exchanges (Binance, Bybit, OKX) holding the
-collateral. Trading Tower has no equivalent single-counterparty
+collateral. Hyperfloat has no equivalent single-counterparty
 dependency — the insurance markets and B-book pools are
 internal to the protocol; reinsurance is multi-product with
 independent capital.
 
 **Downside protection**: USDe's downside in stress is
 largely uncovered — the basis trade can produce realised
-losses if perp funding inverts persistently. Trading Tower has
+losses if perp funding inverts persistently. Hyperfloat has
 explicit reinsurance covering both layer-2 and layer-3 risks,
 empirically verified to cap downside at the deductible.
 
 **Transparency model**: USDe's yield mechanism is well-
 documented but the *specific* counterparty exposure (which
 perp exchanges hold what positions) is opaque in real time.
-Trading Tower's per-user position attribution is fully
+Hyperfloat's per-user position attribution is fully
 transparent (every flow is a named counterparty pair, see §6.1).
 
 ### 22.3 What Ethena does better (today)
@@ -3253,16 +3253,16 @@ transparent (every flow is a named counterparty pair, see §6.1).
 - **Distribution**: 5B+ TVL is real adoption that Trading
   Tower will need years to match.
 - **Operational maturity**: Ethena has launched, run through
-  multiple market regimes, and survived. Trading Tower is
+  multiple market regimes, and survived. Hyperfloat is
   still pre-production.
 - **Liquidity**: USDe has deep secondary-market liquidity on
-  multiple chains. TT secondary liquidity will need to be
+  multiple chains. FLOAT secondary liquidity will need to be
   bootstrapped.
 - **Simplicity**: Ethena's single-mechanism story is easier
-  to pitch to retail. Trading Tower's four-layer story
+  to pitch to retail. Hyperfloat's four-layer story
   requires more explanation, even with Easy mode.
 
-### 22.4 What Trading Tower does better (in design)
+### 22.4 What Hyperfloat does better (in design)
 
 - **Stress robustness**: the harness empirically verifies the
   joint-outcome claim across stress scenarios that USDe has
@@ -3322,12 +3322,12 @@ both protocols.
 
 ## 24. Conclusion
 
-Trading Tower demonstrates that capital efficiency and bounded
+Hyperfloat demonstrates that capital efficiency and bounded
 downside are not necessarily in tension. The four-layer thread
 mechanism puts one dollar in four uncorrelated yield-producing
 roles simultaneously, with damage propagation in lockstep and
 growth accumulating as a buffer that absorbs subsequent damage
-before TT face is at risk. The reinsurance architecture covers the
+before FLOAT face is at risk. The reinsurance architecture covers the
 two layers most exposed to event risk (insurance) and active-trader
 counterparty risk (B-book). The transparent A/B classifier directly
 addresses the structural moral problem of CFD broker B-book trading.
@@ -3353,7 +3353,7 @@ infrastructure around it.
 | :-- | :-- |
 | $T = (\text{owner}, P, F, \mathbf{w}, \tau_0)$ | A thread |
 | $P$ | Thread principal (layer 1) |
-| $F$ | Thread TT face (layer 4) |
+| $F$ | Thread FLOAT face (layer 4) |
 | $\mathbf{w}$ | Insurance fill weights (layer 2) |
 | $C_i, S_i$ | Coverage / insurer stake in market $i$ |
 | $r_0$ | `BASE_PREMIUM_RATE` |
@@ -3396,14 +3396,14 @@ result, bit-for-bit.
 | Term | Definition |
 | :-- | :-- |
 | **Thread** | The protocol's atomic unit. A single $1 of free margin committed via mint, simultaneously playing four (or more) yield-producing roles with lockstep solvency accounting. |
-| **Layer** | One of the roles a thread's principal plays. Layer 1 (T-bill), 2 (insurance seller), 3 (B-book pool stake), 4 (TT face). Future extensions add layers 5+. |
-| **Lockstep** | The invariant that damage to any layer propagates proportionally across all layers in the same tick; growth fattens layers 1–3 while leaving layer 4 (TT face) unchanged. |
-| **Buffer** | $P - F$, the gap between a thread's principal and outstanding TT face. Built up by growth events; absorbs damage before TT face shrinks. |
-| **TT** | Tower Tether, the protocol's stablecoin. 1 TT = 1 USD claim, redeemable via the queue. Minted 1:1 against thread principal. |
-| **Mint** | Atomic operation that opens a new thread: tags margin, posts insurer stakes, buys reinsurance + B-book reinsurance, deposits B-book stake, mints TT. |
-| **Standard redemption** | Slow exit: 10% of TT supply per cycle (~monthly), no penalty. |
+| **Layer** | One of the roles a thread's principal plays. Layer 1 (T-bill), 2 (insurance seller), 3 (B-book pool stake), 4 (FLOAT face). Future extensions add layers 5+. |
+| **Lockstep** | The invariant that damage to any layer propagates proportionally across all layers in the same tick; growth fattens layers 1–3 while leaving layer 4 (FLOAT face) unchanged. |
+| **Buffer** | $P - F$, the gap between a thread's principal and outstanding FLOAT face. Built up by growth events; absorbs damage before FLOAT face shrinks. |
+| **FLOAT** | Float, the protocol's stablecoin. 1 FLOAT = 1 USD claim, redeemable via the queue. Minted 1:1 against thread principal. |
+| **Mint** | Atomic operation that opens a new thread: tags margin, posts insurer stakes, buys reinsurance + B-book reinsurance, deposits B-book stake, mints FLOAT. |
+| **Standard redemption** | Slow exit: 10% of FLOAT supply per cycle (~monthly), no penalty. |
 | **Express redemption** | Fast exit: 5% penalty, bypasses the cap, rerouted to reinsurance sellers. |
-| **Solvency clawback** | When $\sum F > \sum P$ for a user's threads, extra TT is clawed back from wallet to wipe phantom face. Residual becomes soft debt. |
+| **Solvency clawback** | When $\sum F > \sum P$ for a user's threads, extra FLOAT is clawed back from wallet to wipe phantom face. Residual becomes soft debt. |
 | **Joint outcome** | $\text{wealth}_T - \text{deposit}_0$. The end-of-period wealth change for a user, summed across wallet + thread principal. |
 | **Epoch-separation invariant** | Insurance damage and LAP/B-book damage never coincide on the same tick (coprime strides). |
 | **Conservation invariant** | Per-tick net cash flow across all participants equals only the exogenous T-bill yield inflow. All internal flows zero-sum. |

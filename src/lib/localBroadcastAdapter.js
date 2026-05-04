@@ -17,7 +17,7 @@
 // What it doesn't do (yet)
 // ------------------------
 // Cross-tab protocol-state sync. Each tab settles its own insurance
-// markets, B-book pool, TT state. Two tabs running in parallel will
+// markets, B-book pool, FLOAT state. Two tabs running in parallel will
 // drift slightly because settlement is per-tab. A real backend
 // removes this divergence; for now it's a known demo limitation.
 // Tradable cross-tab effects: auction tips, classifier flow.

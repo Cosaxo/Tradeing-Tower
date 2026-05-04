@@ -6,7 +6,7 @@
 //   - Sits as the INSURER side of a market (collects premiums, pays
 //     out if the event triggers)
 //   - Backs LAP credit (LTV climbs with allocation diversification)
-//   - Backs Tower Tether mint capacity
+//   - Backs Float mint capacity
 //
 // The desk has three sections:
 //
@@ -15,7 +15,7 @@
 //      row shows the live premium rate, the user's current stake, and
 //      what they're earning.
 //   3. Reinsurance summary (read-only): the user's face on each of
-//      the 3 reinsurance products (auto-bought when minting TT).
+//      the 3 reinsurance products (auto-bought when minting FLOAT).
 
 import { useState, useMemo, useEffect } from "react";
 import { HelpHint } from "./Tooltip.jsx";
@@ -117,7 +117,7 @@ export function InsuranceDesk({
           Insurance Markets
           <HelpHint
             width={340}
-            text="Each market pays out when its event happens. As an insurer (default position), you collect a per-period premium and pay out if the event triggers. Spread your allocation across many distinct events to lift your LTV (more pool credit) and prepare for Tower Tether minting. The 3 reinsurance products auto-buy when you mint TT — they cover your insurer-side losses up to 1.5× the mint amount."
+            text="Each market pays out when its event happens. As an insurer (default position), you collect a per-period premium and pay out if the event triggers. Spread your allocation across many distinct events to lift your LTV (more pool credit) and prepare for Float minting. The 3 reinsurance products auto-buy when you mint FLOAT — they cover your insurer-side losses up to 1.5× the mint amount."
           />
         </span>
         <span className="text-[10px] font-mono px-2 py-0.5 rounded border border-indigo-700 bg-indigo-950 text-indigo-300">
@@ -335,7 +335,7 @@ function ReinsuranceSummary({ reinsurance, playerId }) {
           Reinsurance
           <HelpHint
             width={300}
-            text="Three parallel products that pay out when YOU (as an insurer in any market) face a claim. Auto-bought when you mint Tower Tether — face is sized to 1.5× the mint amount, split across the 3 products. You can hold them outside of TT minting too; they protect any insurer-side exposure."
+            text="Three parallel products that pay out when YOU (as an insurer in any market) face a claim. Auto-bought when you mint Float — face is sized to 1.5× the mint amount, split across the 3 products. You can hold them outside of FLOAT minting too; they protect any insurer-side exposure."
           />
         </span>
         <span className="text-[10px] font-mono text-gray-400">

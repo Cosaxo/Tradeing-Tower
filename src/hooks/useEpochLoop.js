@@ -20,8 +20,8 @@ import {
   runRedemptionCycle,
   applySolvencyCheck,
   damageThread,
-  submitRedemption as submitTtRedemption,
-} from "../lib/towerTether.js";
+  submitRedemption as submitFloatsRedemption,
+} from "../lib/floats.js";
 import { adjustThreadDerived } from "../lib/bBookPool.js";
 import { detectTriggeredEvents } from "../lib/insuranceEvents.js";
 import { settleMarketTick, withdrawInsurer, postInsurer } from "../lib/insuranceMarket.js";
@@ -40,8 +40,8 @@ export function useEpochLoop({
   setPlayer,        // React setter
   openPositions = [], // current player positions — used to look up paired LAPs by id during rental settlement
   setOpenPositions, // React setter for openPositions
-  ttState = null,   // Tower Tether global state (threads, balances, queue, etc.)
-  setTtState,       // React setter for TT state
+  floatsState = null,   // Float global state (threads, balances, queue, etc.)
+  setFloatsState,       // React setter for FLOAT state
   insuranceState = null, // global insurance markets + reinsurance + allocations
   setInsuranceState,     // React setter for insuranceState
   bBookState = null, // global B-book pool state
@@ -71,15 +71,15 @@ export function useEpochLoop({
   pairStatesRef.current = pairStates;
   const openPositionsRef = useRef(openPositions);
   openPositionsRef.current = openPositions;
-  const ttStateRef = useRef(ttState);
-  ttStateRef.current = ttState;
+  const floatsStateRef = useRef(floatsState);
+  floatsStateRef.current = floatsState;
   const insuranceStateRef = useRef(insuranceState);
   insuranceStateRef.current = insuranceState;
   const bBookStateRef = useRef(bBookState);
   bBookStateRef.current = bBookState;
 
   // Helper: pick a representative epoch from the pair-states object.
-  // Used by the TT redemption cycle which is global, not per-pair.
+  // Used by the FLOAT redemption cycle which is global, not per-pair.
   function epochOfFirstPair(pairStatesObj) {
     for (const pk of ACTIVE_PAIRS) {
       if (pairStatesObj[pk]?.epochIndex != null) {
@@ -160,11 +160,11 @@ export function useEpochLoop({
       const logs = sideEffects.logs;
       const next = { ...prev };
 
-      // Working TT state for thread growth/damage. The per-pair block
+      // Working FLOAT state for thread growth/damage. The per-pair block
       // mutates this incrementally as rental tips compound into threads;
       // the global blocks below also mutate it. We persist the final
       // version into sideEffects at the apply phase.
-      let workingTtRunning = ttStateRef.current;
+      let workingTtRunning = floatsStateRef.current;
       // Aggregated insurer-stake adds resulting from thread growth this
       // tick. Applied to insuranceState before the global insurance
       // settlement runs so premium streams account for the new size.
@@ -507,10 +507,10 @@ export function useEpochLoop({
         insuranceStateRef.current = workingIns;
         sideEffects.nextInsuranceState = workingIns;
       }
-      // Persist the running TT state from any growThread mutations
+      // Persist the running FLOAT state from any growThread mutations
       // before the global blocks below read it.
-      if (workingTtRunning !== ttStateRef.current) {
-        ttStateRef.current = workingTtRunning;
+      if (workingTtRunning !== floatsStateRef.current) {
+        floatsStateRef.current = workingTtRunning;
         sideEffects.nextTtState = workingTtRunning;
       }
 
@@ -522,7 +522,7 @@ export function useEpochLoop({
       // detection). For each market: detect whether its event triggered
       // given the freshly-updated per-pair state, then settle via
       // settleMarketTick. Aggregate buyer-side claim outflows into the
-      // reinsurance settlement so a TT-minter who got hit on insurance
+      // reinsurance settlement so a FLOAT-minter who got hit on insurance
       // recovers the corresponding fraction from reinsurance buyers.
       //
       // All cash flows (premium in/out, claim in/out, reinsurance
@@ -634,9 +634,9 @@ export function useEpochLoop({
         // By the 4-layer invariant, all four layers shrink by that
         // amount: T-bill (principal), other insurance fills covered
         // by this thread, B-book pool stake (threadDerivedStake), and
-        // ttFace.
+        // floatFace.
         // -----------------------------------------------------------------
-        let workingTtForDamage = ttStateRef.current;
+        let workingTtForDamage = floatsStateRef.current;
         let workingBBookForDamage = bBookStateRef.current;
         const playerThreadStakeRelease = { delta: 0 };
         if (tickClaimLosses.length > 0 && workingTtForDamage) {
@@ -663,12 +663,12 @@ export function useEpochLoop({
                 const dmgAmount = damageBudget * share;
                 if (dmgAmount <= 1e-9) continue;
                 const dmg = damageThread({
-                  ttState: workingTtForDamage,
+                  floatsState: workingTtForDamage,
                   threadId: t.id,
                   delta: dmgAmount,
                 });
                 if (dmg.deltaApplied <= 1e-9) continue;
-                workingTtForDamage = dmg.ttState;
+                workingTtForDamage = dmg.floatsState;
                 if (uid === pid) {
                   playerThreadStakeRelease.delta += dmg.deltaApplied;
                 }
@@ -702,15 +702,15 @@ export function useEpochLoop({
                   return r.ok ? r.market : m;
                 });
                 logs.push(
-                  `[TT-THREAD ${t.id}] insurance damage $${dmg.deltaApplied.toFixed(2)} (event ${eventId}) — all 4 layers shrunk`
+                  `[FLOAT-THREAD ${t.id}] insurance damage $${dmg.deltaApplied.toFixed(2)} (event ${eventId}) — all 4 layers shrunk`
                 );
               }
             }
           }
         }
 
-        if (workingTtForDamage !== ttStateRef.current) {
-          ttStateRef.current = workingTtForDamage;
+        if (workingTtForDamage !== floatsStateRef.current) {
+          floatsStateRef.current = workingTtForDamage;
           sideEffects.nextTtState = workingTtForDamage;
         }
         if (workingBBookForDamage !== bBookStateRef.current) {
@@ -732,11 +732,11 @@ export function useEpochLoop({
       }
 
       // -----------------------------------------------------------------
-      // Tower Tether redemption cycle (thread-based)
+      // Float redemption cycle (thread-based)
       //
       // Runs on its own prime stride (REDEMPTION_EVERY) coprime with
       // analytics + insurance/LAP, ~monthly in sim-days. On each cycle:
-      //   1. Merchant simulator queues 50% of its TT balance for
+      //   1. Merchant simulator queues 50% of its FLOAT balance for
       //      standard redemption — creates organic queue pressure.
       //   2. runRedemptionCycle drains express + standard requests up
       //      to the 10% cap and returns thread-level unwinds.
@@ -748,36 +748,36 @@ export function useEpochLoop({
       //   5. Pay redemption dollars to each holder's margin.
       //   6. Solvency recheck per affected minter.
       // -----------------------------------------------------------------
-      if (mediumCountRef.current % REDEMPTION_EVERY === 0 && ttStateRef.current) {
+      if (mediumCountRef.current % REDEMPTION_EVERY === 0 && floatsStateRef.current) {
         const tickEpoch = epochOfFirstPair(next);
-        let workingTt = ttStateRef.current;
+        let workingTt = floatsStateRef.current;
         let workingInsurance = insuranceStateRef.current;
 
         // Step 1: merchant auto-redemption.
         if ((workingTt.merchantBalance ?? 0) > 1) {
           const merchantRedeem = workingTt.merchantBalance * 0.5;
-          const submitted = submitTtRedemption({
-            ttState: workingTt,
+          const submitted = submitFloatsRedemption({
+            floatsState: workingTt,
             userId: "MERCHANT",
             amount: merchantRedeem,
             express: false,
             currentEpoch: tickEpoch,
           });
           if (submitted.ok) {
-            workingTt = submitted.ttState;
+            workingTt = submitted.floatsState;
             logs.push(
-              `[MERCHANT] queued ${merchantRedeem.toFixed(2)} TT for redemption`
+              `[MERCHANT] queued ${merchantRedeem.toFixed(2)} FLOAT for redemption`
             );
           }
         }
 
         // Step 2: drain the queue.
         const cycle = runRedemptionCycle({
-          ttState: workingTt,
+          floatsState: workingTt,
           currentEpoch: tickEpoch,
         });
         cycle.logs.forEach((l) => logs.push(l));
-        workingTt = cycle.ttState;
+        workingTt = cycle.floatsState;
 
         // Step 3: apply per-thread unwinds. For each unwind:
         //   - withdraw the per-market insurance stakes (layer 2)
@@ -793,7 +793,7 @@ export function useEpochLoop({
               markets: workingInsurance.markets.map((m) => {
                 const cut = u.insuranceLayerDeltas[m.eventId] ?? 0;
                 if (cut <= 1e-9) return m;
-                // TT redemption thread unwind — bypass lockup
+                // FLOAT redemption thread unwind — bypass lockup
                 // (redemption itself gates the user via the 10%
                 // standard cap or 5% express penalty).
                 const r = withdrawInsurer({
@@ -819,7 +819,7 @@ export function useEpochLoop({
         }
         if (cycle.threadUnwinds.length > 0) {
           logs.push(
-            `[TT-UNWIND] ${cycle.threadUnwinds.length} thread(s) shrunk · total $${cycle.threadUnwinds
+            `[FLOAT-UNWIND] ${cycle.threadUnwinds.length} thread(s) shrunk · total $${cycle.threadUnwinds
               .reduce((s, u) => s + u.delta, 0)
               .toFixed(2)}`
           );
@@ -848,7 +848,7 @@ export function useEpochLoop({
           });
           workingInsurance = { ...workingInsurance, reinsurance: splitProducts };
           logs.push(
-            `[TT-PENALTY] $${cycle.penaltyToPool.toFixed(2)} routed to reinsurance sellers (split by coverageFraction)`
+            `[FLOAT-PENALTY] $${cycle.penaltyToPool.toFixed(2)} routed to reinsurance sellers (split by coverageFraction)`
           );
         }
 
@@ -862,13 +862,13 @@ export function useEpochLoop({
         const affectedMinters = new Set(cycle.threadUnwinds.map((u) => u.ownerId));
         for (const minterId of affectedMinters) {
           const solvency = applySolvencyCheck({
-            ttState: workingTt,
+            floatsState: workingTt,
             userId: minterId,
           });
-          workingTt = solvency.ttState;
+          workingTt = solvency.floatsState;
           if (solvency.clawback > 0 || solvency.newDebt > 0) {
             logs.push(
-              `[TT-SOLVENCY] ${minterId} clawback ${solvency.clawback.toFixed(2)} TT, debt +${solvency.newDebt.toFixed(2)}`
+              `[FLOAT-SOLVENCY] ${minterId} clawback ${solvency.clawback.toFixed(2)} FLOAT, debt +${solvency.newDebt.toFixed(2)}`
             );
           }
         }
@@ -896,8 +896,8 @@ export function useEpochLoop({
       pairStatesRef.current = next;
 
       if (sideEffects.nextTtState) {
-        setTtState(sideEffects.nextTtState);
-        ttStateRef.current = sideEffects.nextTtState;
+        setFloatsState(sideEffects.nextTtState);
+        floatsStateRef.current = sideEffects.nextTtState;
       }
       if (sideEffects.nextInsuranceState) {
         setInsuranceState(sideEffects.nextInsuranceState);
@@ -977,7 +977,7 @@ export function useEpochLoop({
         setLogs((prev) => [...prev.slice(-300), ...sideEffects.logs]);
       }
     }
-  }, [setPairStates, player, setPlayer, setLogs, addToast, setRoleLedger, setTtState, setInsuranceState, setBBookState, setOpenPositions, flowAdapter]);
+  }, [setPairStates, player, setPlayer, setLogs, addToast, setRoleLedger, setFloatsState, setInsuranceState, setBBookState, setOpenPositions, flowAdapter]);
 
   // -------------------------------------------------------------------------
   // Interval management

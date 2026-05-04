@@ -1,5 +1,5 @@
 // Getting-Started hint — shows the user where they are in the
-// pool→credit→LAP→TT flow when they haven't progressed past it.
+// pool→credit→LAP→FLOAT flow when they haven't progressed past it.
 //
 // Auto-collapses (becomes a small "show steps" link) once they have
 // at least one allocation, one open position, and one mint. Always
@@ -35,14 +35,14 @@ export function GettingStarted({
     {
       key: "mint",
       tab: "Insurance",
-      title: "3. Mint Tower Tether (TT)",
-      desc: "Once your LTV is high enough (≥ 0.6), mint TT against your allocation. Reinsurance is auto-bought to cover you.",
+      title: "3. Mint Float (FLOAT)",
+      desc: "Once your LTV is high enough (≥ 0.6), mint FLOAT against your allocation. Reinsurance is auto-bought to cover you.",
       done: hasMinted,
     },
     {
       key: "spend",
       tab: "Insurance",
-      title: "4. Send TT to a merchant",
+      title: "4. Send FLOAT to a merchant",
       desc: "Simulates real-world payment. The merchant queues redemption; you watch your collateral drain pro-rata each cycle.",
       done: hasMerchantSent,
     },

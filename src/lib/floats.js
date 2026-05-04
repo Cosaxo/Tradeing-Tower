@@ -1,4 +1,4 @@
-// Tower Tether (TT) — thread-based, hyper-rehypothecated stablecoin.
+// Float (FLOAT) — thread-based, hyper-rehypothecated stablecoin.
 //
 // A "thread" is one unit of value backed by the SAME dollar serving four
 // roles simultaneously, each carrying full notional:
@@ -8,7 +8,7 @@
 //   3. B-book pool underwriter stake (the protocol's open counterparty
 //      pool for B-classified user flow — earns user tip income +
 //      absorbs their directional P&L pro-rata)
-//   4. TT in circulation
+//   4. FLOAT in circulation
 //
 // Mint is 1:1 against free margin — no LTV gate, no coefficient. The
 // gating constraint is "do you have $X of free margin to commit to all
@@ -36,7 +36,7 @@
 // -----------
 //   {
 //     threads:   Thread[],        // active + closed (closed kept for audit)
-//     balances:  { [uid]: TT },   // wallet TT
+//     balances:  { [uid]: FLOAT },   // wallet FLOAT
 //     redemptionQueue: [...],     // pending redemption requests
 //     merchantBalance: number,
 //     debtByUser: { [uid]: $ },   // shortfall when wallet doesn't cover claw-back
@@ -47,7 +47,7 @@
 //   Thread {
 //     id, ownerId, createdAtEpoch,
 //     principal,                  // T-bill stake (current)
-//     ttFace,                     // outstanding TT minted from this thread
+//     floatFace,                     // outstanding FLOAT minted from this thread
 //     insuranceWeights: { [eventId]: weight }, // sum ≈ 1
 //     closed: boolean,
 //   }
@@ -56,7 +56,7 @@
 //   The thread's principal IS its contribution to the pool; they
 //   stay in lockstep via adjustThreadDerived calls in the App layer.
 //
-//   `mintedByUser[uid]` is derived from threads (sum of ttFace per owner)
+//   `mintedByUser[uid]` is derived from threads (sum of floatFace per owner)
 //   so we don't have to keep two maps in sync. See `mintedByOf`.
 
 import {
@@ -77,7 +77,7 @@ const _reqId = () => `RED-${Date.now().toString(36)}-${(++_reqCtr).toString(36)}
 // State factory
 // ---------------------------------------------------------------------------
 
-export function initTtState() {
+export function initFloatsState() {
   return {
     threads: [],
     balances: {},
@@ -93,39 +93,39 @@ export function initTtState() {
 // Derived accessors
 // ---------------------------------------------------------------------------
 
-export function activeThreads(ttState) {
-  return (ttState?.threads ?? []).filter((t) => !t.closed && t.ttFace > 1e-9);
+export function activeThreads(floatsState) {
+  return (floatsState?.threads ?? []).filter((t) => !t.closed && t.floatFace > 1e-9);
 }
 
-export function threadsOf(ttState, ownerId) {
-  return activeThreads(ttState).filter((t) => t.ownerId === ownerId);
+export function threadsOf(floatsState, ownerId) {
+  return activeThreads(floatsState).filter((t) => t.ownerId === ownerId);
 }
 
-export function totalSupply(ttState) {
-  return activeThreads(ttState).reduce((s, t) => s + t.ttFace, 0);
+export function totalSupply(floatsState) {
+  return activeThreads(floatsState).reduce((s, t) => s + t.floatFace, 0);
 }
 
-export function totalCirculating(ttState) {
-  const balances = Object.values(ttState?.balances ?? {}).reduce((s, v) => s + v, 0);
-  return balances + (ttState?.merchantBalance ?? 0);
+export function totalCirculating(floatsState) {
+  const balances = Object.values(floatsState?.balances ?? {}).reduce((s, v) => s + v, 0);
+  return balances + (floatsState?.merchantBalance ?? 0);
 }
 
-export function balanceOf(ttState, userId) {
-  return ttState?.balances?.[userId] ?? 0;
+export function balanceOf(floatsState, userId) {
+  return floatsState?.balances?.[userId] ?? 0;
 }
 
-export function mintedByOf(ttState, userId) {
-  return threadsOf(ttState, userId).reduce((s, t) => s + t.ttFace, 0);
+export function mintedByOf(floatsState, userId) {
+  return threadsOf(floatsState, userId).reduce((s, t) => s + t.floatFace, 0);
 }
 
-export function debtOf(ttState, userId) {
-  return ttState?.debtByUser?.[userId] ?? 0;
+export function debtOf(floatsState, userId) {
+  return floatsState?.debtByUser?.[userId] ?? 0;
 }
 
 // Principal currently locked across a user's active threads. Useful for
 // the UI's "thread stake" chip.
-export function totalThreadPrincipal(ttState, userId) {
-  return threadsOf(ttState, userId).reduce((s, t) => s + t.principal, 0);
+export function totalThreadPrincipal(floatsState, userId) {
+  return threadsOf(floatsState, userId).reduce((s, t) => s + t.principal, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -182,12 +182,12 @@ export function calcInsuranceFillWeights({ eligibleMarkets, reinsuranceLive }) {
 //   - tagging the user's margin for `principal`
 //   - auto-buying reinsurance (the 1.5× rule) to hedge the insurer-side
 //
-// This module owns the thread bookkeeping + TT mint. The atomic
-// orchestration lives in App.jsx (handleMintTT).
+// This module owns the thread bookkeeping + FLOAT mint. The atomic
+// orchestration lives in App.jsx (handleMintFloats).
 //
-// Returns { ok, ttState, thread, reason? }.
+// Returns { ok, floatsState, thread, reason? }.
 export function openThread({
-  ttState,
+  floatsState,
   ownerId,
   principal,
   insuranceWeights,
@@ -202,18 +202,18 @@ export function openThread({
     ownerId,
     createdAtEpoch: currentEpoch ?? 0,
     principal,
-    ttFace: principal, // 1:1 mint
+    floatFace: principal, // 1:1 mint
     insuranceWeights: { ...(insuranceWeights ?? {}) },
     closed: false,
   };
   return {
     ok: true,
-    ttState: {
-      ...ttState,
-      threads: [...(ttState.threads ?? []), thread],
+    floatsState: {
+      ...floatsState,
+      threads: [...(floatsState.threads ?? []), thread],
       balances: {
-        ...ttState.balances,
-        [ownerId]: (ttState.balances?.[ownerId] ?? 0) + principal,
+        ...floatsState.balances,
+        [ownerId]: (floatsState.balances?.[ownerId] ?? 0) + principal,
       },
     },
     thread,
@@ -228,52 +228,52 @@ export function openThread({
 // by `delta`. Returns:
 //
 //   {
-//     ttState,
+//     floatsState,
 //     deltaApplied,                 // actual amount written down (capped at principal)
 //     insuranceLayerDeltas,         // { [eventId]: amountToWithdrawFromMarket }
 //     poolLayerDelta,               // amount to remove from B-book threadDerivedStake
-//     ttFaceDelta,                  // shrink in mintedByUser / outstanding TT
+//     floatFaceDelta,                  // shrink in mintedByUser / outstanding FLOAT
 //   }
 //
 // The caller (epoch loop / App handlers) is responsible for actually
 // mutating the insurance markets and bBookPool state using these
 // deltas (via withdrawInsurer + adjustThreadDerived).
-export function damageThread({ ttState, threadId, delta }) {
+export function damageThread({ floatsState, threadId, delta }) {
   if (!Number.isFinite(delta) || delta <= 0) {
     return {
-      ttState,
+      floatsState,
       deltaApplied: 0,
       insuranceLayerDeltas: {},
       poolLayerDelta: 0,
-      ttFaceDelta: 0,
+      floatFaceDelta: 0,
     };
   }
-  const threads = ttState.threads ?? [];
+  const threads = floatsState.threads ?? [];
   const idx = threads.findIndex((t) => t.id === threadId);
   if (idx < 0) {
     return {
-      ttState,
+      floatsState,
       deltaApplied: 0,
       insuranceLayerDeltas: {},
       poolLayerDelta: 0,
-      ttFaceDelta: 0,
+      floatFaceDelta: 0,
     };
   }
   const t = threads[idx];
   if (t.closed || t.principal <= 0) {
     return {
-      ttState,
+      floatsState,
       deltaApplied: 0,
       insuranceLayerDeltas: {},
       poolLayerDelta: 0,
-      ttFaceDelta: 0,
+      floatFaceDelta: 0,
     };
   }
   const applied = Math.min(t.principal, delta);
   const newPrincipal = t.principal - applied;
-  // ttFace can't exceed principal; shrink it pro-rata if needed.
-  const newTtFace = Math.min(t.ttFace, newPrincipal);
-  const ttFaceDelta = t.ttFace - newTtFace;
+  // floatFace can't exceed principal; shrink it pro-rata if needed.
+  const newTtFace = Math.min(t.floatFace, newPrincipal);
+  const floatFaceDelta = t.floatFace - newTtFace;
 
   const insuranceLayerDeltas = {};
   for (const [eventId, w] of Object.entries(t.insuranceWeights ?? {})) {
@@ -283,17 +283,17 @@ export function damageThread({ ttState, threadId, delta }) {
   const updatedThread = {
     ...t,
     principal: newPrincipal,
-    ttFace: newTtFace,
+    floatFace: newTtFace,
     closed: newPrincipal <= 1e-9,
   };
   const newThreads = threads.map((x, i) => (i === idx ? updatedThread : x));
 
   return {
-    ttState: { ...ttState, threads: newThreads },
+    floatsState: { ...floatsState, threads: newThreads },
     deltaApplied: applied,
     insuranceLayerDeltas,
     poolLayerDelta: applied,
-    ttFaceDelta,
+    floatFaceDelta,
   };
 }
 
@@ -302,15 +302,15 @@ export function damageThread({ ttState, threadId, delta }) {
 // ---------------------------------------------------------------------------
 
 // Apply a gain to a single thread. Principal grows; layers 1, 2, and 3
-// fatten by the same amount. Layer 4 (ttFace) is INTENTIONALLY not
-// touched — TT supply only expands on a deliberate mint event, never
-// from passive yield. The buffer (principal - ttFace) acts as
+// fatten by the same amount. Layer 4 (floatFace) is INTENTIONALLY not
+// touched — FLOAT supply only expands on a deliberate mint event, never
+// from passive yield. The buffer (principal - floatFace) acts as
 // over-collateralisation: subsequent damage eats the buffer before
-// ttFace starts shrinking.
+// floatFace starts shrinking.
 //
 // Returns:
 //   {
-//     ttState,                      // thread.principal incremented
+//     floatsState,                      // thread.principal incremented
 //     gainApplied,                  // actual amount written up
 //     insuranceLayerAdds,           // { [eventId]: amountToPostAsInsurer }
 //     poolLayerAdd,                 // amount to add to bBookPool threadDerivedStake
@@ -322,20 +322,20 @@ export function damageThread({ ttState, threadId, delta }) {
 //
 // T-bill is the principal itself, so no separate caller action is
 // needed for layer 1.
-export function growThread({ ttState, threadId, gain }) {
+export function growThread({ floatsState, threadId, gain }) {
   if (!Number.isFinite(gain) || gain <= 0) {
     return {
-      ttState,
+      floatsState,
       gainApplied: 0,
       insuranceLayerAdds: {},
       poolLayerAdd: 0,
     };
   }
-  const threads = ttState.threads ?? [];
+  const threads = floatsState.threads ?? [];
   const idx = threads.findIndex((t) => t.id === threadId);
   if (idx < 0) {
     return {
-      ttState,
+      floatsState,
       gainApplied: 0,
       insuranceLayerAdds: {},
       poolLayerAdd: 0,
@@ -344,7 +344,7 @@ export function growThread({ ttState, threadId, gain }) {
   const t = threads[idx];
   if (t.closed) {
     return {
-      ttState,
+      floatsState,
       gainApplied: 0,
       insuranceLayerAdds: {},
       poolLayerAdd: 0,
@@ -357,11 +357,11 @@ export function growThread({ ttState, threadId, gain }) {
   const updatedThread = {
     ...t,
     principal: t.principal + gain,
-    // ttFace UNCHANGED — gains never auto-mint TT.
+    // floatFace UNCHANGED — gains never auto-mint FLOAT.
   };
   const newThreads = threads.map((x, i) => (i === idx ? updatedThread : x));
   return {
-    ttState: { ...ttState, threads: newThreads },
+    floatsState: { ...floatsState, threads: newThreads },
     gainApplied: gain,
     insuranceLayerAdds,
     poolLayerAdd: gain,
@@ -369,31 +369,31 @@ export function growThread({ ttState, threadId, gain }) {
 }
 
 // ---------------------------------------------------------------------------
-// TT transfer / redemption queue
+// FLOAT transfer / redemption queue
 // ---------------------------------------------------------------------------
 
-export function transferTT({ ttState, fromId, toId, amount }) {
+export function transferFloats({ floatsState, fromId, toId, amount }) {
   if (!Number.isFinite(amount) || amount <= 0) {
     return { ok: false, reason: "amount must be positive" };
   }
-  const fromBal = ttState.balances?.[fromId] ?? 0;
+  const fromBal = floatsState.balances?.[fromId] ?? 0;
   if (fromBal < amount - 1e-6) {
-    return { ok: false, reason: "insufficient TT balance" };
+    return { ok: false, reason: "insufficient FLOAT balance" };
   }
   const next = {
-    ...ttState,
-    balances: { ...ttState.balances, [fromId]: fromBal - amount },
+    ...floatsState,
+    balances: { ...floatsState.balances, [fromId]: fromBal - amount },
   };
   if (toId === "MERCHANT") {
-    next.merchantBalance = (ttState.merchantBalance ?? 0) + amount;
+    next.merchantBalance = (floatsState.merchantBalance ?? 0) + amount;
   } else {
-    next.balances[toId] = (ttState.balances?.[toId] ?? 0) + amount;
+    next.balances[toId] = (floatsState.balances?.[toId] ?? 0) + amount;
   }
-  return { ok: true, ttState: next };
+  return { ok: true, floatsState: next };
 }
 
 export function submitRedemption({
-  ttState,
+  floatsState,
   userId,
   amount,
   express = false,
@@ -404,16 +404,16 @@ export function submitRedemption({
   }
   const fromBalance =
     userId === "MERCHANT"
-      ? (ttState.merchantBalance ?? 0)
-      : (ttState.balances?.[userId] ?? 0);
+      ? (floatsState.merchantBalance ?? 0)
+      : (floatsState.balances?.[userId] ?? 0);
   if (fromBalance < amount - 1e-6) {
-    return { ok: false, reason: "insufficient TT balance" };
+    return { ok: false, reason: "insufficient FLOAT balance" };
   }
-  const next = { ...ttState };
+  const next = { ...floatsState };
   if (userId === "MERCHANT") {
     next.merchantBalance = fromBalance - amount;
   } else {
-    next.balances = { ...ttState.balances, [userId]: fromBalance - amount };
+    next.balances = { ...floatsState.balances, [userId]: fromBalance - amount };
   }
   const entry = {
     id: _reqId(),
@@ -423,28 +423,28 @@ export function submitRedemption({
     penaltyRate: express ? EXPRESS_PENALTY_RATE : 0,
     submittedAtEpoch: currentEpoch,
   };
-  next.redemptionQueue = [...(ttState.redemptionQueue ?? []), entry];
-  return { ok: true, ttState: next, requestId: entry.id };
+  next.redemptionQueue = [...(floatsState.redemptionQueue ?? []), entry];
+  return { ok: true, floatsState: next, requestId: entry.id };
 }
 
-export function cancelRedemption({ ttState, requestId }) {
-  const queue = ttState.redemptionQueue ?? [];
+export function cancelRedemption({ floatsState, requestId }) {
+  const queue = floatsState.redemptionQueue ?? [];
   const idx = queue.findIndex((r) => r.id === requestId);
   if (idx < 0) return { ok: false, reason: "request not found" };
   const entry = queue[idx];
   const next = {
-    ...ttState,
+    ...floatsState,
     redemptionQueue: queue.filter((_, i) => i !== idx),
   };
   if (entry.userId === "MERCHANT") {
-    next.merchantBalance = (ttState.merchantBalance ?? 0) + entry.amount;
+    next.merchantBalance = (floatsState.merchantBalance ?? 0) + entry.amount;
   } else {
     next.balances = {
-      ...ttState.balances,
-      [entry.userId]: (ttState.balances?.[entry.userId] ?? 0) + entry.amount,
+      ...floatsState.balances,
+      [entry.userId]: (floatsState.balances?.[entry.userId] ?? 0) + entry.amount,
     };
   }
-  return { ok: true, ttState: next };
+  return { ok: true, floatsState: next };
 }
 
 // ---------------------------------------------------------------------------
@@ -460,23 +460,23 @@ export function cancelRedemption({ ttState, requestId }) {
 // the epoch loop:
 //   - which thread shrank by how much (so it can withdraw insurance
 //     stakes per market and shrink the paired LAP)
-//   - which TT face came out of which minter (so it can update
+//   - which FLOAT face came out of which minter (so it can update
 //     mintedByUser-driven UI / accounting)
 //
 // Returns:
 //   {
-//     ttState,
+//     floatsState,
 //     dollarsOut,            // { redeemerUid: $ }
 //     threadUnwinds,         // [{ threadId, ownerId, delta, insuranceLayerDeltas, poolLayerDelta }]
 //     penaltyToPool,         // express-penalty $ (epoch loop routes to reinsurance sellers)
 //     logs,
 //   }
-export function runRedemptionCycle({ ttState, currentEpoch }) {
+export function runRedemptionCycle({ floatsState, currentEpoch }) {
   const logs = [];
-  const queue = [...(ttState.redemptionQueue ?? [])];
+  const queue = [...(floatsState.redemptionQueue ?? [])];
   if (queue.length === 0) {
     return {
-      ttState: { ...ttState, lastRedemptionEpoch: currentEpoch },
+      floatsState: { ...floatsState, lastRedemptionEpoch: currentEpoch },
       dollarsOut: {},
       threadUnwinds: [],
       penaltyToPool: 0,
@@ -484,11 +484,11 @@ export function runRedemptionCycle({ ttState, currentEpoch }) {
     };
   }
 
-  const supplyAtCycleStart = totalSupply(ttState);
+  const supplyAtCycleStart = totalSupply(floatsState);
   const standardCap = supplyAtCycleStart * STANDARD_REDEMPTION_CAP_PCT;
   const dollarsOut = {};
   const threadUnwinds = [];
-  let workingTt = ttState;
+  let workingTt = floatsState;
   let penaltyToPool = 0;
   let standardDrained = 0;
   const remaining = [];
@@ -506,15 +506,15 @@ export function runRedemptionCycle({ ttState, currentEpoch }) {
       .sort((a, b) => a.createdAtEpoch - b.createdAtEpoch);
     for (const t of sortedThreads) {
       if (amountLeft <= 1e-9) break;
-      const take = Math.min(t.ttFace, amountLeft);
+      const take = Math.min(t.floatFace, amountLeft);
       if (take <= 1e-9) continue;
       const dmg = damageThread({
-        ttState: workingTt,
+        floatsState: workingTt,
         threadId: t.id,
         delta: take,
       });
       if (dmg.deltaApplied <= 1e-9) continue;
-      workingTt = dmg.ttState;
+      workingTt = dmg.floatsState;
       threadUnwinds.push({
         threadId: t.id,
         ownerId: t.ownerId,
@@ -526,7 +526,7 @@ export function runRedemptionCycle({ ttState, currentEpoch }) {
     }
 
     logs.push(
-      `[TT-REDEEM ${hint}] ${req.userId} ${req.amount.toFixed(2)} TT → $${dollars.toFixed(2)}` +
+      `[FLOAT-REDEEM ${hint}] ${req.userId} ${req.amount.toFixed(2)} FLOAT → $${dollars.toFixed(2)}` +
         (penalty > 0 ? ` (penalty $${penalty.toFixed(2)} → pool)` : "")
     );
   }
@@ -548,12 +548,12 @@ export function runRedemptionCycle({ ttState, currentEpoch }) {
 
   if (remaining.length > 0) {
     logs.push(
-      `[TT-CYCLE] queue: ${remaining.length} entries deferred (drained $${standardDrained.toFixed(2)} of $${standardCap.toFixed(2)} cap)`
+      `[FLOAT-CYCLE] queue: ${remaining.length} entries deferred (drained $${standardDrained.toFixed(2)} of $${standardCap.toFixed(2)} cap)`
     );
   }
 
   return {
-    ttState: {
+    floatsState: {
       ...workingTt,
       redemptionQueue: remaining,
       lastRedemptionEpoch: currentEpoch,
@@ -571,42 +571,42 @@ export function runRedemptionCycle({ ttState, currentEpoch }) {
 // Solvency check
 // ---------------------------------------------------------------------------
 
-// Outstanding TT mint can drift above the principal that backs it (e.g.
+// Outstanding FLOAT mint can drift above the principal that backs it (e.g.
 // after a chain of damage events). When that happens, claw back from the
-// minter's wallet TT first; remainder becomes debt. Wallet TT clawed
-// back is destroyed (reduces ttFace on their oldest threads pro-rata).
+// minter's wallet FLOAT first; remainder becomes debt. Wallet FLOAT clawed
+// back is destroyed (reduces floatFace on their oldest threads pro-rata).
 //
-// Returns { ttState, clawback, newDebt }.
-export function applySolvencyCheck({ ttState, userId }) {
-  const owned = threadsOf(ttState, userId);
-  if (owned.length === 0) return { ttState, clawback: 0, newDebt: 0 };
-  const totalFace = owned.reduce((s, t) => s + t.ttFace, 0);
+// Returns { floatsState, clawback, newDebt }.
+export function applySolvencyCheck({ floatsState, userId }) {
+  const owned = threadsOf(floatsState, userId);
+  if (owned.length === 0) return { floatsState, clawback: 0, newDebt: 0 };
+  const totalFace = owned.reduce((s, t) => s + t.floatFace, 0);
   const totalPrincipal = owned.reduce((s, t) => s + t.principal, 0);
   const overflow = totalFace - totalPrincipal;
-  if (overflow <= 1e-6) return { ttState, clawback: 0, newDebt: 0 };
+  if (overflow <= 1e-6) return { floatsState, clawback: 0, newDebt: 0 };
 
-  const wallet = balanceOf(ttState, userId);
+  const wallet = balanceOf(floatsState, userId);
   const clawback = Math.min(wallet, overflow);
   const debt = overflow - clawback;
 
-  let next = { ...ttState };
+  let next = { ...floatsState };
   if (clawback > 0) {
-    next.balances = { ...ttState.balances, [userId]: wallet - clawback };
-    // Burn ttFace from oldest threads first — match the FIFO rule used
+    next.balances = { ...floatsState.balances, [userId]: wallet - clawback };
+    // Burn floatFace from oldest threads first — match the FIFO rule used
     // by redemptions so the audit trail is consistent.
     let amountLeft = clawback;
-    next.threads = (ttState.threads ?? []).map((t) => {
+    next.threads = (floatsState.threads ?? []).map((t) => {
       if (t.ownerId !== userId || t.closed || amountLeft <= 1e-9) return t;
-      const burn = Math.min(t.ttFace, amountLeft);
+      const burn = Math.min(t.floatFace, amountLeft);
       amountLeft -= burn;
-      return { ...t, ttFace: t.ttFace - burn };
+      return { ...t, floatFace: t.floatFace - burn };
     });
   }
   if (debt > 0) {
     next.debtByUser = {
-      ...ttState.debtByUser,
-      [userId]: (ttState.debtByUser?.[userId] ?? 0) + debt,
+      ...floatsState.debtByUser,
+      [userId]: (floatsState.debtByUser?.[userId] ?? 0) + debt,
     };
   }
-  return { ttState: next, clawback, newDebt: debt };
+  return { floatsState: next, clawback, newDebt: debt };
 }

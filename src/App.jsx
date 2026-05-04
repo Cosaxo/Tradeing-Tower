@@ -25,14 +25,14 @@ import { postReinsuranceBuyer } from "./lib/reinsurance.js";
 import { makePairedLap, isPairedLap, calcPairedLapClosePnl } from "./lib/pairedLap.js";
 import { publishLegOffer, terminateRental } from "./lib/rentalMarket.js";
 import {
-  initTtState,
+  initFloatsState,
   openThread,
   calcInsuranceFillWeights,
-  transferTT,
+  transferFloats,
   submitRedemption,
   cancelRedemption,
   totalThreadPrincipal,
-} from "./lib/towerTether.js";
+} from "./lib/floats.js";
 import {
   initBBookState,
   depositUnderwriter,
@@ -50,7 +50,7 @@ import {
 import {
   damageThread,
   growThread,
-} from "./lib/towerTether.js";
+} from "./lib/floats.js";
 import { getEffectiveCap } from "./lib/esma.js";
 import { initLedger } from "./lib/roleLedger.js";
 import { initTags, tryTag, untag, freeMargin } from "./lib/capitalTags.js";
@@ -67,7 +67,7 @@ import { StressHarnessPanel } from "./components/StressHarnessPanel.jsx";
 import { LogicView } from "./components/LogicView.jsx";
 import { MetricsPanel } from "./components/MetricsPanel.jsx";
 import { PeersPanel } from "./components/PeersPanel.jsx";
-import { TtDesk } from "./components/TtDesk.jsx";
+import { FloatsDesk } from "./components/FloatsDesk.jsx";
 import { InsuranceDesk } from "./components/InsuranceDesk.jsx";
 import { BBookDesk } from "./components/BBookDesk.jsx";
 import { LapPayoffCurve } from "./components/LapPayoffCurve.jsx";
@@ -144,7 +144,7 @@ export default function App() {
   const [speed, setSpeed] = usePersistentState("tt.speed", 1);
   const [activeTab, setActiveTab] = useState("Chart");
   // Easy mode is the default for new users — single screen with one
-  // "Convert $ → TT" button, the four-tier ladder, and a yield number.
+  // "Convert $ → FLOAT" button, the four-tier ladder, and a yield number.
   // Power users can switch to advanced (the multi-tab desk view) at
   // any time via the header toggle.
   const [easyMode, setEasyMode] = usePersistentState("tt.easyMode", true);
@@ -160,9 +160,9 @@ export default function App() {
     "tt.roleLedger",
     initLedger()
   );
-  const [ttState, setTtState, clearTt] = usePersistentState(
+  const [floatsState, setFloatsState, clearFloats] = usePersistentState(
     "tt.towerTether",
-    initTtState()
+    initFloatsState()
   );
   const [insuranceState, setInsuranceState, clearInsurance] = usePersistentState(
     "tt.insurance",
@@ -186,7 +186,7 @@ export default function App() {
   // is now LocalBroadcastAdapter: each browser tab is one user in a
   // shared room; bids broadcast across tabs via BroadcastChannel.
   // The legacy DefaultBotAdapter (synthetic NPC flow) has been
-  // retired — Trading Tower is a real multi-user trading platform.
+  // retired — Hyperfloat is a real multi-user trading platform.
   //
   // The adapter is held in a ref so the same instance persists across
   // re-renders. `getCurrentBid` reads from a live ref so each
@@ -244,8 +244,8 @@ export default function App() {
     setPlayer,
     openPositions,
     setOpenPositions,
-    ttState,
-    setTtState,
+    floatsState,
+    setFloatsState,
     insuranceState,
     setInsuranceState,
     bBookState,
@@ -351,16 +351,16 @@ export default function App() {
   );
 
   // Derived state for Easy Mode and the tier-ladder gate evaluator.
-  // - ttBalance:   live TT in the player's wallet (layer-4 face)
-  // - ttPrincipal: dollars committed across the player's open threads
+  // - floatsBalance:   live FLOAT in the player's wallet (layer-4 face)
+  // - floatsPrincipal: dollars committed across the player's open threads
   //                (used to detect "currently exercising tier 4")
   // - hasOpenLap:  any non-bbook position open (tier 3 active)
   // - hasReinsurance: player has bought reinsurance face on any product
   // - freeMarginAmount: untagged margin available for new role assignments
-  const ttBalance = ttState?.balances?.[player.id] ?? 0;
-  const ttPrincipal = useMemo(
-    () => totalThreadPrincipal(ttState, player.id),
-    [ttState, player.id]
+  const floatsBalance = floatsState?.balances?.[player.id] ?? 0;
+  const floatsPrincipal = useMemo(
+    () => totalThreadPrincipal(floatsState, player.id),
+    [floatsState, player.id]
   );
   const hasOpenLap = useMemo(
     () => openPositions.some((p) => p?.type !== "bbook"),
@@ -465,7 +465,7 @@ export default function App() {
   // The user declares a percentage allocation across insurance markets.
   // The backing capital is then materialised as insurer-side stakes on
   // the corresponding markets. Margin is untouched — these stakes serve
-  // the insurer role while the same dollars also back LAP credit and TT
+  // the insurer role while the same dollars also back LAP credit and FLOAT
   // mints (multi-role capital).
   function handleSetAllocation(marketAllocations) {
     const r = setUserAllocation(insuranceState.allocations, player.id, marketAllocations);
@@ -513,10 +513,10 @@ export default function App() {
       // proportionally per underwriter. Now propagate the same
       // thread-derived deltas into each thread's principal + the other
       // layers so the 4-layer invariant holds (pool moved → T-bill +
-      // insurance + ttFace move too). poolLayerDelta/Add from
+      // insurance + floatFace move too). poolLayerDelta/Add from
       // damage/growThread is informational here — the pool was already
       // moved by closeContract.
-      let workingTt = closed.state ? ttState : ttState; // closed.state is bBookState
+      let workingTt = closed.state ? floatsState : floatsState; // closed.state is bBookState
       let workingInsurance = insuranceState;
       for (const [uid, shares] of Object.entries(closed.underwriterShares ?? {})) {
         const td = shares?.threadDerived ?? 0;
@@ -532,11 +532,11 @@ export default function App() {
           if (Math.abs(portion) <= 1e-9) continue;
           if (portion > 0) {
             const grown = growThread({
-              ttState: workingTt,
+              floatsState: workingTt,
               threadId: t.id,
               gain: portion,
             });
-            workingTt = grown.ttState;
+            workingTt = grown.floatsState;
             for (const [eventId, add] of Object.entries(grown.insuranceLayerAdds)) {
               if (add <= 1e-9) continue;
               workingInsurance = {
@@ -550,11 +550,11 @@ export default function App() {
             }
           } else {
             const dmg = damageThread({
-              ttState: workingTt,
+              floatsState: workingTt,
               threadId: t.id,
               delta: -portion,
             });
-            workingTt = dmg.ttState;
+            workingTt = dmg.floatsState;
             for (const [eventId, cut] of Object.entries(dmg.insuranceLayerDeltas)) {
               if (cut <= 1e-9) continue;
               workingInsurance = {
@@ -571,7 +571,7 @@ export default function App() {
       }
 
       setBBookState(closed.state);
-      setTtState(workingTt);
+      setFloatsState(workingTt);
       if (workingInsurance !== insuranceState) {
         setInsuranceState(workingInsurance);
       }
@@ -615,7 +615,7 @@ export default function App() {
 
     // Pool-linked LAP (loose allocation, not a thread): gains grow
     // stakes pro-rata, losses shrink them. Thread-linked closes are
-    // blocked above — they must unwind via TT redemption to preserve
+    // blocked above — they must unwind via FLOAT redemption to preserve
     // the 4-layer invariant.
     if (pos.poolLinkage && pos.poolLinkage.depositorId === player.id) {
       const r = propagateLapPnl({
@@ -864,7 +864,7 @@ export default function App() {
     addToast(label, "info");
   }
 
-  // --- Tower Tether handlers ----------------------------------------------
+  // --- Float handlers ----------------------------------------------
   //
   // Mint = open a thread. The same `amount` of free margin is locked as
   // the thread's underlying T-bill stake AND simultaneously deployed
@@ -873,13 +873,13 @@ export default function App() {
   //     (layer 2; mixed equal/size weighting)
   //   - B-book pool underwriter stake (layer 3; thread-derived stake
   //     that earns user tip flow + absorbs B-classed user P&L)
-  //   - an equal amount of TT minted into the wallet (layer 4)
+  //   - an equal amount of FLOAT minted into the wallet (layer 4)
   //   plus auto-bought reinsurance face = 1.5× amount split across the
   //   3 reinsurance products, hedging the insurer-side exposure.
   //
   // No LTV gate, no coefficient — gate is purely "can you afford to
   // deploy `amount` of free margin?"
-  function handleMintTT(amount) {
+  function handleMintFloats(amount) {
     if (!Number.isFinite(amount) || amount <= 0) {
       addToast("Mint amount must be positive", "warning");
       return;
@@ -964,9 +964,9 @@ export default function App() {
       return;
     }
 
-    // 5. Open the thread record. 1:1-mints the TT into the wallet.
+    // 5. Open the thread record. 1:1-mints the FLOAT into the wallet.
     const opened = openThread({
-      ttState,
+      floatsState,
       ownerId: player.id,
       principal: amount,
       insuranceWeights: weights,
@@ -978,7 +978,7 @@ export default function App() {
     }
 
     // 6. Commit all the new state in lockstep.
-    setTtState(opened.ttState);
+    setFloatsState(opened.floatsState);
     setInsuranceState({
       ...insuranceState,
       markets: nextMarkets,
@@ -987,14 +987,14 @@ export default function App() {
     setBBookState(adjusted.state);
     setPlayer((p) => ({ ...p, tags: newTags }));
     addToast(
-      `Thread opened: $${amount.toFixed(0)} → T-bill + insurance + B-book pool + TT (1 dollar, 4 jobs) · ${(reinsuranceFacePerProduct * 3).toFixed(0)} reinsurance face`,
+      `Thread opened: $${amount.toFixed(0)} → T-bill + insurance + B-book pool + FLOAT (1 dollar, 4 jobs) · ${(reinsuranceFacePerProduct * 3).toFixed(0)} reinsurance face`,
       "info"
     );
   }
 
   function handleSendToMerchant(amount) {
-    const result = transferTT({
-      ttState,
+    const result = transferFloats({
+      floatsState,
       fromId: player.id,
       toId: "MERCHANT",
       amount,
@@ -1003,13 +1003,13 @@ export default function App() {
       addToast(`Send failed: ${result.reason}`, "warning");
       return;
     }
-    setTtState(result.ttState);
-    addToast(`Sent ${amount.toFixed(0)} TT to merchant`, "info");
+    setFloatsState(result.floatsState);
+    addToast(`Sent ${amount.toFixed(0)} FLOAT to merchant`, "info");
   }
 
   function handleRedeem(amount, express = false) {
     const result = submitRedemption({
-      ttState,
+      floatsState,
       userId: player.id,
       amount,
       express,
@@ -1019,21 +1019,21 @@ export default function App() {
       addToast(`Redeem failed: ${result.reason}`, "warning");
       return;
     }
-    setTtState(result.ttState);
+    setFloatsState(result.floatsState);
     addToast(
-      `Queued ${amount.toFixed(0)} TT for redemption (${express ? "EXPRESS — 5% penalty" : "standard"})`,
+      `Queued ${amount.toFixed(0)} FLOAT for redemption (${express ? "EXPRESS — 5% penalty" : "standard"})`,
       express ? "warning" : "info"
     );
   }
 
   function handleCancelRedemption(requestId) {
-    const result = cancelRedemption({ ttState, requestId });
+    const result = cancelRedemption({ floatsState, requestId });
     if (!result.ok) {
       addToast(`Cancel failed: ${result.reason}`, "warning");
       return;
     }
-    setTtState(result.ttState);
-    addToast("Redemption cancelled, TT returned to wallet", "info");
+    setFloatsState(result.floatsState);
+    addToast("Redemption cancelled, FLOAT returned to wallet", "info");
   }
 
   // --- B-book underwriter handlers ----------------------------------------
@@ -1104,7 +1104,7 @@ export default function App() {
     clearEquity();
     clearTrades();
     clearLedger();
-    clearTt();
+    clearFloats();
     clearInsurance();
     clearBBook();
     clearClassifier();
@@ -1160,9 +1160,9 @@ export default function App() {
         >
           ☰
         </button>
-        <span className="font-syne text-lg text-indigo-400 tracking-tight">Trading Tower</span>
+        <span className="font-syne text-lg text-indigo-400 tracking-tight">Hyperfloat</span>
 
-        {/* Compact at-a-glance summary: margin / allocated / TT / positions.
+        {/* Compact at-a-glance summary: margin / allocated / FLOAT / positions.
             Each chip is clickable where useful, and titles give detail on hover. */}
         <div className="flex items-center gap-1 flex-wrap">
           <HeaderChip
@@ -1205,14 +1205,14 @@ export default function App() {
             onClick={() => setActiveTab("Credit")}
           />
           <HeaderChip
-            label="TT"
-            value={`$${(ttState?.balances?.[player.id] ?? 0).toFixed(0)}`}
+            label="FLOAT"
+            value={`$${(floatsState?.balances?.[player.id] ?? 0).toFixed(0)}`}
             color={
-              (ttState?.balances?.[player.id] ?? 0) > 0
+              (floatsState?.balances?.[player.id] ?? 0) > 0
                 ? "text-emerald-200 border-emerald-700 bg-emerald-950"
                 : "text-gray-500 border-gray-800 bg-gray-900"
             }
-            title={`Tower Tether wallet · outstanding mint $${(ttState?.threads ?? []).filter((t) => !t.closed && t.ownerId === player.id).reduce((s, t) => s + t.ttFace, 0).toFixed(0)} · queue ${(ttState?.redemptionQueue ?? []).filter((q) => q.userId === player.id).length}`}
+            title={`Float wallet · outstanding mint $${(floatsState?.threads ?? []).filter((t) => !t.closed && t.ownerId === player.id).reduce((s, t) => s + t.floatFace, 0).toFixed(0)} · queue ${(floatsState?.redemptionQueue ?? []).filter((q) => q.userId === player.id).length}`}
             onClick={() => setActiveTab("Insurance")}
           />
         </div>
@@ -1334,13 +1334,13 @@ export default function App() {
               <EasyMode
                 player={player}
                 freeMarginAmount={freeMarginAmount}
-                ttBalance={ttBalance}
-                ttPrincipal={ttPrincipal}
+                floatsBalance={floatsBalance}
+                floatsPrincipal={floatsPrincipal}
                 allocStats={allocStats}
                 hasReinsurance={hasReinsurance}
                 hasOpenLap={hasOpenLap}
                 equityHistory={equityHistory}
-                onConvertToTT={(amount) => handleMintTT(amount)}
+                onConvertToFloats={(amount) => handleMintFloats(amount)}
                 onRedeem={(amount) => handleRedeem(amount, false)}
                 onJumpToAdvanced={() => setEasyMode(false)}
               />
@@ -1373,8 +1373,8 @@ export default function App() {
               <GettingStarted
                 hasAllocation={poolDepositAmount > 0}
                 hasPosition={openPositions.length > 0}
-                hasMinted={totalThreadPrincipal(ttState, player.id) > 0}
-                hasMerchantSent={(ttState?.merchantBalance ?? 0) > 0}
+                hasMinted={totalThreadPrincipal(floatsState, player.id) > 0}
+                hasMerchantSent={(floatsState?.merchantBalance ?? 0) > 0}
                 activeTab={activeTab}
                 onJump={(t) => setActiveTab(t)}
               />
@@ -1478,12 +1478,12 @@ export default function App() {
                   poolLtv={poolLtvInfo}
                   onSetAllocation={handleSetAllocation}
                 />
-                <TtDesk
-                  ttState={ttState}
+                <FloatsDesk
+                  floatsState={floatsState}
                   playerId={player.id}
                   freeMargin={freeMargin(player.margin, player.tags)}
-                  threadPrincipal={totalThreadPrincipal(ttState, player.id)}
-                  onMint={handleMintTT}
+                  threadPrincipal={totalThreadPrincipal(floatsState, player.id)}
+                  onMint={handleMintFloats}
                   onSendToMerchant={handleSendToMerchant}
                   onRedeem={handleRedeem}
                   onCancelRedemption={handleCancelRedemption}

@@ -9,8 +9,8 @@
 //
 //   - Insurer in each chosen insurance market (premium income)
 //   - Backing for LAP credit (LTV measured on diversification of allocations)
-//   - Backing for TT mint (auto-distributed within the 1.5×-reinsurance constraint)
-//   - Protected by the 3 reinsurance products (which TT minters auto-buy)
+//   - Backing for FLOAT mint (auto-distributed within the 1.5×-reinsurance constraint)
+//   - Protected by the 3 reinsurance products (which FLOAT minters auto-buy)
 //
 // LAP P&L propagates directly to the allocated stakes — gains grow the
 // stakes, losses shrink them — pro-rata to current allocation share.

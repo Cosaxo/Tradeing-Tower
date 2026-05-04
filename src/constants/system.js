@@ -31,9 +31,9 @@ export const GRACE_MS = 800;
 // - Slow   (every SLOW_EVERY medium ticks): regime detection,
 //                  cross-market correlation, adaptive auction meta-params
 //
-// Tower Tether redemption runs on its own much longer prime stride
+// Float redemption runs on its own much longer prime stride
 // (~monthly in sim-days) so the queue creates real liquidity pressure
-// and TT functions like a bank's redemption window. 31 is coprime with
+// and FLOAT functions like a bank's redemption window. 31 is coprime with
 // SLOW_EVERY so analytics + redemption never settle in the same frame.
 export const FAST_MS = 1000;
 export const MEDIUM_MS = 6000;
@@ -59,15 +59,15 @@ export const ADAPTIVE_LR = 0.005;
 export const SOFT_CLOSE_PCT = 0.8;
 
 // -----------------------------------------------------------------------
-// Tower Tether (TT) — thread-based hyper-rehypothecated stablecoin
+// Float (FLOAT) — thread-based hyper-rehypothecated stablecoin
 // -----------------------------------------------------------------------
 //
 // Mint is 1:1 against free margin (no LTV gate, no coefficient). The
 // minted dollar simultaneously backs four full-notional positions:
 // T-bill stake, insurance-seller stakes across reinsurance-covered
-// markets, a delta-neutral paired LAP, and the TT itself.
+// markets, a delta-neutral paired LAP, and the FLOAT itself.
 
-// Standard redemption capacity per cycle as a fraction of total TT
+// Standard redemption capacity per cycle as a fraction of total FLOAT
 // supply at cycle start. Anything beyond this either waits in queue
 // or pays the express penalty.
 export const STANDARD_REDEMPTION_CAP_PCT = 0.10;

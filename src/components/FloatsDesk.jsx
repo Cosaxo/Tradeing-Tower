@@ -1,10 +1,10 @@
-// Tower Tether (TT) Desk — open threads, balance, redemption queue,
+// Float (FLOAT) Desk — open threads, balance, redemption queue,
 // send-to-merchant.
 //
 // Thread model: minting opens a "thread" of value where the same dollar
 // simultaneously serves four roles — T-bill stake, insurance-seller
 // fill across reinsurance-covered markets, a delta-neutral paired LAP
-// (auto-leased), and the minted TT itself. No LTV gate, no coefficient.
+// (auto-leased), and the minted FLOAT itself. No LTV gate, no coefficient.
 // The gate is "do you have $X of free margin to commit?" because the
 // dollar is locked across all four jobs at once and a loss in any one
 // of them shrinks the others atomically.
@@ -12,11 +12,11 @@
 // Three actions:
 //
 //   - Mint:    open a thread for $X. Free margin gets the threadStake
-//              tag; insurance fills, paired LAP, and TT all materialise.
-//   - Send:    transfer TT to the simulated merchant — represents an
+//              tag; insurance fills, paired LAP, and FLOAT all materialise.
+//   - Send:    transfer FLOAT to the simulated merchant — represents an
 //              outside-protocol purchase. Merchant auto-redeems on
 //              cycle to create organic queue pressure.
-//   - Redeem:  hand TT back for $. Standard tier respects the 10%
+//   - Redeem:  hand FLOAT back for $. Standard tier respects the 10%
 //              per-cycle cap; Express tier pays a 5% penalty (routed
 //              to reinsurance sellers) to bypass the cap. Each cleared
 //              redemption shrinks one or more threads — atomically
@@ -29,8 +29,8 @@ import {
   REDEMPTION_EVERY,
 } from "../constants/system.js";
 
-export function TtDesk({
-  ttState,
+export function FloatsDesk({
+  floatsState,
   playerId = "You",
   freeMargin = 0,
   threadPrincipal = 0,
@@ -44,17 +44,17 @@ export function TtDesk({
   const [redeemAmount, setRedeemAmount] = useState(50);
   const [express, setExpress] = useState(false);
 
-  const balance = ttState?.balances?.[playerId] ?? 0;
-  const debt = ttState?.debtByUser?.[playerId] ?? 0;
-  const threads = (ttState?.threads ?? []).filter(
+  const balance = floatsState?.balances?.[playerId] ?? 0;
+  const debt = floatsState?.debtByUser?.[playerId] ?? 0;
+  const threads = (floatsState?.threads ?? []).filter(
     (t) => !t.closed && t.ownerId === playerId
   );
-  const minted = threads.reduce((s, t) => s + t.ttFace, 0);
-  const totalSupply = (ttState?.threads ?? [])
+  const minted = threads.reduce((s, t) => s + t.floatFace, 0);
+  const totalSupply = (floatsState?.threads ?? [])
     .filter((t) => !t.closed)
-    .reduce((s, t) => s + t.ttFace, 0);
-  const merchantBalance = ttState?.merchantBalance ?? 0;
-  const queue = ttState?.redemptionQueue ?? [];
+    .reduce((s, t) => s + t.floatFace, 0);
+  const merchantBalance = floatsState?.merchantBalance ?? 0;
+  const queue = floatsState?.redemptionQueue ?? [];
   const cycleCap = totalSupply * STANDARD_REDEMPTION_CAP_PCT;
 
   const myQueueEntries = queue.filter((q) => q.userId === playerId);
@@ -66,14 +66,14 @@ export function TtDesk({
     <div className="flex flex-col gap-3 p-3 rounded border border-gray-700 bg-gray-900">
       <div className="flex items-center justify-between">
         <span className="text-xs font-mono text-gray-300 flex items-center">
-          Tower Tether (TT) — Threads
+          Float (FLOAT) — Threads
           <HelpHint
             width={360}
-            text="Mint TT 1:1 against free margin. The dollar you commit serves FOUR roles at once: a T-bill stake, an insurance-seller fill across reinsurance-covered markets, a neutral paired LAP (both legs auto-leased), and the TT itself. Loss in any layer shrinks all four. Redemption sells T-bills for cash and atomically unwinds the other layers. 10% standard cap per cycle; Express bypasses the cap for a 5% penalty (paid to reinsurance sellers)."
+            text="Mint FLOAT 1:1 against free margin. The dollar you commit serves FOUR roles at once: a T-bill stake, an insurance-seller fill across reinsurance-covered markets, a neutral paired LAP (both legs auto-leased), and the FLOAT itself. Loss in any layer shrinks all four. Redemption sells T-bills for cash and atomically unwinds the other layers. 10% standard cap per cycle; Express bypasses the cap for a 5% penalty (paid to reinsurance sellers)."
           />
         </span>
         <span className="text-[10px] font-mono px-2 py-0.5 rounded border border-emerald-700 bg-emerald-950 text-emerald-200">
-          ${balance.toFixed(2)} TT
+          ${balance.toFixed(2)} FLOAT
         </span>
       </div>
 
@@ -104,7 +104,7 @@ export function TtDesk({
       {threadPrincipal > 0 && (
         <div className="text-[10px] font-mono text-gray-400 border border-gray-800 bg-gray-950 px-2 py-1 rounded">
           Thread principal locked: <span className="text-amber-300">${threadPrincipal.toFixed(0)}</span>
-          {" — "}same $ deployed across T-bill, insurance, LAP, and TT.
+          {" — "}same $ deployed across T-bill, insurance, LAP, and FLOAT.
         </div>
       )}
 
@@ -118,7 +118,7 @@ export function TtDesk({
       {/* Mint */}
       <div className="flex flex-col gap-1 rounded border border-gray-800 bg-gray-950 px-2 py-2">
         <span className="text-[10px] text-gray-500 font-mono uppercase">
-          Open thread (mint TT)
+          Open thread (mint FLOAT)
         </span>
         <div className="flex items-center gap-2">
           <input
@@ -143,7 +143,7 @@ export function TtDesk({
           </button>
         </div>
         <div className="text-[9px] font-mono text-gray-600">
-          Deploys ${mintAmount} as: T-bill + insurance fill + neutral paired LAP + ${mintAmount} TT.
+          Deploys ${mintAmount} as: T-bill + insurance fill + neutral paired LAP + ${mintAmount} FLOAT.
         </div>
       </div>
 
@@ -153,7 +153,7 @@ export function TtDesk({
           Send to Merchant (simulated purchase)
           <HelpHint
             width={260}
-            text="Simulates spending TT outside the protocol. The merchant pool periodically auto-redeems chunks of its balance, creating organic redemption-queue pressure. In production this is just a wallet-to-wallet transfer; here we model the redemption side."
+            text="Simulates spending FLOAT outside the protocol. The merchant pool periodically auto-redeems chunks of its balance, creating organic redemption-queue pressure. In production this is just a wallet-to-wallet transfer; here we model the redemption side."
           />
         </span>
         <div className="flex items-center gap-2">
@@ -179,14 +179,14 @@ export function TtDesk({
           </button>
         </div>
         <div className="text-[10px] font-mono text-gray-600">
-          Merchant pool: ${merchantBalance.toFixed(0)} TT
+          Merchant pool: ${merchantBalance.toFixed(0)} FLOAT
         </div>
       </div>
 
       {/* Redeem */}
       <div className="flex flex-col gap-1 rounded border border-gray-800 bg-gray-950 px-2 py-2">
         <span className="text-[10px] text-gray-500 font-mono uppercase">
-          Redeem TT for $
+          Redeem FLOAT for $
         </span>
         <div className="flex items-center gap-2">
           <input
@@ -277,8 +277,8 @@ export function TtDesk({
       </div>
 
       <div className="text-[10px] font-mono text-gray-500">
-        Total supply: ${totalSupply.toFixed(0)} TT · Cumulative penalty to
-        sellers: ${(ttState?.cumulativePenaltyToPool ?? 0).toFixed(2)}
+        Total supply: ${totalSupply.toFixed(0)} FLOAT · Cumulative penalty to
+        sellers: ${(floatsState?.cumulativePenaltyToPool ?? 0).toFixed(2)}
       </div>
     </div>
   );

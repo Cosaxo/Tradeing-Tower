@@ -27,6 +27,9 @@ npm install
 npm run dev   # → http://localhost:5173
 ```
 
+**Looking for the deeper design rationale, math, and forward-looking
+extensions?** See [`WHITEPAPER.md`](./WHITEPAPER.md).
+
 ## Two ways to use it
 
 **Easy mode (default for new users)** — one button. *Convert $X → TT*.

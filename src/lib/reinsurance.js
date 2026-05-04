@@ -1,6 +1,15 @@
 // Reinsurance — three parallel two-sided products that protect insurance
 // SELLERS against the claims they have to pay out.
 //
+// FUTURE WORK (noted Sprint 4.5): the protocol's safety claim covers
+// the joint outcome across all four thread layers. Today reinsurance
+// only protects the insurance-seller leg (layer 2). Layer 3 — the
+// B-book pool stake — has no equivalent hedge, so a wave of profitable
+// retail flow can drain the B-book pool and damage the thread without
+// any reimbursement. A *B-book reinsurance pool* (or a generalisation
+// of these products to cover B-book drawdowns) is the next coverage
+// gap to close. Out of scope for this sprint.
+//
 // Structure
 // ---------
 //
@@ -52,9 +61,29 @@ export const REINSURANCE_PRODUCTS = [
 // Constants
 // ---------------------------------------------------------------------------
 
-// Reinsurance is more expensive than primary insurance (it covers tail
-// risk). Base rate ≈ 2× primary base.
-export const REINSURANCE_BASE_RATE = 0.010;
+// Reinsurance base rate PER INSURANCE SETTLEMENT (every
+// INSURANCE_STRIDE medium ticks, currently 2). Same stride as
+// primary insurance — they settle together to maintain the
+// epoch-separation invariant.
+//
+// Tier 1.0: doubled from 0.0001 (per-tick) to 0.0002 (per-settlement)
+// to keep annualised cost constant when settlement frequency halved.
+//
+// Sprint 4.5: previously 0.010/tick (≈365% annualised) which made
+// the auto-mint user's reinsurance premium cost dominate every
+// joint-outcome scenario. Reduced 100× to 0.0001/tick.
+//
+// Note on the relative pricing: this base is LOWER than
+// BASE_PREMIUM_RATE. That looks counter-intuitive ("reinsurance
+// should be more expensive — it covers tail risk") but it's correct
+// for diversified buyers like the auto-mint user. Reinsurance pools
+// many uncorrelated insurance risks; the diversification benefit
+// accrues to the seller pool, so the per-buyer rate is below the
+// price of any single primary insurance product. A concentrated
+// buyer hedging only one event would be priced higher via the
+// cov/ins √ scaling, restoring the "tail risk costs more"
+// relationship for that user.
+export const REINSURANCE_BASE_RATE = 0.0002;
 export const REINSURANCE_LOCKUP_EPOCHS = 200;
 
 // ---------------------------------------------------------------------------
@@ -220,11 +249,14 @@ export function calcReinsurancePremiumRate(product) {
   const ins = product.sellerCapital;
   const cov = product.totalCoverage;
   if (ins <= 0 || cov <= 0) return base;
-  // Same √(cov/ins) shape as insurance markets, just on a higher base.
+  // Same √(cov/ins) shape as insurance markets, just on a different
+  // base. Floor relaxed in Sprint 4.5b from 0.1× to 0.01× so heavily-
+  // oversupplied reinsurance markets can clear at sub-T-bill rates
+  // and self-correct via seller exit. MAX stays at 10× base.
   const ratio = cov / ins;
   const SENS = 0.5;
   const raw = base * Math.pow(ratio, SENS);
-  return Math.max(base * 0.1, Math.min(base * 10, raw));
+  return Math.max(base * 0.01, Math.min(base * 10, raw));
 }
 
 // ---------------------------------------------------------------------------

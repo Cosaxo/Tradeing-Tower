@@ -24,10 +24,13 @@
 // hits every other role simultaneously. Mint timing is structured so
 // loss-on-mint is near-impossible.
 //
-// Critical invariant (enforced in the epoch loop, not here): insurance
-// and LAP MUST NEVER calculate thread damage in the same epoch. If
-// they would coincide, insurance damage defers to the next available
-// medium tick.
+// Critical invariant (enforced structurally in the epoch loop): the
+// insurance damage path and the LAP / B-book damage path run on
+// COPRIME STRIDES so they never coincide on the same medium tick.
+// Insurance settles every INSURANCE_STRIDE ticks (default 2); LAP /
+// B-book damage runs on the OFF-stride (when wired in Tier 1.1).
+// One thread principal can never be debited by two damage sources
+// in the same tick. See useEpochLoop.js for the enforcement.
 //
 // State shape
 // -----------

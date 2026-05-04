@@ -1,7 +1,26 @@
 // System-wide constants. Grouped for easy tuning and documentation.
 
-// Risk-free rate applied per epoch (~1 day).
-export const TBILL_RATE = 0.001;
+// Risk-free rate (ANNUALISED). Applied per medium tick as
+// TBILL_RATE / 365 (the loop and pool both treat it as a per-year
+// rate). Calibrated to a realistic short-duration T-bill yield —
+// previously 0.001 (≈0.1% annual) which made layer 1 effectively
+// inert; bumped to 0.04 in Sprint 4.5 after the stress harness
+// flagged the calibration error.
+export const TBILL_RATE = 0.04;
+
+// Epoch-separation invariant (Tier 1.0).
+//
+// Insurance settlement (markets, reinsurance, insurance-driven
+// thread damage) runs every INSURANCE_STRIDE medium ticks. LAP /
+// B-book settlement (when active-flow path is wired in Tier 1.1)
+// runs on the OFF-stride. They never coincide, so a single thread
+// principal cannot be debited by two damage paths in the same tick.
+//
+// Set to 2 (even ticks). Insurance rates (BASE_PREMIUM_RATE and
+// REINSURANCE_BASE_RATE) are doubled in this sprint to compensate
+// for the halved settlement frequency, keeping annualised yield
+// constant.
+export const INSURANCE_STRIDE = 2;
 
 // Grace window after a user edit before the new config is picked up by the auction.
 export const GRACE_MS = 800;

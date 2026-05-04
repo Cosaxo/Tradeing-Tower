@@ -1,6 +1,9 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { ACTIVE_PAIRS } from "./constants/assets.js";
-import { createDefaultBotAdapter } from "./lib/defaultBotAdapter.js";
+import {
+  createLocalBroadcastAdapter,
+  getOrCreateTabUserId,
+} from "./lib/localBroadcastAdapter.js";
 import { initPairState } from "./state/pairState.js";
 import { initInsuranceState } from "./state/insuranceState.js";
 import { useEpochLoop } from "./hooks/useEpochLoop.js";
@@ -10,7 +13,7 @@ import { usePersistentState } from "./hooks/usePersistentState.js";
 import { calcPairCreditEligibility } from "./lib/credit.js";
 import { calcSystemSolvencyBuffer, propagateShock, applyShockToPositions } from "./lib/stress.js";
 import { calcYieldRouterSuggestions } from "./lib/yieldRouter.js";
-import { calcAllocationLtv, calcAvailableCredit } from "./lib/ltv.js";
+import { calcAllocationLtv, calcAvailableCredit, evaluateTier3Gate } from "./lib/ltv.js";
 import {
   setUserAllocation,
   applyAllocations,
@@ -60,9 +63,10 @@ import { PlayerPanel } from "./components/PlayerPanel.jsx";
 import { PortfolioStructurer } from "./components/PortfolioStructurer.jsx";
 import { CreditDesk } from "./components/CreditDesk.jsx";
 import { StressPanel } from "./components/StressPanel.jsx";
+import { StressHarnessPanel } from "./components/StressHarnessPanel.jsx";
 import { LogicView } from "./components/LogicView.jsx";
 import { MetricsPanel } from "./components/MetricsPanel.jsx";
-import { NpcPanel } from "./components/NpcPanel.jsx";
+import { PeersPanel } from "./components/PeersPanel.jsx";
 import { TtDesk } from "./components/TtDesk.jsx";
 import { InsuranceDesk } from "./components/InsuranceDesk.jsx";
 import { BBookDesk } from "./components/BBookDesk.jsx";
@@ -76,6 +80,7 @@ import { NotificationHistory } from "./components/NotificationHistory.jsx";
 import { Tutorial } from "./components/Tutorial.jsx";
 import { FeeFlow } from "./components/FeeFlow.jsx";
 import { RoleLedger } from "./components/RoleLedger.jsx";
+import { EasyMode } from "./components/EasyMode.jsx";
 
 // Generate a stable id for pool-funded LAPs so position close routes
 // the linkage record correctly. (The pre-Phase-5 makeLapId helper lived
@@ -138,6 +143,11 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [speed, setSpeed] = usePersistentState("tt.speed", 1);
   const [activeTab, setActiveTab] = useState("Chart");
+  // Easy mode is the default for new users — single screen with one
+  // "Convert $ → TT" button, the four-tier ladder, and a yield number.
+  // Power users can switch to advanced (the multi-tab desk view) at
+  // any time via the header toggle.
+  const [easyMode, setEasyMode] = usePersistentState("tt.easyMode", true);
   const [mobileNav, setMobileNav] = useState(null); // 'left' | 'right' | null
   const [shockResults, setShockResults] = useState(null);
   const [openPositions, setOpenPositions, clearPositions] = usePersistentState("tt.positions", []);
@@ -168,24 +178,64 @@ export default function App() {
   );
   const { toasts, history, addToast, clearHistory } = useToast();
   const [showTutorial, setShowTutorial] = useState(false);
+  // Multi-user counter — re-rendered every few seconds so the header
+  // chip reflects current peer count without prop-drilling the adapter.
+  const [peerCount, setPeerCount] = useState(0);
 
-  // OrderFlowAdapter — pluggable source of market flow. Default impl
-  // wraps the legacy NPCs (Whale / Degen / Hedger / Bot / Bear) for
-  // parity with prior behaviour. Swap in ReplayAdapter for backtests
-  // or BrokerAdapter for live-market wiring.
+  // OrderFlowAdapter — pluggable source of market flow. The default
+  // is now LocalBroadcastAdapter: each browser tab is one user in a
+  // shared room; bids broadcast across tabs via BroadcastChannel.
+  // The legacy DefaultBotAdapter (synthetic NPC flow) has been
+  // retired — Trading Tower is a real multi-user trading platform.
   //
-  // Held in a ref so the same instance persists across re-renders
-  // (the adapter holds NPC state internally — recreating would reset
-  // their margins / restock counters every render).
+  // The adapter is held in a ref so the same instance persists across
+  // re-renders. `getCurrentBid` reads from a live ref so each
+  // heartbeat broadcasts the player's latest config.
+  const playerRef = useRef(player);
+  playerRef.current = player;
+
+  const tabUserIdRef = useRef(null);
+  if (tabUserIdRef.current === null) {
+    tabUserIdRef.current = getOrCreateTabUserId(player?.id ?? "You");
+  }
+
   const flowAdapterRef = useRef(null);
   if (flowAdapterRef.current === null) {
-    flowAdapterRef.current = createDefaultBotAdapter({
-      pairKeys: ACTIVE_PAIRS,
-      realizedSigmaByPair: Object.fromEntries(
-        ACTIVE_PAIRS.map((pk) => [pk, pairStates[pk]?.realizedSigma ?? 0.02])
-      ),
+    flowAdapterRef.current = createLocalBroadcastAdapter({
+      tabUserId: tabUserIdRef.current,
+      roomId: "default",
+      getCurrentBid: () => {
+        const p = playerRef.current;
+        if (!p?.activePair) return null;
+        return {
+          pairKey: p.activePair,
+          leverage: p.leverage,
+          margin: p.margin,
+          side: p.side,
+          strategy: p.strategy,
+          tip_tiers: p.tip_tiers,
+        };
+      },
     });
   }
+
+  // Refresh the peer-count display every PRESENCE_INTERVAL_MS-ish so
+  // the room indicator updates as tabs join / leave.
+  useEffect(() => {
+    const id = setInterval(() => {
+      const a = flowAdapterRef.current;
+      if (a?.getPeerCount) setPeerCount(a.getPeerCount());
+    }, 2000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Tear down the adapter on unmount (close the BroadcastChannel and
+  // tell peers we're leaving).
+  useEffect(() => {
+    return () => {
+      flowAdapterRef.current?.dispose?.();
+    };
+  }, []);
 
   const { onPlayerEdit } = useEpochLoop({
     pairStates,
@@ -252,18 +302,80 @@ export default function App() {
     );
   }, [openPositions, player.id]);
 
+  // Cross-pair correlation map from the active pair's slow-tick recompute.
+  // Used by the LTV independence term and by the stress propagation panel.
+  const activePairCorrMap = useMemo(
+    () => pairStates[player.activePair]?.correlationMap ?? {},
+    [pairStates, player.activePair]
+  );
+
   const poolLtvInfo = useMemo(
-    () => calcAllocationLtv({ markets: insuranceState.markets, userId: player.id }),
-    [insuranceState.markets, player.id]
+    () =>
+      calcAllocationLtv({
+        markets: insuranceState.markets,
+        userId: player.id,
+        reinsurance: insuranceState.reinsurance ?? [],
+        correlationMap: activePairCorrMap,
+      }),
+    [insuranceState.markets, insuranceState.reinsurance, player.id, activePairCorrMap]
   );
   const availablePoolCredit = useMemo(
     () =>
       calcAvailableCredit({
         markets: insuranceState.markets,
         userId: player.id,
+        reinsurance: insuranceState.reinsurance ?? [],
+        correlationMap: activePairCorrMap,
         deployedCredit: deployedPoolCredit,
       }),
-    [insuranceState.markets, player.id, deployedPoolCredit]
+    [
+      insuranceState.markets,
+      insuranceState.reinsurance,
+      player.id,
+      activePairCorrMap,
+      deployedPoolCredit,
+    ]
+  );
+
+  // Tier-3 gate state — pure read of allocations + reinsurance. The
+  // gate is enforced at handleOpenPosition; the UI also reads it via
+  // tier3Gate.missing to surface the "you can't open this yet" reason.
+  const tier3Gate = useMemo(
+    () =>
+      evaluateTier3Gate({
+        markets: insuranceState.markets,
+        reinsurance: insuranceState.reinsurance ?? [],
+        userId: player.id,
+      }),
+    [insuranceState.markets, insuranceState.reinsurance, player.id]
+  );
+
+  // Derived state for Easy Mode and the tier-ladder gate evaluator.
+  // - ttBalance:   live TT in the player's wallet (layer-4 face)
+  // - ttPrincipal: dollars committed across the player's open threads
+  //                (used to detect "currently exercising tier 4")
+  // - hasOpenLap:  any non-bbook position open (tier 3 active)
+  // - hasReinsurance: player has bought reinsurance face on any product
+  // - freeMarginAmount: untagged margin available for new role assignments
+  const ttBalance = ttState?.balances?.[player.id] ?? 0;
+  const ttPrincipal = useMemo(
+    () => totalThreadPrincipal(ttState, player.id),
+    [ttState, player.id]
+  );
+  const hasOpenLap = useMemo(
+    () => openPositions.some((p) => p?.type !== "bbook"),
+    [openPositions]
+  );
+  const hasReinsurance = useMemo(
+    () =>
+      (insuranceState?.reinsurance ?? []).some(
+        (p) => (p.buyerCoverage?.[player.id] ?? 0) > 0
+      ),
+    [insuranceState, player.id]
+  );
+  const freeMarginAmount = useMemo(
+    () => freeMargin(player.margin, player.tags),
+    [player.margin, player.tags]
   );
 
   // pairKey → { activeRentals, rentalOffers } slice for the rental UI.
@@ -583,6 +695,20 @@ export default function App() {
     const { usePoolCredit = false, paired = false } = opts;
     const priceNow = activePS?.prices?.slice(-1)[0] ?? 1;
 
+    // Tier-2 → Tier-3 hard gate. Active LAP exposure requires the user
+    // to have diversified across ≥3 markets, kept any single market
+    // ≤50% of stake, and bought at least some reinsurance coverage.
+    // Pool-credit and paired LAPs are still LAP-class exposure and go
+    // through the same gate — the protocol-level invariant is "no
+    // tier-3 entry without diversification + reinsurance".
+    if (!tier3Gate.open) {
+      addToast(
+        `Tier 3 (LAP / active trade) locked — ${tier3Gate.missing.join(" · ")}`,
+        "warning"
+      );
+      return;
+    }
+
     // For paired LAPs, the user funds BOTH legs — `requiredCapital` is
     // 2× the displayed size. We size the long-leg at the same default
     // as a single LAP, so a paired LAP costs twice as much capital.
@@ -805,17 +931,22 @@ export default function App() {
       }
     }
 
-    // 3b. Auto-buy reinsurance — face = 1.5 × amount split across the 3
-    //     products. Hedges the insurer-side exposure: if any market the
-    //     thread participates in triggers, reinsurance pays the
-    //     coverageFraction × loss back to the user.
-    const reinsuranceFacePerProduct = (amount * 1.5) / 3;
+    // 3b. Auto-buy reinsurance — face per product = `amount ×
+    //     coverageFraction`. Total face across the 3 products =
+    //     `amount × Σ coverageFraction = amount × 1.0`, the minimum
+    //     that gives full coverage on a worst-case insurer loss
+    //     equal to the deposit. Sprint 4.5 fix: previously face was
+    //     1.5× / 3 per product = 0.5 × deposit per product = 1.5 ×
+    //     deposit total, paying premium on 50% over-bought face that
+    //     never produced extra coverage.
     let nextReinsurance = insuranceState.reinsurance ?? [];
     nextReinsurance = nextReinsurance.map((p) => {
+      const faceAmount = amount * (p.coverageFraction ?? 0);
+      if (faceAmount <= 1e-6) return p;
       const r = postReinsuranceBuyer({
         product: p,
         userId: player.id,
-        faceAmount: reinsuranceFacePerProduct,
+        faceAmount,
       });
       return r.ok ? r.product : p;
     });
@@ -1086,6 +1217,22 @@ export default function App() {
           />
         </div>
         <div className="ml-auto flex items-center gap-3">
+          <button
+            onClick={() => setEasyMode((m) => !m)}
+            className={cx(
+              "text-xs font-mono px-2 py-1 rounded border transition-colors",
+              easyMode
+                ? "border-emerald-700 bg-emerald-950 text-emerald-300 hover:bg-emerald-900"
+                : "border-indigo-700 bg-indigo-950 text-indigo-300 hover:bg-indigo-900"
+            )}
+            title={
+              easyMode
+                ? "Switch to advanced mode — every desk exposed"
+                : "Switch to easy mode — one yield number, one button"
+            }
+          >
+            {easyMode ? "easy" : "advanced"}
+          </button>
           <SpeedControl speed={speed} onSpeed={setSpeed} />
           <button
             onClick={() => setRunning((r) => !r)}
@@ -1114,6 +1261,21 @@ export default function App() {
           >
             reset
           </button>
+          <span
+            className={cx(
+              "text-[10px] font-mono px-2 py-0.5 rounded border",
+              peerCount > 0
+                ? "border-emerald-700 bg-emerald-950/60 text-emerald-300"
+                : "border-gray-800 bg-gray-900 text-gray-500"
+            )}
+            title={
+              peerCount > 0
+                ? `${peerCount} other user${peerCount === 1 ? "" : "s"} in this room — your auctions match against them`
+                : "Solo user. Open another browser tab to add a peer."
+            }
+          >
+            room · {peerCount === 0 ? "solo" : `${peerCount} peer${peerCount === 1 ? "" : "s"}`}
+          </span>
           <span className="text-[10px] font-mono text-gray-600">
             σ={((activePS?.realizedSigma ?? 0.02) * 100).toFixed(2)}%
           </span>
@@ -1167,6 +1329,24 @@ export default function App() {
 
         {/* Center: main view */}
         <main className="flex-1 flex flex-col overflow-hidden">
+          {easyMode ? (
+            <div className="flex-1 overflow-y-auto p-4 max-w-3xl mx-auto w-full">
+              <EasyMode
+                player={player}
+                freeMarginAmount={freeMarginAmount}
+                ttBalance={ttBalance}
+                ttPrincipal={ttPrincipal}
+                allocStats={allocStats}
+                hasReinsurance={hasReinsurance}
+                hasOpenLap={hasOpenLap}
+                equityHistory={equityHistory}
+                onConvertToTT={(amount) => handleMintTT(amount)}
+                onRedeem={(amount) => handleRedeem(amount, false)}
+                onJumpToAdvanced={() => setEasyMode(false)}
+              />
+            </div>
+          ) : (
+          <>
           <div className="flex gap-1 px-3 py-1 border-b border-gray-800 flex-wrap">
             {TABS.map((t) => {
               const isActive = activeTab === t;
@@ -1269,7 +1449,11 @@ export default function App() {
                   shortCurve={activePS?.auctionResult?.shortCurve ?? []}
                   cap={cap}
                 />
-                <NpcPanel npcs={activePS?.npcs ?? []} />
+                <PeersPanel
+                  peers={flowAdapterRef.current?.getSnapshot?.() ?? []}
+                  peerCount={peerCount}
+                  roomId={flowAdapterRef.current?.getRoomId?.() ?? "default"}
+                />
                 <div className="rounded border border-gray-800 bg-gray-900 p-2">
                   <div className="text-[10px] text-gray-500 mb-1">Recent Matches</div>
                   {(activePS?.auctionResult?.matched ?? []).slice(0, 8).map((m, i) => (
@@ -1309,7 +1493,7 @@ export default function App() {
 
             {activeTab === "Credit" && (
               <>
-                <CreditDesk poolLtv={poolLtvInfo} />
+                <CreditDesk poolLtv={poolLtvInfo} tier3Gate={tier3Gate} />
                 <PortfolioStructurer
                   openPositions={openPositions}
                   creditEligibility={creditEligibility}
@@ -1355,11 +1539,14 @@ export default function App() {
             )}
 
             {activeTab === "Stress" && (
-              <StressPanel
-                solvency={solvency}
-                shockResults={shockResults}
-                onRunShock={handleRunShock}
-              />
+              <>
+                <StressPanel
+                  solvency={solvency}
+                  shockResults={shockResults}
+                  onRunShock={handleRunShock}
+                />
+                <StressHarnessPanel />
+              </>
             )}
 
             {activeTab === "Markets" && (
@@ -1388,6 +1575,8 @@ export default function App() {
               </div>
             )}
           </div>
+          </>
+          )}
         </main>
 
         {/* Right: player panel (desktop) */}

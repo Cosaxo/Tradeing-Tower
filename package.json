@@ -11,7 +11,8 @@
     "lint": "eslint .",
     "format": "prettier --write \"src/**/*.{js,jsx,css}\"",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "stress": "node scripts/runStress.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",

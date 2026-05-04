@@ -81,6 +81,83 @@ describe("withdrawInsurer / cancelInsured", () => {
     expect(withdrawInsurer({ market: m, userId: "A", amount: 200 }).ok).toBe(false);
   });
 
+  it("respects insurer lockup when currentEpoch is provided", () => {
+    let m = postInsurer({
+      market: fresh(),
+      userId: "A",
+      amount: 100,
+      currentEpoch: 0,
+    }).market;
+    // Within the lockup window — withdrawal is denied.
+    const blocked = withdrawInsurer({
+      market: m,
+      userId: "A",
+      amount: 50,
+      currentEpoch: 50,
+    });
+    expect(blocked.ok).toBe(false);
+    expect(blocked.reason).toMatch(/locked/i);
+  });
+
+  it("allows withdrawal after the lockup release epoch", () => {
+    let m = postInsurer({
+      market: fresh(),
+      userId: "A",
+      amount: 100,
+      currentEpoch: 0,
+    }).market;
+    // Past the 200-tick lockup.
+    const ok = withdrawInsurer({
+      market: m,
+      userId: "A",
+      amount: 50,
+      currentEpoch: 250,
+    });
+    expect(ok.ok).toBe(true);
+  });
+
+  it("bypassLockup: true ignores the lockup (thread-driven path)", () => {
+    let m = postInsurer({
+      market: fresh(),
+      userId: "A",
+      amount: 100,
+      currentEpoch: 0,
+    }).market;
+    const ok = withdrawInsurer({
+      market: m,
+      userId: "A",
+      amount: 50,
+      currentEpoch: 50, // would be locked
+      bypassLockup: true,
+    });
+    expect(ok.ok).toBe(true);
+    expect(ok.market.insurerPositions.A).toBe(50);
+  });
+
+  it("the latest deposit pushes the lockup release further out", () => {
+    let m = postInsurer({
+      market: fresh(),
+      userId: "A",
+      amount: 100,
+      currentEpoch: 0,
+    }).market;
+    m = postInsurer({
+      market: m,
+      userId: "A",
+      amount: 100,
+      currentEpoch: 100,
+    }).market;
+    // First deposit's release was epoch 200; second pushes to 300.
+    // At epoch 250, still locked.
+    const blocked = withdrawInsurer({
+      market: m,
+      userId: "A",
+      amount: 50,
+      currentEpoch: 250,
+    });
+    expect(blocked.ok).toBe(false);
+  });
+
   it("cancels coverage with default = full", () => {
     let m = postInsured({ market: fresh(), userId: "X", faceAmount: 500 }).market;
     const r = cancelInsured({ market: m, userId: "X" });

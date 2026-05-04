@@ -5,7 +5,7 @@
 //  Slow   (every SLOW_EVERY medium ticks): analytics, insurance pool, regime, correlation
 
 import { useEffect, useRef, useCallback } from "react";
-import { FAST_MS, MEDIUM_MS, SLOW_EVERY, REDEMPTION_EVERY, GRACE_MS, SOFT_CLOSE_PCT } from "../constants/system.js";
+import { FAST_MS, MEDIUM_MS, SLOW_EVERY, REDEMPTION_EVERY, INSURANCE_STRIDE, GRACE_MS, SOFT_CLOSE_PCT } from "../constants/system.js";
 import { priceStep } from "../lib/priceModels.js";
 import { calcRealizedSigma, calcRatioBeta as calcRatioBetaStat, ratioEffectiveSigma } from "../lib/math.js";
 import { detectRegime } from "../lib/regime.js";
@@ -490,10 +490,13 @@ export function useEpochLoop({
                 const r = postInsurer({ market: nextMarket, userId: uid, amount });
                 if (r.ok) nextMarket = r.market;
               } else {
+                // Thread-driven adjust — bypass lockup (governed by
+                // redemption mechanics, not the per-stake lockup).
                 const r = withdrawInsurer({
                   market: nextMarket,
                   userId: uid,
                   amount: -amount,
+                  bypassLockup: true,
                 });
                 if (r.ok) nextMarket = r.market;
               }
@@ -525,8 +528,18 @@ export function useEpochLoop({
       // All cash flows (premium in/out, claim in/out, reinsurance
       // payouts/seller losses) are aggregated on a per-user basis and
       // applied to the local player's margin at the end.
+      //
+      // EPOCH-SEPARATION INVARIANT (Tier 1.0): the entire insurance
+      // path — market settlement, reinsurance settlement, and
+      // insurance-driven thread damage — runs only every
+      // INSURANCE_STRIDE medium ticks. LAP / B-book damage paths,
+      // when wired in Tier 1.1, run on the OFF-stride. The two
+      // damage sources can never coincide on the same thread
+      // principal in the same tick.
       // -----------------------------------------------------------------
-      if (insuranceStateRef.current) {
+      const isInsuranceTick =
+        mediumCountRef.current % INSURANCE_STRIDE === 0;
+      if (insuranceStateRef.current && isInsuranceTick) {
         const pid = player?.id ?? "You";
         const tickEpoch = epochOfFirstPair(next);
         // Pull the active pair's correlation map as the cross-pair
@@ -572,7 +585,17 @@ export function useEpochLoop({
             playerCashChanges[uid] = (playerCashChanges[uid] ?? 0) + v;
           }
           for (const [uid, v] of Object.entries(r.claimOut)) {
-            playerCashChanges[uid] = (playerCashChanges[uid] ?? 0) - v;
+            // claimOut is paid out of thread-backed insurer stake.
+            // The cash flow is captured by damageThread shrinking the
+            // thread principal (and the per-market layer-2 stake that
+            // funded the claim was the principal in the first place).
+            // Debiting playerCashChanges here as well would
+            // double-count the loss against the user's wallet.
+            //
+            // (If a future build adds non-thread-backed insurer
+            // stakes — direct wallet collateral — those WILL need a
+            // wallet debit here, gated on whether the user has any
+            // active thread covering this event.)
             buyerLossesByUser[uid] = (buyerLossesByUser[uid] ?? 0) + v;
           }
           if (Object.keys(r.claimOut).length > 0) {
@@ -668,10 +691,13 @@ export function useEpochLoop({
                   const cut = dmg.insuranceLayerDeltas[m.eventId] ?? 0;
                   if (cut <= 1e-9) return m;
                   if (m.eventId === eventId) return m;
+                  // Thread-damage propagation across covered markets —
+                  // bypass lockup.
                   const r = withdrawInsurer({
                     market: m,
                     userId: uid,
                     amount: cut,
+                    bypassLockup: true,
                   });
                   return r.ok ? r.market : m;
                 });
@@ -767,10 +793,14 @@ export function useEpochLoop({
               markets: workingInsurance.markets.map((m) => {
                 const cut = u.insuranceLayerDeltas[m.eventId] ?? 0;
                 if (cut <= 1e-9) return m;
+                // TT redemption thread unwind — bypass lockup
+                // (redemption itself gates the user via the 10%
+                // standard cap or 5% express penalty).
                 const r = withdrawInsurer({
                   market: m,
                   userId: u.ownerId,
                   amount: cut,
+                  bypassLockup: true,
                 });
                 return r.ok ? r.market : m;
               }),

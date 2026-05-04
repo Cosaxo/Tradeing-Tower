@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   REINSURANCE_PRODUCTS,
   REINSURANCE_LOCKUP_EPOCHS,
+  REINSURANCE_BASE_RATE,
   makeReinsuranceSet,
   postReinsuranceSeller,
   withdrawReinsuranceSeller,
@@ -94,15 +95,15 @@ describe("calcReinsurancePremiumRate", () => {
     p = postReinsuranceSeller({ product: p, userId: "A", amount: 1000, currentEpoch: 0 }).product;
     p = postReinsuranceBuyer({ product: p, userId: "X", faceAmount: 1000 }).product;
     const rate = calcReinsurancePremiumRate(p);
-    // Base = 0.010 (REINSURANCE_BASE_RATE). At ratio = 1, should be the base.
-    expect(rate).toBeCloseTo(0.010, 5);
+    // At ratio = 1, the rate equals REINSURANCE_BASE_RATE.
+    expect(rate).toBeCloseTo(REINSURANCE_BASE_RATE, 7);
   });
 
   it("rises with buyer demand", () => {
     let p = makeReinsuranceSet()[0];
     p = postReinsuranceSeller({ product: p, userId: "A", amount: 100, currentEpoch: 0 }).product;
     p = postReinsuranceBuyer({ product: p, userId: "X", faceAmount: 400 }).product;
-    expect(calcReinsurancePremiumRate(p)).toBeGreaterThan(0.010);
+    expect(calcReinsurancePremiumRate(p)).toBeGreaterThan(REINSURANCE_BASE_RATE);
   });
 });
 

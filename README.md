@@ -1,29 +1,119 @@
 # Trading Tower
 
-In-browser simulator for a closed financial protocol where **one dollar
-plays four roles at once**. The protocol's mint unit ("a thread") is the
-hyper-rehypothecated atom: principal, insurance-seller stake,
-B-book pool stake, and stablecoin (TT) face — all backed by the same
-$1 of margin. Damage to any role shrinks all four in lockstep; growth
-fattens layers 1–3 (TT face is intentionally non-elastic so a
-collateral buffer accumulates).
+**A retail-yield product built on a single idea: the same $1 should be
+allowed to earn from four uncorrelated sources at the same time.**
 
-The simulator is conservation-tested end-to-end: every cash flow has a
-named counterparty, the books balance globally, and `Math.random()`
-appears in exactly one module (the GBM price stepper).
+You deposit one dollar. Without ever moving it, that dollar simultaneously:
+
+1. **Earns T-bill yield** as principal.
+2. **Earns insurance premium income** as an insurance seller across
+   diversified event markets.
+3. **Earns B-book pool yield** as the counterparty to losing trader
+   flow (passive underwriter — you don't trade, you absorb).
+4. **Backs Tower Tether (TT)**, a stablecoin you can spend like cash.
+
+These four roles are wired together as a single object — a *thread* —
+so the dollar is never duplicated and the protocol's accounting books
+balance globally. Damage in any role shrinks all four in lockstep;
+growth fattens layers 1–3 and accumulates as a buffer. The safety
+property is **not** "each layer never loses money" — it is **"the
+joint outcome across all four layers is positive with very high
+probability under realistic stress."** The four sources are chosen
+specifically to be uncorrelated so the joint distribution is much
+tighter than any single layer.
 
 ```
 npm install
 npm run dev   # → http://localhost:5173
 ```
 
-## What the protocol actually is
+**Looking for the deeper design rationale, math, and forward-looking
+extensions?** See [`WHITEPAPER.md`](./WHITEPAPER.md).
 
-Three independent design ideas wired into one closed system:
+## Two ways to use it
 
-1. **The thread** (`lib/towerTether.js`) — a stablecoin (Tower Tether)
-   minted 1:1 against free margin. Each minted dollar simultaneously
-   holds:
+**Easy mode (default for new users)** — one button. *Convert $X → TT*.
+The protocol auto-runs all four layers in the safe-by-default
+configuration: even allocation across diversified markets, full
+reinsurance coverage, B-book pool stake, TT mint. You see one number:
+today's yield. Withdraw at any time.
+
+**Advanced mode** — every layer is exposed as a separate desk:
+allocation editor, reinsurance buyer/seller flows, paired-LAP auction
+clearing, B-book underwriter desk, classifier breakdown. For users who
+want to actively trade, configure their own allocations, or run the
+protocol manually.
+
+## The four-tier ladder
+
+Capital climbs the ladder. Each rung adds an uncorrelated yield source
+on top of the previous rungs. Higher rungs require evidence that the
+position is safe enough to qualify.
+
+| Tier | What it does | Gate to enter |
+| :--: | :-- | :-- |
+| **1** | T-bill principal — the dollar itself | none |
+| **2** | Insurance-seller stake across event markets | none |
+| **3** | LAP exposure (active trading) | ≥3 markets allocated; max 50% any single; reinsurance bought (enforced by `evaluateTier3Gate` at LAP open) |
+| **4** | TT mint (the dollar plays all four roles) | layer-3 role of the thread is **B-book stake**, not active LAP — capital you've minted is locked as passive underwriter; capital you haven't minted is free to actively trade |
+
+**LTV** (`lib/ltv.js`) tracks the user's progress toward the ceiling
+through five additive terms — concentration, diversity, breadth,
+reinsurance coverage, and correlation independence — minus a
+max-weight penalty if any single market dominates. Pure diversification
+caps below the ceiling; LTV → 1.0 only when the user *also* buys
+reinsurance covering enough of their insurer-side exposure AND the
+allocations span uncorrelated underlyings.
+
+Tier 4 enforces an important separation: a thread that has been minted
+into TT cannot also be an active-LAP. Active trading and TT-backing are
+**per-thread** mutually exclusive — capital you've minted is locked as
+B-book underwriter; capital you haven't minted is free to actively
+trade. This is what makes the joint-outcome safety claim defensible:
+the layer-3 role of a TT thread is a passive yield source, not a
+directional bet.
+
+## The trading venue (secondary value prop)
+
+Trading Tower is a real multi-user trading platform — there are no
+synthetic NPCs, no in-process bots. Every counterparty is another
+human user. Solo demo mode shows the protocol idle (T-bill yield +
+insurance + reinsurance still settle); auction matches require at
+least one peer.
+
+Because the auction uses a **geodesic** ideal leverage distribution
+with **entropy-weighted tips**, taking the unpopular side of the book
+is rewarded:
+
+- **No commissions, no spread.** The auction matches bids directly.
+- **Minority-side rebate.** When the book is tilted long, the entropy
+  multiplier pays shorts a tip premium proportional to KL divergence
+  from the ideal distribution. Same in reverse. Effectively negative
+  cost of leverage on the unpopular side.
+- **Fast, deterministic clearing.** Each medium tick closes one
+  auction with a single match-and-fill pass.
+- **Transparent A/B classifier.** Every user sees their own score and
+  whether they're being routed peer-to-peer (A) or against the B-book
+  pool (B). No hidden conflict of interest.
+
+### Multi-user wiring
+
+The platform's order-flow seam (`OrderFlowAdapter`) is pluggable. The
+default in this codebase is **`LocalBroadcastAdapter`** — each browser
+tab is one user, and tabs in the same room exchange bids via
+`BroadcastChannel`. Two open tabs on the same machine give a working
+multi-user demo without any backend. A real production deployment
+swaps in a server-backed adapter (the same interface) and shares
+protocol-global state (insurance, reinsurance, B-book, TT) across
+users — the demo's known limitation is that protocol state is
+per-tab.
+
+## Under the hood
+
+Three design ideas wired into one conservation-tested system:
+
+1. **The thread** (`lib/towerTether.js`) — a stablecoin minted 1:1
+   against free margin. Each minted dollar simultaneously holds:
    - **Layer 1** — T-bill principal (the dollar itself).
    - **Layer 2** — insurance-seller stakes spread across reinsurance-
      covered event markets (`insuranceWeights[eventId]`, ∑ ≈ 1).
@@ -53,16 +143,29 @@ Three independent design ideas wired into one closed system:
    shortMax). Skew/kurtosis from the live book apply a Cornish-Fisher
    2nd-order correction to the ideal density.
 
+The simulator is conservation-tested end-to-end: every cash flow has a
+named counterparty, the books balance globally, and `Math.random()`
+appears in exactly one module (the GBM price stepper).
+
 ## Architecture
 
-### Epoch loop — three strides + a redemption stride
+### Epoch loop — strides + the epoch-separation invariant
 
 | Stride     | Cadence                       | Responsibility                                                         |
 | ---------- | ----------------------------- | ---------------------------------------------------------------------- |
 | Fast       | `FAST_MS` (~1 s)              | price advance + realised-σ update                                      |
-| Medium     | `MEDIUM_MS` (~6 s)            | order-flow ingest, auction, pool settle, rentals, insurance + reinsurance |
+| Medium     | `MEDIUM_MS` (~6 s)            | order-flow ingest, auction, pool settle, rentals, T-bill yield         |
+| **Insurance** | **every `INSURANCE_STRIDE` mediums** | **insurance + reinsurance settlement, insurance-driven thread damage** |
+| LAP / B-book damage | OFF-stride (every other medium tick) | LAP / B-book damage paths (wired in Tier 1.1) |
 | Slow       | every `SLOW_EVERY` mediums    | regime detection, cross-pair correlation                               |
 | Redemption | every `REDEMPTION_EVERY` mediums (~monthly in sim-days; coprime with slow) | TT redemption queue drain + thread unwinds + solvency recheck |
+
+**Epoch-separation invariant** (Tier 1.0): insurance settlement and
+LAP / B-book settlement run on coprime strides — they never coincide
+on the same medium tick. This guarantees one thread principal cannot
+be debited by two damage sources in the same tick. The doc-block in
+`towerTether.js` documents the invariant; `useEpochLoop.js` enforces
+it structurally via the `INSURANCE_STRIDE` constant.
 
 Speed control (½× / 1× / 2× / 5×) scales fast and medium intervals
 proportionally. The medium tick uses a strict pure-compute → side-effect
@@ -211,6 +314,92 @@ path:
    malformed entries at the adapter boundary.
 7. **Pure lib, hooks isolated.** Every lib module is a pure function of
    its inputs. React lives only in `src/hooks/` and `src/components/`.
+
+## Stress harness — empirical safety evidence
+
+The protocol's safety claim is **"each user's joint outcome across
+all four layers is positive with very high probability under
+realistic stress."** That claim is empirically testable;
+`lib/stressHarness.js` is the test.
+
+```
+npm run stress                          # all scenarios, n=200
+npm run stress -- --n 1000              # 1000 runs per scenario
+npm run stress -- --scenario CALM       # one scenario only
+```
+
+Or open the **Stress** tab in the running app — the same harness
+runs in-browser and renders the joint-outcome distribution per
+scenario.
+
+Each session simulates a user who deposits $X, runs the easy-mode
+auto-mint flow (allocate insurer stakes, buy 1.5× face reinsurance,
+deposit principal as B-book stake, mint TT 1:1), then runs through
+200 medium epochs of a stress scenario. Joint outcome = (final cash
+margin + redeemable thread principal) − initial deposit. The
+harness aggregates `P(joint outcome ≥ 0)` and the percentile
+distribution across N seeded runs.
+
+### Scenarios
+
+| ID | Description |
+| -- | -- |
+| `CALM` | No event triggers, no redemption pressure. Tests baseline yield. |
+| `SINGLE_EVENT` | One major event has ~30% trigger probability. Tests reinsurance recovery. |
+| `CORRELATED_CRISIS` | Multiple correlated events (BTC + ETH + SPX + vol spike). Tests joint-stress survival. |
+| `REDEMPTION_PRESSURE` | User redeems 25% of TT each cycle. Tests staged redemption mechanics. |
+
+### Sprint 4.5 calibration — empirically verified
+
+Sprint 4 built the harness; Sprint 4.5 used it to find and fix the
+calibration bugs the harness surfaced. The harness now reports
+**`P(joint outcome ≥ 0) = 100%`** across all four scenarios at
+n=200, mean joint outcome ≈ +4.5% over 200 sim-days
+(≈ +8.5% annualised). Worst single run across 800 trials: +3.9%.
+The safety claim is empirically met and the yield is competitive
+with retail money-market products.
+
+What was fixed:
+
+1. `TBILL_RATE` 0.001 → 0.04 (was 0.1% annual; now 4% annual).
+2. `REINSURANCE_BASE_RATE` 0.010 → 0.0001 (was ≈365% annualised; now
+   ≈3.65% at base, scaling with cov/ins).
+3. `BASE_PREMIUM_RATE` re-tuned twice: 0.005 → 0.00005 → 0.00015. The
+   initial 100× reduction was too aggressive (insurance income of
+   1.8% annualised was below T-bill, so being an underwriter wasn't
+   rewarded). The 3× bump puts it at 5.5% at base, competitive with
+   T-bill plus a meaningful kicker.
+4. Min-rate floor relaxed (0.1× base → 0.01× base) so heavily-
+   oversupplied markets can clear at sub-T-bill rates and naturally
+   self-correct via seller exit, instead of being pinned at a floor
+   that prevents re-balancing.
+5. Auto-mint reinsurance face changed from `(amount × 1.5) / 3` per
+   product to `amount × coverageFraction` per product — total face
+   drops from 1.5× deposit to 1.0× deposit (minimum full-coverage),
+   removing ~50% of dead premium.
+6. **Insurance claim double-counting bug** (a separate finding the
+   harness surfaced): `useEpochLoop.js` was both debiting
+   `playerCashChanges -= claimOut` and calling `damageThread`,
+   charging the user twice for the same loss. Fixed — claim losses
+   on thread-backed insurer stakes are now captured once via
+   `damageThread` only.
+
+Deferred (queued for future sprints):
+
+- **B-book reinsurance pool**. Reinsurance today only hedges the
+  insurance-seller leg (layer 2). Layer 3 — the B-book pool stake —
+  has no equivalent hedge, so a wave of profitable retail flow can
+  drain the B-book pool and damage the thread without any
+  reimbursement. Wiring active LAP/B-book flow into the harness
+  will surface this gap; a parallel reinsurance product covering
+  B-book drawdowns is the proposed fix.
+
+- **Seller-side capital flight modelling.** The harness currently
+  doesn't let sellers withdraw mid-scenario, so we don't yet observe
+  whether reinsurance pools can drain during stress. Extending the
+  harness with seller-withdrawal triggers is the prerequisite for
+  any "stress bonus" mechanism — design needs the empirical evidence
+  first.
 
 ## Testing
 

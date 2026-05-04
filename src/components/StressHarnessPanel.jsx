@@ -331,6 +331,45 @@ export function StressHarnessPanel() {
           worth designing once the failure mode is empirically observed).
         </p>
       </div>
+
+      <div className="rounded border border-rose-800 bg-rose-950/30 p-3">
+        <span className="text-xs font-mono text-rose-200 font-bold block mb-1">
+          Tier 1.1 — layer-3 stress now exercised (and the safety
+          claim partially fails)
+        </span>
+        <p className="text-[10px] font-mono text-gray-300 leading-relaxed mb-2">
+          The harness now applies layer-3 (B-book) P&L per LAP-stride
+          tick to expose the active-trader counterparty risk path.
+          With no B-book reinsurance in place, three new scenarios
+          break the safety claim in different ways:
+        </p>
+        <ul className="text-[10px] font-mono text-gray-300 list-disc pl-4 space-y-1 leading-relaxed">
+          <li>
+            <span className="text-rose-300">BBOOK_VOLATILE</span>{" "}
+            (zero-mean ±0.5%/tick) — P(joint ≥ 0) drops to ~86%. Some
+            users on unlucky paths lose despite zero average drift.
+          </li>
+          <li>
+            <span className="text-rose-300">BBOOK_LOSING_STREAK</span>{" "}
+            (mean -0.1%/tick) — P(joint ≥ 0) collapses to ~2%. A
+            sustained period of profitable retail flow drains the
+            pool and damages threads with no compensating mechanism.
+          </li>
+          <li>
+            <span className="text-rose-300">BBOOK_TAIL_EVENT</span>{" "}
+            (1%/tick chance of -5% spike) — P(joint ≥ 0) ~14%. Fat-
+            tailed coordinated wins (GME, COVID-rally style) are
+            catastrophic for the unhedged thread.
+          </li>
+        </ul>
+        <p className="text-[10px] font-mono text-gray-400 mt-2 leading-relaxed">
+          This is the empirical evidence for Tier 1.2 (B-book
+          reinsurance pool). The harness reproduces the failure mode
+          we designed against in the roadmap; the next sprint adds
+          the hedge and the harness verifies whether the safety claim
+          is restored.
+        </p>
+      </div>
     </div>
   );
 }

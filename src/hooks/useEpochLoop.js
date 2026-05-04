@@ -490,10 +490,13 @@ export function useEpochLoop({
                 const r = postInsurer({ market: nextMarket, userId: uid, amount });
                 if (r.ok) nextMarket = r.market;
               } else {
+                // Thread-driven adjust — bypass lockup (governed by
+                // redemption mechanics, not the per-stake lockup).
                 const r = withdrawInsurer({
                   market: nextMarket,
                   userId: uid,
                   amount: -amount,
+                  bypassLockup: true,
                 });
                 if (r.ok) nextMarket = r.market;
               }
@@ -688,10 +691,13 @@ export function useEpochLoop({
                   const cut = dmg.insuranceLayerDeltas[m.eventId] ?? 0;
                   if (cut <= 1e-9) return m;
                   if (m.eventId === eventId) return m;
+                  // Thread-damage propagation across covered markets —
+                  // bypass lockup.
                   const r = withdrawInsurer({
                     market: m,
                     userId: uid,
                     amount: cut,
+                    bypassLockup: true,
                   });
                   return r.ok ? r.market : m;
                 });
@@ -787,10 +793,14 @@ export function useEpochLoop({
               markets: workingInsurance.markets.map((m) => {
                 const cut = u.insuranceLayerDeltas[m.eventId] ?? 0;
                 if (cut <= 1e-9) return m;
+                // TT redemption thread unwind — bypass lockup
+                // (redemption itself gates the user via the 10%
+                // standard cap or 5% express penalty).
                 const r = withdrawInsurer({
                   market: m,
                   userId: u.ownerId,
                   amount: cut,
+                  bypassLockup: true,
                 });
                 return r.ok ? r.market : m;
               }),

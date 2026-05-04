@@ -88,6 +88,16 @@ function mulberry32(seed) {
   };
 }
 
+// Box-Muller standard-normal draw from a uniform RNG. Used for
+// layer-3 (B-book) per-tick P&L stress modelling.
+function gaussian(rng) {
+  let u = 0;
+  let v = 0;
+  while (u === 0) u = rng();
+  while (v === 0) v = rng();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
 // ---------------------------------------------------------------------------
 // Scenarios
 // ---------------------------------------------------------------------------
@@ -147,6 +157,60 @@ export const SCENARIOS = {
       "User redeems 25% of wallet TT each redemption cycle through the run. Tests the redemption mechanic — does staged unwind preserve principal?",
     eventProbabilities: {},
     redemptionPressure: 0.25,
+    ticks: 200,
+  },
+
+  // ---------------------------------------------------------------------
+  // Layer-3 (B-book) stress scenarios — Tier 1.1
+  //
+  // Until active LAP flow is wired into the harness, layer-3 stress is
+  // modelled as a per-LAP-tick draw of the user's B-book P&L share from
+  // a Gaussian distribution. Mean = expected drift; std = volatility
+  // amplitude. Both are expressed as a fraction of the user's
+  // threadDerivedStake — so std=0.005 means ±0.5% of stake per LAP-tick
+  // standard deviation. With 100 LAP ticks/run (every other medium
+  // tick at INSURANCE_STRIDE=2), an std of 0.005 produces an annualised
+  // volatility of about ±18% on the B-book stake — moderate stress.
+  //
+  // Mean drift: positive means the user benefits from B-book exposure
+  // (NPCs lose on net); negative means they lose.
+  // ---------------------------------------------------------------------
+
+  BBOOK_VOLATILE: {
+    id: "BBOOK_VOLATILE",
+    name: "Layer-3 (B-book) volatility",
+    description:
+      "Zero-mean Gaussian noise on B-book P&L each LAP tick (±0.5% of stake std). Tests whether thread can absorb fluctuating layer-3 P&L without breaking joint outcome.",
+    eventProbabilities: {},
+    redemptionPressure: 0,
+    bBookPnlStdPerTick: 0.005,
+    bBookPnlMeanPerTick: 0,
+    ticks: 200,
+  },
+
+  BBOOK_LOSING_STREAK: {
+    id: "BBOOK_LOSING_STREAK",
+    name: "Layer-3 sustained losing streak",
+    description:
+      "B-book P&L draws negative on average (mean -0.1% per LAP tick), simulating a period of profitable retail flow draining the pool. Tests whether layer-3 drawdown alone can break the safety claim.",
+    eventProbabilities: {},
+    redemptionPressure: 0,
+    bBookPnlStdPerTick: 0.003,
+    bBookPnlMeanPerTick: -0.001,
+    ticks: 200,
+  },
+
+  BBOOK_TAIL_EVENT: {
+    id: "BBOOK_TAIL_EVENT",
+    name: "Layer-3 tail-event drawdown",
+    description:
+      "Fat-tailed B-book P&L: mostly small with occasional severe negative shocks. Models GME / COVID-rally-style coordinated retail wins. Tests the worst case.",
+    eventProbabilities: {},
+    redemptionPressure: 0,
+    bBookPnlStdPerTick: 0.01,
+    bBookPnlMeanPerTick: -0.001,
+    bBookTailShockProb: 0.01, // 1% per LAP tick chance of...
+    bBookTailShockMagnitude: -0.05, // ...a -5% spike on top of the Gaussian
     ticks: 200,
   },
 };
@@ -408,6 +472,7 @@ function simulateTick({
             market: markets[idx],
             userId,
             amount: cut,
+            bypassLockup: true,
           });
           if (r2.ok) markets = markets.map((m, i) => (i === idx ? r2.market : m));
         }
@@ -425,6 +490,116 @@ function simulateTick({
     }
   }
   } // end isInsuranceTick block
+
+  // -----------------------------------------------------------------
+  // Layer-3 (B-book) stress — runs on the LAP stride (every tick
+  // where !isInsuranceTick).
+  //
+  // Models active-trader counterparty risk: each LAP tick, the user's
+  // B-book P&L is drawn from a Gaussian (with optional fat-tail
+  // shock), expressed as a fraction of their threadDerivedStake.
+  // Positive draws grow the thread (via growThread); negative draws
+  // damage it (via damageThread). All four layers move in lockstep,
+  // matching the protocol design.
+  //
+  // The epoch-separation invariant guarantees this damage path can't
+  // coincide with insurance damage (which only runs on insurance
+  // ticks). One tick → one damage source max.
+  // -----------------------------------------------------------------
+  if (
+    !isInsuranceTick &&
+    (scenario.bBookPnlStdPerTick > 0 ||
+      Math.abs(scenario.bBookPnlMeanPerTick ?? 0) > 0)
+  ) {
+    const userStake =
+      bBookState?.underwriters?.[userId]?.threadDerivedStake ?? 0;
+    if (userStake > 1e-9) {
+      const meanFrac = scenario.bBookPnlMeanPerTick ?? 0;
+      const stdFrac = scenario.bBookPnlStdPerTick ?? 0;
+      let pnlFrac = meanFrac + stdFrac * gaussian(rng);
+      // Optional fat-tail shock — a binary trigger that adds a fixed
+      // additional draw on top.
+      if ((scenario.bBookTailShockProb ?? 0) > 0) {
+        if (rng() < scenario.bBookTailShockProb) {
+          pnlFrac += scenario.bBookTailShockMagnitude ?? 0;
+          metrics.bBookTailShocksFired += 1;
+        }
+      }
+      const pnlAmount = userStake * pnlFrac;
+      metrics.bBookPnlApplied += pnlAmount;
+
+      const userThread = (ttState.threads ?? []).find(
+        (t) => !t.closed && t.ownerId === userId && t.principal > 1e-9
+      );
+      if (userThread) {
+        if (pnlAmount > 0) {
+          // Gain: grow the thread; layers 1, 2, 3 fatten in lockstep.
+          const grown = growThread({
+            ttState,
+            threadId: userThread.id,
+            gain: pnlAmount,
+          });
+          if (grown.gainApplied > 1e-9) {
+            ttState = grown.ttState;
+            for (const [eid, add] of Object.entries(
+              grown.insuranceLayerAdds ?? {}
+            )) {
+              if (add <= 1e-9) continue;
+              const idx = markets.findIndex((m) => m.eventId === eid);
+              if (idx < 0) continue;
+              const r = postInsurer({
+                market: markets[idx],
+                userId,
+                amount: add,
+              });
+              if (r.ok) markets = markets.map((m, i) => (i === idx ? r.market : m));
+            }
+            if (grown.poolLayerAdd > 1e-9) {
+              const adj = adjustThreadDerived({
+                state: bBookState,
+                uid: userId,
+                delta: grown.poolLayerAdd,
+              });
+              if (adj.ok) bBookState = adj.state;
+            }
+          }
+        } else if (pnlAmount < 0) {
+          // Loss: damage the thread; layers 1, 2, 3, 4 shrink in lockstep.
+          const dmg = damageThread({
+            ttState,
+            threadId: userThread.id,
+            delta: -pnlAmount,
+          });
+          if (dmg.deltaApplied > 1e-9) {
+            ttState = dmg.ttState;
+            for (const [eid, cut] of Object.entries(
+              dmg.insuranceLayerDeltas ?? {}
+            )) {
+              if (cut <= 1e-9) continue;
+              const idx = markets.findIndex((m) => m.eventId === eid);
+              if (idx < 0) continue;
+              const r = withdrawInsurer({
+                market: markets[idx],
+                userId,
+                amount: cut,
+                bypassLockup: true,
+              });
+              if (r.ok) markets = markets.map((m, i) => (i === idx ? r.market : m));
+            }
+            if (dmg.poolLayerDelta > 0) {
+              const adj = adjustThreadDerived({
+                state: bBookState,
+                uid: userId,
+                delta: -dmg.poolLayerDelta,
+              });
+              if (adj.ok) bBookState = adj.state;
+            }
+            metrics.threadDamageApplied += dmg.deltaApplied;
+          }
+        }
+      }
+    }
+  }
 
   // T-bill yield on user's cash margin (matches the loop's per-tick
   // application).
@@ -503,6 +678,7 @@ function simulateTick({
           market: markets[idx],
           userId,
           amount: cut,
+          bypassLockup: true,
         });
         if (r.ok) markets = markets.map((m, i) => (i === idx ? r.market : m));
       }
@@ -618,6 +794,8 @@ export function runStressSession({
     finalThreadPrincipal: 0,
     expressPenalty: 0,
     triggerCount: 0,
+    bBookPnlApplied: 0,
+    bBookTailShocksFired: 0,
   };
 
   for (let t = 0; t < scenario.ticks; t++) {

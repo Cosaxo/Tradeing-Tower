@@ -24,6 +24,17 @@
 // Constants
 // ---------------------------------------------------------------------------
 
+// Insurer-side lockup — direct insurer-stake withdrawals respect this
+// many medium ticks of cool-down from the latest deposit. Prevents
+// in-and-out-around-trigger gaming where a user deposits, collects
+// premium, then withdraws right before a likely trigger.
+//
+// Thread-backed insurer stakes — those posted as part of a TT mint —
+// are governed by the redemption mechanics (10% cycle cap or 5%
+// express penalty), not this lockup, so withdrawInsurer accepts a
+// `bypassLockup: true` flag for those paths.
+export const INSURANCE_LOCKUP_EPOCHS = 200;
+
 // Base premium rate PER INSURANCE SETTLEMENT (every INSURANCE_STRIDE
 // medium ticks, currently 2). Sensitivity controls how aggressively
 // imbalance shifts the rate.
@@ -74,6 +85,10 @@ export function makeInsuranceMarket({ eventId, pairKey = null, category }) {
     cumulativeClaims: 0,
     triggerCount: 0,
     lastTickEpoch: -1,
+    // Per-insurer lockup release epoch. postInsurer extends this on
+    // each deposit; withdrawInsurer respects it unless bypassLockup
+    // is set. Keys absent → no lockup recorded → withdraw freely.
+    insurerLockupReleaseEpoch: {},
   };
 }
 
@@ -83,9 +98,20 @@ export function makeInsuranceMarket({ eventId, pairKey = null, category }) {
 
 // Insurer-side: commit capital that will pay out on trigger.
 // Returns { ok, market, reason? }.
-export function postInsurer({ market, userId, amount }) {
+//
+// `currentEpoch` (optional) extends the per-user lockup release
+// epoch. Latest deposit pushes the unlock further out, so drip
+// deposits can't short-circuit the lockup. Backward-compatible —
+// callers that don't pass currentEpoch get no lockup recorded.
+export function postInsurer({ market, userId, amount, currentEpoch }) {
   if (!Number.isFinite(amount) || amount <= 0) {
     return { ok: false, reason: "amount must be positive" };
+  }
+  let nextLockup = market.insurerLockupReleaseEpoch ?? {};
+  if (Number.isFinite(currentEpoch)) {
+    const release = currentEpoch + INSURANCE_LOCKUP_EPOCHS;
+    const existing = nextLockup[userId] ?? 0;
+    nextLockup = { ...nextLockup, [userId]: Math.max(existing, release) };
   }
   return {
     ok: true,
@@ -96,26 +122,54 @@ export function postInsurer({ market, userId, amount }) {
         [userId]: (market.insurerPositions[userId] ?? 0) + amount,
       },
       insurerCapital: market.insurerCapital + amount,
+      insurerLockupReleaseEpoch: nextLockup,
     },
   };
 }
 
-// Withdraw insurer-side capital. Trivially allowed in v1; future can
-// gate on outstanding obligations or cool-down.
-export function withdrawInsurer({ market, userId, amount }) {
+// Withdraw insurer-side capital. Respects the per-user lockup unless
+// `bypassLockup: true` is set.
+//
+// bypassLockup paths (thread-driven, gated by redemption mechanics):
+//   - insurance damage propagation across covered markets
+//   - TT redemption thread unwinds
+// Direct-user withdrawal paths leave bypassLockup false and pass
+// `currentEpoch` so the lockup is enforced.
+export function withdrawInsurer({
+  market,
+  userId,
+  amount,
+  currentEpoch,
+  bypassLockup = false,
+}) {
   const have = market.insurerPositions[userId] ?? 0;
   if (amount > have + 1e-9) {
     return { ok: false, reason: "amount exceeds posted insurer stake" };
   }
+  if (!bypassLockup && Number.isFinite(currentEpoch)) {
+    const release = market.insurerLockupReleaseEpoch?.[userId] ?? 0;
+    if (currentEpoch < release) {
+      return {
+        ok: false,
+        reason: `locked until epoch ${release} (currently ${currentEpoch})`,
+      };
+    }
+  }
   const newPositions = { ...market.insurerPositions };
-  if (have - amount <= 1e-9) delete newPositions[userId];
-  else newPositions[userId] = have - amount;
+  const newLockup = { ...(market.insurerLockupReleaseEpoch ?? {}) };
+  if (have - amount <= 1e-9) {
+    delete newPositions[userId];
+    delete newLockup[userId];
+  } else {
+    newPositions[userId] = have - amount;
+  }
   return {
     ok: true,
     market: {
       ...market,
       insurerPositions: newPositions,
       insurerCapital: Math.max(0, market.insurerCapital - amount),
+      insurerLockupReleaseEpoch: newLockup,
     },
   };
 }

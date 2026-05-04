@@ -1,9 +1,26 @@
-# Trading Tower
+# Hyperfloat
 
-**A retail-yield product built on a single idea: the same $1 should be
-allowed to earn from four uncorrelated sources at the same time.**
+### *(formerly Trading Tower — codebase identifiers still use the old name)*
 
-You deposit one dollar. Without ever moving it, that dollar simultaneously:
+**The financial system captures float at every step. Hyperfloat
+returns it to you.**
+
+In the legacy system, your idle dollars earn yield for *someone
+else* — your bank, your insurance company, your broker, the
+stablecoin issuer, the gift-card issuer. Hyperfloat captures all
+five of these float layers at once, on the same dollar, and gives
+the yield to *you*:
+
+| Float location | Currently captured by | Hyperfloat tier |
+| :-- | :-- | :-- |
+| Checking balances | Banks (earn spread) | **1** — T-bill yield |
+| Insurance reserves | Insurance companies (premium float) | **2** — premium income |
+| Brokerage cash | Brokers (float + PFOF) | **3** — B-book pool income |
+| Stablecoin reserves | USDC / USDT issuers | **4** — TT face yield |
+| Gift-card / prepaid balances | Merchants + card issuers | **5** — purchase-intent float |
+
+You deposit one dollar. Without ever moving it, that dollar
+simultaneously:
 
 1. **Earns T-bill yield** as principal.
 2. **Earns insurance premium income** as an insurance seller across
@@ -11,6 +28,9 @@ You deposit one dollar. Without ever moving it, that dollar simultaneously:
 3. **Earns B-book pool yield** as the counterparty to losing trader
    flow (passive underwriter — you don't trade, you absorb).
 4. **Backs Tower Tether (TT)**, a stablecoin you can spend like cash.
+5. **Earns float yield while earmarked for spending** via the
+   purchase-intent auction layer (Tier 5 — see [`WHITEPAPER.md`
+   §1.5](./WHITEPAPER.md)).
 
 These four roles are wired together as a single object — a *thread* —
 so the dollar is never duplicated and the protocol's accounting books
@@ -73,6 +93,38 @@ The protocol *pays you* to take the under-supplied side of the book
 via the entropy-weighted minority-side rebate. And the A/B
 classifier replaces the CFD industry's hidden conflict-of-interest
 with a transparent, opt-in, compensated marketplace.
+
+### As a payment rail (Tier 5 — purchase-intent float)
+
+Gift cards, prepaid cards, and escrow accounts are a $200B+
+annual market in the US alone, with ~$3B forfeited each year on
+expiry. The merchant or card issuer holds the prepaid balance,
+earns yield on it, and often keeps the entire balance if the user
+doesn't spend in time.
+
+Tier 5 captures this float and returns it to the user:
+
+1. User auctions a purchase intent (item + max price + time
+   window).
+2. Sellers bid below max, competing on price.
+3. User accepts a bid → that portion of TT face is locked,
+   designated for that seller.
+4. **The locked TT keeps earning ~8.5% APY** while it's earmarked
+   for spending — the user's float is captured by the user, not
+   by the merchant.
+5. Settlement on use; small penalty (1–3%) on time-out instead of
+   full forfeit.
+
+For a $1,000 purchase locked 30 days: ~5% auction discount + ~$7
+float yield = ~5.5% improvement over walk-up retail with $0 yield
+on cash held in advance.
+
+| Mechanism | Float yield | Pricing | Flexibility |
+| :-- | :--: | :--: | :--: |
+| Gift card | 0% | list | none — full forfeit |
+| Pre-paid card | 0% | list | low |
+| Escrow service | 0% | one-off | depends |
+| **Hyperfloat Tier 5** | **~8.5%** | **competitive auction** | **time-out with small penalty** |
 
 ### As a stablecoin (and why it may avoid stablecoin regulation)
 

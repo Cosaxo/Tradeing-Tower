@@ -1,14 +1,16 @@
-# Trading Tower
+# Hyperfloat
 
-### A Four-Layer Thread Stablecoin with Joint-Outcome Safety
+### *(formerly Trading Tower)*
 
-**Working draft · v0.5**
+### A Five-Tier Thread Stablecoin That Returns Float to the User
+
+**Working draft · v0.6**
 
 ---
 
 ## Contents
 
-1. [Introduction](#1-introduction)
+1. [Introduction](#1-introduction) (incl. §1.4 multi-product replacement, §1.5 Tier 5 — purchase-intent float)
 2. [The Four-Layer Thread](#2-the-four-layer-thread)
 3. [Layered Risk Architecture](#3-layered-risk-architecture)
 4. [Auto-Mint and the Tier Ladder](#4-auto-mint-and-the-tier-ladder)
@@ -38,6 +40,37 @@
 - Appendix D — [Glossary](#appendix-d--glossary)
 
 ---
+
+## Brand thesis
+
+In the legacy financial system, every dollar that sits idle between
+productive uses — *float* — is captured by an intermediary. Banks
+earn the spread on checking-account float. Insurance companies
+profit primarily from float (premium revenue between collection and
+payout). Brokers earn float on cash balances and sell PFOF on top.
+Stablecoin issuers earn ~5% on the reserves while holders earn 0%.
+Gift-card issuers and merchants capture float on prepaid balances
+and pocket forfeitures on expiry.
+
+**Hyperfloat captures every one of these float locations and
+returns the yield to the user.** Five tiers, each corresponding to
+a real category of float in the legacy system:
+
+| Float location | Currently captured by | Hyperfloat tier |
+| :-- | :-- | :-- |
+| Checking balances | Banks (earn spread) | **Tier 1** — T-bill yield |
+| Insurance reserves | Insurance companies (premium float) | **Tier 2** — premium income |
+| Brokerage cash | Brokers (float + PFOF) | **Tier 3** — B-book pool income |
+| Stablecoin reserves | USDC / USDT issuers | **Tier 4** — TT face yield |
+| Gift-card / prepaid balances | Merchants + card issuers | **Tier 5** — purchase-intent float |
+
+The four-layer thread of v0.5 captured tiers 1–4. Tier 5 — the
+*purchase-intent float* layer (Section 1.5 below) — is added
+in v0.6.
+
+The pitch in one sentence:
+
+> *Hyperfloat — every float capture-mechanism the financial system uses against you, returned as yield.*
 
 ## Abstract
 
@@ -347,6 +380,140 @@ spendability + transparent trading venue + per-user
 collateral structure in a single financial product. Each
 component individually exists somewhere; their integration
 into one user experience does not.
+
+### 1.5 Tier 5 — Purchase-intent float (the gift-card layer)
+
+In the legacy financial system, gift cards, prepaid cards, and
+escrow accounts represent a major float-capture mechanism that
+hasn't been mentioned so far. The numbers are large: the US
+gift-card market alone is ~$200B annual issuance with ~$3B
+forfeited each year through expiry. The merchant or card issuer
+holds the prepaid balance, earns yield on it, and (often) keeps
+the entire balance if the user doesn't spend it in time.
+
+Hyperfloat's Tier 5 — added in v0.6 — captures this float layer
+and returns it to the user.
+
+#### 1.5.1 Mechanism
+
+The mechanic is a **reverse auction with smart-contract escrow**
+on the user's TT face:
+
+1. **User auctions a purchase intent.** Specifies item (or SKU),
+   maximum acceptable price, time window for fulfilment, and any
+   optional terms (delivery, condition, etc.).
+2. **Sellers bid to fulfil.** Sellers see open auctions matching
+   their inventory; they submit bids below the user's max,
+   competing on price + terms.
+3. **User accepts a bid.** The smart contract locks the bid amount
+   of the user's TT face, designating it for that specific
+   seller for the agreed time window.
+4. **Locked TT keeps earning yield.** Crucially, the locked TT face
+   is still backed by the user's underlying thread principal. The
+   thread continues to earn from layers 1–3 (T-bill, insurance,
+   B-book) during the entire lock period. The user's float is
+   *captured by the user themselves*, not by the merchant.
+5. **Settlement on use.** When the user triggers the purchase
+   (proof of delivery confirmed via oracle network, e.g. UMA
+   optimistic oracle for off-chain delivery), the locked TT
+   transfers to the seller; the lock releases.
+6. **Time-out path.** If the user doesn't trigger the purchase
+   within the time window, the lock releases automatically. User
+   pays a small penalty (1–3% of bid amount) to the seller as
+   compensation for held inventory; user receives back principal
+   + accumulated float yield − penalty.
+
+#### 1.5.2 Why it's a Pareto improvement
+
+**For the user**:
+- Money keeps earning ~8.5% APY *while it's earmarked for spending*.
+  A $1,000 purchase locked for 30 days earns ~$7 of float yield.
+- Sellers compete in the auction, producing typical 3–8% discount
+  vs. walk-up retail.
+- Flexibility: can back out for a small penalty rather than
+  forfeiting the entire balance (as gift cards do on expiry).
+
+**For the seller**:
+- *Committed-demand visibility* — extremely valuable for inventory
+  planning.
+- Captures user price sensitivity in a competitive auction (better
+  than one-off negotiation or static list pricing).
+- Compensation if user backs out (the time-out penalty).
+
+**For the protocol**:
+- A new float-capture layer, adding to the existing four.
+- Transaction volume from each auction (a fee-revenue source).
+- Network effects (more sellers attract more users; more users
+  attract more sellers) that strengthen the protocol's defensive
+  position vs. payment-rail competitors.
+
+#### 1.5.3 Comparison with legacy alternatives
+
+| Mechanism | Float yield to user | Pricing | Counterparty trust | Flexibility |
+| :-- | :--: | :--: | :--: | :--: |
+| Gift card | 0% | list price | trust merchant solvency | none — full forfeit on expiry |
+| Pre-paid card | 0% | list price | trust card issuer | low — high fees, expiry forfeit |
+| Escrow service | 0% | one-off negotiated | neutral third-party | depends on contract |
+| Layaway / BNPL | 0% (often negative) | list price | merchant credit | moderate |
+| **Hyperfloat Tier 5** | **~8.5%** | **competitive auction** | **smart contract** | **time-out with small penalty** |
+
+Worked example for a $1,000 purchase with 30-day lock:
+- Auction discount: ~5% → $50 saved
+- Float yield over lock: $1,000 × 8.5% × 30/365 ≈ $7
+- Time-out option value: small (rarely exercised when seller
+  delivers cleanly)
+- **Net effective price**: ~$945 vs. $1,000 walk-up retail with
+  $0 yield earned on cash held in advance.
+- **Improvement: ~5.5% on every committed purchase.**
+
+#### 1.5.4 Risk profile
+
+- **Smart-contract custody**: same risk surface as the underlying
+  thread (auditable, formally verifiable).
+- **Seller-default risk** (seller doesn't deliver): handled via
+  optimistic-oracle delivery proofs + reputation system gating
+  high-value bids.
+- **User-default risk** (user backs out): bounded by the time-out
+  penalty, which directly compensates the seller.
+- **Adversarial bidding** (fake auctions / fake sellers): same
+  Sybil-resistance challenges as the existing classifier; same
+  KYC + reputation infrastructure addresses both.
+
+#### 1.5.5 Compatibility with the existing thread
+
+Tier 5 is purely additive — it does not modify layers 1–4 in any
+way. The user's thread principal stays in place, still earning
+T-bill + insurance + B-book yield. The auction mechanic attaches a
+*spending designation* to a portion of TT face during the lock
+window. When the purchase settles, the TT transfers to the seller
+and the corresponding portion of the user's thread is unwound (via
+the standard redemption path, but routed to the seller instead of
+the user). When the auction times out, the TT returns to the
+user's free balance.
+
+The existing damage / growth / lockstep invariants are unchanged.
+The harness can be extended trivially to model Tier-5 lock cycles
+as part of stress testing.
+
+#### 1.5.6 Adoption path
+
+Tier 5 doesn't require universal merchant adoption to be valuable.
+Likely first sellers:
+
+- **Crypto-native sellers**: NFT marketplaces, on-chain commerce,
+  creator subscriptions. These already have smart-contract
+  fluency.
+- **Travel and hospitality**: highly time-sensitive inventory,
+  significant existing escrow / deposit norms (hotels, flights).
+- **Digital goods**: software licences, subscriptions, gaming items.
+  Zero-friction delivery makes oracle-confirmation easy.
+- **Then expanding to physical retail** through merchant
+  integrations (Shopify-shaped plug-ins, point-of-sale partners).
+
+The protocol's bid-side liquidity (i.e., users wanting to commit
+purchase intents) bootstraps from existing TT minters. The
+sell-side liquidity bootstraps from token-incentive emissions to
+early sellers — same pattern as Curve's CRV emissions to LPs.
 
 ---
 

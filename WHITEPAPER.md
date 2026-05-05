@@ -10,7 +10,7 @@
 
 ## Contents
 
-1. [Introduction](#1-introduction) (incl. §1.4 multi-product replacement, §1.5 Tier 5 — purchase-intent float)
+1. [Introduction](#1-introduction) (incl. §1.4 multi-product replacement, §1.5 Tier 5 — wallet-share commitment auction)
 2. [The Four-Layer Thread](#2-the-four-layer-thread)
 3. [Layered Risk Architecture](#3-layered-risk-architecture)
 4. [Auto-Mint and the Tier Ladder](#4-auto-mint-and-the-tier-ladder)
@@ -62,10 +62,10 @@ a real category of float in the legacy system:
 | Insurance reserves | Insurance companies (premium float) | **Tier 2** — premium income |
 | Brokerage cash | Brokers (float + PFOF) | **Tier 3** — B-book pool income |
 | Stablecoin reserves | USDC / USDT issuers | **Tier 4** — FLOAT face yield |
-| Gift-card / prepaid balances | Merchants + card issuers | **Tier 5** — purchase-intent float |
+| Gift-card / loyalty / category-spend captures | Merchants + card issuers | **Tier 5** — wallet-share commitment auction |
 
 The four-layer thread of v0.5 captured tiers 1–4. Tier 5 — the
-*purchase-intent float* layer (Section 1.5 below) — is added
+*wallet-share commitment auction* layer (Section 1.5 below) — is added
 in v0.6.
 
 The pitch in one sentence:
@@ -383,126 +383,198 @@ into one user experience does not.
 
 ### 1.5 Tier 5 — Purchase-intent float (the gift-card layer)
 
-In the legacy financial system, gift cards, prepaid cards, and
-escrow accounts represent a major float-capture mechanism that
-hasn't been mentioned so far. The numbers are large: the US
-gift-card market alone is ~$200B annual issuance with ~$3B
-forfeited each year through expiry. The merchant or card issuer
-holds the prepaid balance, earns yield on it, and (often) keeps
-the entire balance if the user doesn't spend it in time.
+In the legacy financial system, gift cards, prepaid cards,
+loyalty programs, and category-spend captures (Costco-style
+memberships, retail subscriptions) represent a major float-capture
+mechanism that hasn't been mentioned so far. The numbers are
+large: the US gift-card market alone is ~$200B annual issuance
+with ~$3B forfeited each year through expiry; loyalty programs
+collectively capture tens of billions in float. In every case,
+the merchant or card issuer holds the prepaid balance, earns
+yield on it, and (often) keeps the entire balance if the user
+doesn't spend it in time.
 
 Hyperfloat's Tier 5 — added in v0.6 — captures this float layer
-and returns it to the user.
+and returns it to the user. **Critically, sellers don't compete by
+offering discounts or cashback** — they compete by **paying the
+user cash directly** for committed wallet-share. This is the
+existing customer-acquisition-cost spend that retailers already
+make on marketing, redirected to the customer.
 
 #### 1.5.1 Mechanism
 
-The mechanic is a **reverse auction with smart-contract escrow**
-on the user's FLOAT face:
+The mechanic is a **category-level recurring-spend commitment
+auction** with smart-contract escrow on the user's FLOAT face:
 
-1. **User auctions a purchase intent.** Specifies item (or SKU),
-   maximum acceptable price, time window for fulfilment, and any
-   optional terms (delivery, condition, etc.).
-2. **Sellers bid to fulfil.** Sellers see open auctions matching
-   their inventory; they submit bids below the user's max,
-   competing on price + terms.
-3. **User accepts a bid.** The smart contract locks the bid amount
-   of the user's FLOAT face, designating it for that specific
-   seller for the agreed time window.
-4. **Locked FLOAT keeps earning yield.** Crucially, the locked FLOAT face
-   is still backed by the user's underlying thread principal. The
-   thread continues to earn from layers 1–3 (T-bill, insurance,
-   B-book) during the entire lock period. The user's float is
-   *captured by the user themselves*, not by the merchant.
-5. **Settlement on use.** When the user triggers the purchase
-   (proof of delivery confirmed via oracle network, e.g. UMA
-   optimistic oracle for off-chain delivery), the locked FLOAT
-   transfers to the seller; the lock releases.
-6. **Time-out path.** If the user doesn't trigger the purchase
-   within the time window, the lock releases automatically. User
-   pays a small penalty (1–3% of bid amount) to the seller as
-   compensation for held inventory; user receives back principal
-   + accumulated float yield − penalty.
+1. **User commits a spending budget for a category.** Specifies:
+   - **Category** (e.g. groceries, gas, dining, software
+     subscriptions).
+   - **Budget per period** (e.g. $200/month).
+   - **Number of periods** (e.g. 6 months → $1,200 total
+     commitment).
+2. **Eligible sellers bid for the commitment.** The bid is a
+   **direct cash payment** the seller is willing to make to win
+   the user's wallet-share. Examples: "$50 to get your $1,200
+   grocery commitment", "$80", "$120". Sellers compete by raising
+   the bid amount.
+3. **User accepts the highest acceptable bid.** The smart contract
+   atomically:
+   - Transfers the bid amount of FLOAT from the seller to the user.
+   - Locks the user's $1,200 of FLOAT face, designated as
+     spendable only at this seller, only on this category, for the
+     committed window.
+4. **The locked FLOAT keeps earning yield.** Crucially, the locked
+   FLOAT face is still backed by the user's underlying thread
+   principal. The thread continues to earn from layers 1–3 (T-bill,
+   insurance, B-book) on the unspent locked balance during the
+   entire commitment window. The user's float is *captured by the
+   user themselves*, not by the merchant.
+5. **User shops normally over the period.** Each purchase at the
+   seller (in the committed category) deducts from the locked
+   amount. **No per-purchase discount mechanic** — the user pays
+   normal prices at point-of-sale. The seller's "discount" was
+   already paid upfront in the auction (step 3).
+6. **End-of-window settlement.**
+   - If fully spent: contract closes cleanly. User keeps the
+     upfront bid payment + accumulated float yield.
+   - If under-spent: user pays a small penalty (1–5% of unspent)
+     to the seller as compensation for unfulfilled commitment.
+     Remainder + float yield − penalty returns to the user's
+     free FLOAT balance.
 
-#### 1.5.2 Why it's a Pareto improvement
+#### 1.5.2 Worked numerical example
+
+Concrete walkthrough — user commits $200/month grocery spending
+for 6 months (total $1,200 commitment):
+
+**At commitment time**:
+- Three grocery shops bid: ShopA $50, ShopB $75, ShopC $90.
+- User accepts ShopC's $90 bid.
+- Smart contract:
+  - Pays $90 from ShopC to user's FLOAT wallet (immediate cash).
+  - Locks $1,200 of user's FLOAT face for spending at ShopC,
+    grocery category, 6-month window.
+
+**Over 6 months**:
+- User shops at ShopC normally; pays full prices at checkout.
+- Each purchase deducts from the $1,200 lock.
+- The unspent locked balance averages ~$600 over the period.
+- Float yield on average locked balance: $600 × 8.5% × 0.5
+  ≈ $25.50.
+
+**End of period (assuming 100% spent)**:
+- User received $90 upfront + $25.50 float yield = **$115.50 of
+  benefit on $1,200 of grocery spending = 9.6% effective
+  discount**.
+- ShopC paid $90 = 7.5% of guaranteed $1,200 revenue, with
+  zero customer-acquisition cost beyond that.
+
+For comparison: typical retail customer acquisition costs are
+5–15% of LTV (for the entire customer relationship). ShopC paid
+7.5% for one 6-month commitment — competitive with their normal
+marketing spend, with the bonus of guaranteed revenue, no
+churn risk, and rich cohort data.
+
+#### 1.5.3 Why it's a Pareto improvement
 
 **For the user**:
-- Money keeps earning ~8.5% APY *while it's earmarked for spending*.
-  A $1,000 purchase locked for 30 days earns ~$7 of float yield.
-- Sellers compete in the auction, producing typical 3–8% discount
-  vs. walk-up retail.
-- Flexibility: can back out for a small penalty rather than
-  forfeiting the entire balance (as gift cards do on expiry).
+- Direct cash payment from the auction (~$50–$200 typical for
+  $1,000–$3,000 commitments).
+- Float yield on committed-but-unspent money during the period.
+- Single auction step → multiple shops compete for them.
+- Flexibility to re-auction at the end of each commitment window.
+- Spending behaviour is normal — no per-purchase coupons or
+  loyalty cards required.
 
 **For the seller**:
-- *Committed-demand visibility* — extremely valuable for inventory
-  planning.
-- Captures user price sensitivity in a competitive auction (better
-  than one-off negotiation or static list pricing).
-- Compensation if user backs out (the time-out penalty).
+- *Predictable revenue* — fundamental change in retail economics.
+- *Marketing-cost-free customer acquisition* — they pay the
+  customer directly instead of advertising agencies / ad
+  platforms.
+- *Wallet-share lock-in* for the duration of the commitment.
+- *Cohort spending data* — they know what this customer commits
+  to and can plan inventory accordingly.
 
 **For the protocol**:
 - A new float-capture layer, adding to the existing four.
-- Transaction volume from each auction (a fee-revenue source).
-- Network effects (more sellers attract more users; more users
-  attract more sellers) that strengthen the protocol's defensive
-  position vs. payment-rail competitors.
+- Transaction volume from each commitment auction (potential
+  protocol fee).
+- Network effects: more sellers attract more users (more bid
+  competition); more users attract more sellers (more
+  commitment volume).
 
-#### 1.5.3 Comparison with legacy alternatives
+#### 1.5.4 Comparison with legacy alternatives
 
-| Mechanism | Float yield to user | Pricing | Counterparty trust | Flexibility |
+| Mechanism | User float yield | Direct cash to user | Lock-in | Flexibility |
 | :-- | :--: | :--: | :--: | :--: |
-| Gift card | 0% | list price | trust merchant solvency | none — full forfeit on expiry |
-| Pre-paid card | 0% | list price | trust card issuer | low — high fees, expiry forfeit |
-| Escrow service | 0% | one-off negotiated | neutral third-party | depends on contract |
-| Layaway / BNPL | 0% (often negative) | list price | merchant credit | moderate |
-| **Hyperfloat Tier 5** | **~8.5%** | **competitive auction** | **smart contract** | **time-out with small penalty** |
+| Gift card | 0% | $0 | yes — to one merchant | none — full forfeit on expiry |
+| Pre-paid card | 0% | $0 | yes — multi-merchant | low — high fees, expiry forfeit |
+| Costco membership | 0% | -$60/yr (user pays) | yes (1 merchant) | annual renewal |
+| Subscribe & Save | 0% | $0 (per-item discount) | per-item | moderate |
+| Loyalty program | 0% | rebate after-the-fact | none | low |
+| **Hyperfloat Tier 5** | **~8.5%** | **direct upfront bid (3–10% of commitment)** | **per category, per period** | **re-auction every period** |
 
-Worked example for a $1,000 purchase with 30-day lock:
-- Auction discount: ~5% → $50 saved
-- Float yield over lock: $1,000 × 8.5% × 30/365 ≈ $7
-- Time-out option value: small (rarely exercised when seller
-  delivers cleanly)
-- **Net effective price**: ~$945 vs. $1,000 walk-up retail with
-  $0 yield earned on cash held in advance.
-- **Improvement: ~5.5% on every committed purchase.**
-
-#### 1.5.4 Risk profile
+#### 1.5.5 Risk profile
 
 - **Smart-contract custody**: same risk surface as the underlying
   thread (auditable, formally verifiable).
-- **Seller-default risk** (seller doesn't deliver): handled via
-  optimistic-oracle delivery proofs + reputation system gating
-  high-value bids.
-- **User-default risk** (user backs out): bounded by the time-out
-  penalty, which directly compensates the seller.
-- **Adversarial bidding** (fake auctions / fake sellers): same
-  Sybil-resistance challenges as the existing classifier; same
-  KYC + reputation infrastructure addresses both.
+- **Seller-bid-funding risk**: the seller must have bid amount
+  available at auction acceptance. Smart contract requires
+  upfront escrow before the lock activates.
+- **Seller-default risk** (seller stops accepting purchases at
+  the agreed terms): handled via reputation system + small
+  penalty on seller side if they refuse purchases that fall
+  within commitment terms.
+- **User-default risk** (user under-spends): bounded by the
+  end-of-period penalty.
+- **Category-mismatch fraud** (user tries to spend on
+  non-category items): handled via merchant integration + line-
+  item categorisation at point-of-sale, similar to how
+  category-restricted gift cards work today.
 
-#### 1.5.5 Compatibility with the existing thread
+#### 1.5.6 Compatibility with the existing thread
 
 Tier 5 is purely additive — it does not modify layers 1–4 in any
 way. The user's thread principal stays in place, still earning
-T-bill + insurance + B-book yield. The auction mechanic attaches a
-*spending designation* to a portion of FLOAT face during the lock
-window. When the purchase settles, the FLOAT transfers to the seller
-and the corresponding portion of the user's thread is unwound (via
-the standard redemption path, but routed to the seller instead of
-the user). When the auction times out, the FLOAT returns to the
-user's free balance.
+T-bill + insurance + B-book yield. The commitment mechanic
+attaches a *spending designation* (category + seller + window)
+to a portion of FLOAT face during the lock period. When the user
+shops at the committed seller, FLOAT transfers via the standard
+redemption path. When the period ends, any unspent FLOAT
+returns to free balance.
 
 The existing damage / growth / lockstep invariants are unchanged.
-The harness can be extended trivially to model Tier-5 lock cycles
-as part of stress testing.
+The harness can be extended trivially to model Tier-5 commitment
+cycles as part of stress testing.
 
-#### 1.5.6 Adoption path
+#### 1.5.7 Adoption path
 
 Tier 5 doesn't require universal merchant adoption to be valuable.
-Likely first sellers:
+Likely first sellers (where committed-demand visibility is most
+valuable):
 
-- **Crypto-native sellers**: NFT marketplaces, on-chain commerce,
-  creator subscriptions. These already have smart-contract
-  fluency.
+- **Subscription services**: SaaS, streaming, gym memberships —
+  already have monthly-spend mental model.
+- **Grocery / household**: high-frequency, predictable category
+  with strong margins on customer LTV.
+- **Gas / fuel**: utility-grade spending where shops compete on
+  price already.
+- **Restaurants and dining**: category with dedicated wallet-share
+  budgets.
+- **Creator subscriptions / patron commitments** — natively
+  on-chain, simplest first integration.
+- **Then expanding to physical retail** through merchant
+  integrations (Shopify-style plug-ins, point-of-sale partners,
+  category APIs from existing payment processors).
+
+The bid-side liquidity (sellers willing to pay for commitments)
+bootstraps from sellers who already have high CAC — every dollar
+they normally spend on Google/Facebook ads can instead be paid
+directly to the customer who commits. The user-side liquidity
+bootstraps from existing FLOAT holders who already have
+predictable category spending (groceries, gas, subscriptions) —
+they're committing money they'd spend anyway and earning a bid
+payment + float yield on top.
 - **Travel and hospitality**: highly time-sensitive inventory,
   significant existing escrow / deposit norms (hotels, flights).
 - **Digital goods**: software licences, subscriptions, gaming items.

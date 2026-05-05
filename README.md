@@ -17,7 +17,7 @@ the yield to *you*:
 | Insurance reserves | Insurance companies (premium float) | **2** — premium income |
 | Brokerage cash | Brokers (float + PFOF) | **3** — B-book pool income |
 | Stablecoin reserves | USDC / USDT issuers | **4** — FLOAT face yield |
-| Gift-card / prepaid balances | Merchants + card issuers | **5** — purchase-intent float |
+| Gift-card / loyalty / category-spend captures | Merchants + card issuers | **5** — wallet-share commitment auction |
 
 You deposit one dollar. Without ever moving it, that dollar
 simultaneously:
@@ -28,9 +28,9 @@ simultaneously:
 3. **Earns B-book pool yield** as the counterparty to losing trader
    flow (passive underwriter — you don't trade, you absorb).
 4. **Backs Float (FLOAT)**, a stablecoin you can spend like cash.
-5. **Earns float yield while earmarked for spending** via the
-   purchase-intent auction layer (Tier 5 — see [`WHITEPAPER.md`
-   §1.5](./WHITEPAPER.md)).
+5. **Earns cash + float yield from sellers competing for your
+   wallet-share** via the wallet-share commitment auction (Tier 5 —
+   see [`WHITEPAPER.md` §1.5](./WHITEPAPER.md)).
 
 These four roles are wired together as a single object — a *thread* —
 so the dollar is never duplicated and the protocol's accounting books
@@ -94,37 +94,50 @@ via the entropy-weighted minority-side rebate. And the A/B
 classifier replaces the CFD industry's hidden conflict-of-interest
 with a transparent, opt-in, compensated marketplace.
 
-### As a payment rail (Tier 5 — purchase-intent float)
+### As a payment rail (Tier 5 — wallet-share commitment auction)
 
-Gift cards, prepaid cards, and escrow accounts are a $200B+
-annual market in the US alone, with ~$3B forfeited each year on
-expiry. The merchant or card issuer holds the prepaid balance,
-earns yield on it, and often keeps the entire balance if the user
-doesn't spend in time.
+Gift cards, prepaid cards, loyalty programs, and category-spend
+captures are tens of billions in float annually — captured by
+merchants and card issuers. Users get nothing for committing
+their spending; merchants pocket the yield + the forfeitures on
+expiry.
 
-Tier 5 captures this float and returns it to the user:
+Tier 5 captures this float and returns it to the user. Critically,
+**sellers don't bid by offering discounts — they bid cash directly
+for committed wallet-share**. They're paying their existing
+customer-acquisition spend straight to the customer.
 
-1. User auctions a purchase intent (item + max price + time
-   window).
-2. Sellers bid below max, competing on price.
-3. User accepts a bid → that portion of FLOAT face is locked,
-   designated for that seller.
-4. **The locked FLOAT keeps earning ~8.5% APY** while it's earmarked
-   for spending — the user's float is captured by the user, not
-   by the merchant.
-5. Settlement on use; small penalty (1–3%) on time-out instead of
-   full forfeit.
+1. User commits a budget for a category: *"$200/month grocery
+   spend, 6 months → $1,200 total"*.
+2. Sellers in that category bid **cash payments** for the
+   commitment: ShopA $50, ShopB $75, ShopC $90.
+3. User accepts the highest bid. Smart contract atomically
+   transfers ShopC's $90 to the user, and locks $1,200 of FLOAT
+   for spending at ShopC on groceries for 6 months.
+4. **The locked FLOAT keeps earning ~8.5% APY** while the user
+   shops normally over the period. No per-purchase discount — the
+   "discount" was already paid upfront in the auction.
+5. End of period: fully spent → contract closes clean. Underspent
+   → small penalty (1–5% of unspent) to seller, rest returns.
 
-For a $1,000 purchase locked 30 days: ~5% auction discount + ~$7
-float yield = ~5.5% improvement over walk-up retail with $0 yield
-on cash held in advance.
+Worked example for a $1,200 grocery commitment over 6 months:
+- Upfront bid received: $90 (7.5% of commitment)
+- Float yield on average ~$600 locked balance: ~$26
+- **Total benefit: ~$116 (9.6% effective discount)** vs. the
+  normal $0 from spending money you'd spend anyway.
 
-| Mechanism | Float yield | Pricing | Flexibility |
+| Mechanism | Float yield | Direct cash to user | Flexibility |
 | :-- | :--: | :--: | :--: |
-| Gift card | 0% | list | none — full forfeit |
-| Pre-paid card | 0% | list | low |
-| Escrow service | 0% | one-off | depends |
-| **Hyperfloat Tier 5** | **~8.5%** | **competitive auction** | **time-out with small penalty** |
+| Gift card | 0% | $0 | none — full forfeit |
+| Costco membership | 0% | -$60/yr | annual renewal |
+| Loyalty program | 0% | rebate after-the-fact | low |
+| **Hyperfloat Tier 5** | **~8.5%** | **upfront bid (3–10% of commitment)** | **re-auction every period** |
+
+For sellers, the economics flip: instead of paying Google or
+Facebook for marketing reach, they pay the customer directly for
+committed wallet-share. Same customer-acquisition-cost spend,
+zero churn risk, predictable revenue, and rich cohort data on
+spending behaviour.
 
 ### As a stablecoin (and why it may avoid stablecoin regulation)
 

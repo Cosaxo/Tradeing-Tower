@@ -54,6 +54,15 @@ import {
 import { getEffectiveCap } from "./lib/esma.js";
 import { initLedger } from "./lib/roleLedger.js";
 import { initTags, tryTag, untag, freeMargin } from "./lib/capitalTags.js";
+import {
+  initSpendCommitmentState,
+  createCommitment,
+  postBid,
+  acceptBid,
+  spendAtSeller,
+  cancelCommitment,
+  processCommitmentTick,
+} from "./lib/spendCommitment.js";
 import { cx } from "./lib/math.js";
 
 import { InstrumentSelector } from "./components/InstrumentSelector.jsx";
@@ -81,6 +90,7 @@ import { Tutorial } from "./components/Tutorial.jsx";
 import { FeeFlow } from "./components/FeeFlow.jsx";
 import { RoleLedger } from "./components/RoleLedger.jsx";
 import { EasyMode } from "./components/EasyMode.jsx";
+import { SpendCommitmentDesk } from "./components/SpendCommitmentDesk.jsx";
 
 // Generate a stable id for pool-funded LAPs so position close routes
 // the linkage record correctly. (The pre-Phase-5 makeLapId helper lived
@@ -127,7 +137,7 @@ const INITIAL_PLAYER = {
   tags: initTags(), // §10.1 — capital accumulates roles via tags, not transfers
 };
 
-const TABS = ["Chart", "Auction", "Insurance", "Credit", "B-book", "Stress", "Markets", "History", "Log"];
+const TABS = ["Chart", "Auction", "Insurance", "Credit", "B-book", "Spend", "Stress", "Markets", "History", "Log"];
 
 export default function App() {
   // pairStates is persisted so epoch counters, price history, and
@@ -175,6 +185,10 @@ export default function App() {
   const [classifierState, setClassifierState, clearClassifier] = usePersistentState(
     "tt.classifier",
     initClassifierState()
+  );
+  const [commitmentState, setCommitmentState, clearCommitment] = usePersistentState(
+    "tt.commitments",
+    initSpendCommitmentState()
   );
   const { toasts, history, addToast, clearHistory } = useToast();
   const [showTutorial, setShowTutorial] = useState(false);
@@ -1098,6 +1112,165 @@ export default function App() {
     addToast(`Withdrew $${amount.toFixed(0)} from B-book pool`, "info");
   }
 
+  // -------------------------------------------------------------------------
+  // Tier 5 — wallet-share commitment auctions
+  // -------------------------------------------------------------------------
+
+  // Apply a list of cash transfers from the spendCommitment lib to the
+  // appropriate state. The lib returns abstract `transfers`; this maps
+  // them to actual FLOAT balance changes.
+  //
+  // Transfer types:
+  //   BID_PAYMENT     — seller → user (FLOAT.balances): immediate cash
+  //   LOCK            — user → ESCROW: a designation; no actual transfer
+  //                     (the FLOAT stays in the user's wallet but the UI
+  //                     should mark `lockedAmount` as restricted-spend)
+  //   SPEND           — ESCROW → seller: actual FLOAT transfer
+  //   EXPIRY_PENALTY  — ESCROW → seller
+  //   EXPIRY_REFUND   — ESCROW → user (no actual transfer needed; lock releases)
+  //
+  // For the demo (single-protocol-state), seller balances live in the
+  // FLOAT balances map; if a seller hasn't been seen before they start
+  // at 0 and can go negative — fine for the simulator.
+  function applyCommitmentTransfers(transfers) {
+    if (!transfers || transfers.length === 0) return;
+    setFloatsState((prev) => {
+      const balances = { ...(prev.balances ?? {}) };
+      for (const t of transfers) {
+        if (t.type === "LOCK" || t.type === "EXPIRY_REFUND") {
+          // Designation only; no balance movement. The lib tracks the
+          // lock in commitmentState.
+          continue;
+        }
+        // BID_PAYMENT, SPEND, EXPIRY_PENALTY all move FLOAT between
+        // accounts in balances.
+        balances[t.from] = (balances[t.from] ?? 0) - t.amount;
+        balances[t.to] = (balances[t.to] ?? 0) + t.amount;
+      }
+      return { ...prev, balances };
+    });
+  }
+
+  function handleCreateCommitment({ category, budgetPerPeriod, numPeriods }) {
+    const r = createCommitment({
+      state: commitmentState,
+      userId: player.id,
+      category,
+      budgetPerPeriod,
+      numPeriods,
+      currentEpoch: activePS?.epochIndex ?? 0,
+    });
+    if (!r.ok) {
+      addToast(`Couldn't create commitment: ${r.reason}`, "warning");
+      return;
+    }
+    setCommitmentState(r.state);
+    addToast(
+      `Commitment auctioned: ${category} $${budgetPerPeriod}/period × ${numPeriods}`,
+      "info"
+    );
+  }
+
+  function handlePostBid({ commitmentId, sellerId, bidAmount }) {
+    const r = postBid({
+      state: commitmentState,
+      commitmentId,
+      sellerId,
+      bidAmount,
+    });
+    if (!r.ok) {
+      addToast(`Bid rejected: ${r.reason}`, "warning");
+      return;
+    }
+    setCommitmentState(r.state);
+    addToast(`${sellerId} bid $${bidAmount.toFixed(0)}`, "info");
+  }
+
+  function handleAcceptBid({ commitmentId, bidId }) {
+    const r = acceptBid({
+      state: commitmentState,
+      commitmentId,
+      bidId,
+      currentEpoch: activePS?.epochIndex ?? 0,
+    });
+    if (!r.ok) {
+      addToast(`Couldn't accept bid: ${r.reason}`, "warning");
+      return;
+    }
+    setCommitmentState(r.state);
+    applyCommitmentTransfers(r.transfers);
+    addToast(
+      `Accepted ${r.commitment.acceptedSeller}'s bid for $${r.commitment.acceptedBidAmount.toFixed(0)} — locked $${r.commitment.lockedAmount.toFixed(0)} for spending`,
+      "info"
+    );
+  }
+
+  function handleSpendAtSeller({ commitmentId, amount }) {
+    // The seller is implicit in the commitment; pass it through for
+    // validation in the lib.
+    const c = commitmentState.commitments.find((x) => x.id === commitmentId);
+    if (!c || !c.acceptedSeller) {
+      addToast("Commitment not active", "warning");
+      return;
+    }
+    const r = spendAtSeller({
+      state: commitmentState,
+      commitmentId,
+      sellerId: c.acceptedSeller,
+      amount,
+      currentEpoch: activePS?.epochIndex ?? 0,
+    });
+    if (!r.ok) {
+      addToast(`Spend rejected: ${r.reason}`, "warning");
+      return;
+    }
+    setCommitmentState(r.state);
+    applyCommitmentTransfers(r.transfers);
+    addToast(
+      `Spent $${amount.toFixed(0)} at ${c.acceptedSeller}` +
+        (r.commitment.status === "COMPLETED" ? " — commitment fully spent" : ""),
+      "info"
+    );
+  }
+
+  function handleCancelCommitment({ commitmentId }) {
+    const r = cancelCommitment({
+      state: commitmentState,
+      commitmentId,
+      userId: player.id,
+    });
+    if (!r.ok) {
+      addToast(`Couldn't cancel: ${r.reason}`, "warning");
+      return;
+    }
+    setCommitmentState(r.state);
+    addToast("Commitment cancelled", "info");
+  }
+
+  // Run expiration check periodically (cheap; just walks active
+  // commitments). Triggered on every active-pair epoch advance.
+  useEffect(() => {
+    const epoch = activePS?.epochIndex ?? 0;
+    if (!commitmentState?.commitments?.some((c) => c.status === "ACTIVE_LOCK")) {
+      return;
+    }
+    const r = processCommitmentTick({
+      state: commitmentState,
+      currentEpoch: epoch,
+    });
+    if (r.expirations.length > 0) {
+      setCommitmentState(r.state);
+      applyCommitmentTransfers(r.transfers);
+      for (const exp of r.expirations) {
+        addToast(
+          `Commitment expired with $${exp.unspent.toFixed(0)} unspent — penalty $${exp.penalty.toFixed(2)} to ${exp.sellerId}, $${exp.refund.toFixed(2)} refunded`,
+          "warning"
+        );
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePS?.epochIndex]);
+
   function handleResetSession() {
     clearPlayer();
     clearPositions();
@@ -1108,6 +1281,7 @@ export default function App() {
     clearInsurance();
     clearBBook();
     clearClassifier();
+    clearCommitment();
     clearPairStates();
     setLogs([]);
     setShockResults(null);
@@ -1140,9 +1314,10 @@ export default function App() {
     "3": () => setActiveTab("Insurance"),
     "4": () => setActiveTab("Credit"),
     "5": () => setActiveTab("B-book"),
-    "6": () => setActiveTab("Stress"),
-    "7": () => setActiveTab("Markets"),
-    "8": () => setActiveTab("History"),
+    "6": () => setActiveTab("Spend"),
+    "7": () => setActiveTab("Stress"),
+    "8": () => setActiveTab("Markets"),
+    "9": () => setActiveTab("History"),
     "0": () => setActiveTab("Log"),
     "+": () => setSpeed((s) => Math.min(5, s * 2)),
     "-": () => setSpeed((s) => Math.max(0.5, s / 2)),
@@ -1339,6 +1514,9 @@ export default function App() {
                 allocStats={allocStats}
                 hasReinsurance={hasReinsurance}
                 hasOpenLap={hasOpenLap}
+                hasActiveCommitment={(commitmentState?.commitments ?? []).some(
+                  (c) => c.userId === player.id && c.status === "ACTIVE_LOCK"
+                )}
                 equityHistory={equityHistory}
                 onConvertToFloats={(amount) => handleMintFloats(amount)}
                 onRedeem={(amount) => handleRedeem(amount, false)}
@@ -1535,6 +1713,19 @@ export default function App() {
                 currentEpoch={activePS?.epochIndex ?? 0}
                 onDeposit={handleBBookDeposit}
                 onWithdraw={handleBBookWithdraw}
+              />
+            )}
+
+            {activeTab === "Spend" && (
+              <SpendCommitmentDesk
+                commitmentState={commitmentState}
+                userId={player.id}
+                currentEpoch={activePS?.epochIndex ?? 0}
+                onCreate={handleCreateCommitment}
+                onPostBid={handlePostBid}
+                onAcceptBid={handleAcceptBid}
+                onSpend={handleSpendAtSeller}
+                onCancel={handleCancelCommitment}
               />
             )}
 

@@ -62,6 +62,8 @@ export function EasyMode({
   hasReinsurance,
   // Position state
   hasOpenLap,
+  // Tier 5 — wallet-share commitments
+  hasActiveCommitment = false,
   // Equity for "since you started" realised yield
   equityHistory = [],
   // Action handlers
@@ -77,11 +79,13 @@ export function EasyMode({
     totalAllocated,
     hasOpenLap,
     floatsPrincipal,
+    hasActiveCommitment,
   });
 
   const gates = evaluateGates({
     allocStats,
     hasReinsurance,
+    floatsBalance,
     hasFreeMargin: (freeMarginAmount ?? 0) > 0,
   });
 

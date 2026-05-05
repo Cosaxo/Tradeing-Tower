@@ -1,4 +1,4 @@
-// TierLadder — visualises the four-tier capital ladder.
+// TierLadder — visualises the five-tier capital ladder.
 //
 // Capital climbs the ladder. Each rung adds an uncorrelated yield
 // source on top of the previous rungs. Locked rungs show the gate
@@ -7,7 +7,8 @@
 // Tier 1: T-bill principal               — automatic, always unlocked
 // Tier 2: Insurance-seller stake         — automatic
 // Tier 3: LAP active-trade access        — gate: ≥3 markets, max 50% any single, reinsurance bought
-// Tier 4: FLOAT mint (full thread)          — gate: layer-3 role is B-book stake (per-thread)
+// Tier 4: FLOAT mint (full thread)       — gate: layer-3 role is B-book stake (per-thread)
+// Tier 5: Wallet-share commitment        — gate: have FLOAT to commit
 //
 // `principal` is the user's free + tagged margin total in dollars.
 // `currentTier` is computed from gate evaluation (the highest unlocked
@@ -47,6 +48,14 @@ const TIER_INFO = [
     border: "border-violet-700",
     ring: "ring-violet-500",
   },
+  {
+    n: 5,
+    label: "Wallet-share",
+    sub: "Sellers pay cash for your committed spend",
+    color: "from-fuchsia-700 to-fuchsia-900",
+    border: "border-fuchsia-700",
+    ring: "ring-fuchsia-500",
+  },
 ];
 
 export function TierLadder({
@@ -73,7 +82,7 @@ export function TierLadder({
 
       <div
         className={`grid gap-1.5 ${
-          compact ? "grid-cols-4" : "grid-cols-1 md:grid-cols-4"
+          compact ? "grid-cols-5" : "grid-cols-1 md:grid-cols-5"
         }`}
       >
         {TIER_INFO.map((t) => {
@@ -153,13 +162,18 @@ export function TierLadder({
 }
 
 // Pure helper used by both EasyMode and the gate UI in advanced mode.
-// Returns { 3: {...}, 4: {...} } describing whether each gate is open
-// and what's missing if not.
+// Returns { 3: {...}, 4: {...}, 5: {...} } describing whether each
+// gate is open and what's missing if not.
 //
 // gate(3): allocation across ≥3 markets, max single ≤ 50%, reinsurance bought.
-// gate(4): per-thread — enforced at mint time. The "user-level" gate is
-//   simply "do you currently have any free margin + any tier-3 access".
-export function evaluateGates({ allocStats, hasReinsurance, hasFreeMargin }) {
+// gate(4): "do you currently have any free margin + any tier-3 access".
+// gate(5): "do you have FLOAT in your wallet to commit".
+export function evaluateGates({
+  allocStats,
+  hasReinsurance,
+  hasFreeMargin,
+  floatsBalance = 0,
+}) {
   const t3Missing = [];
   if ((allocStats?.numMarkets ?? 0) < 3) {
     t3Missing.push(`allocate to ≥3 markets (have ${allocStats?.numMarkets ?? 0})`);
@@ -178,20 +192,28 @@ export function evaluateGates({ allocStats, hasReinsurance, hasFreeMargin }) {
     t4Missing.push("have free margin available");
   }
 
+  const t5Missing = [];
+  if ((floatsBalance ?? 0) <= 0) {
+    t5Missing.push("hold FLOAT (mint at Tier 4)");
+  }
+
   return {
     3: { unlocked: t3Missing.length === 0, missing: t3Missing },
     4: { unlocked: t4Missing.length === 0, missing: t4Missing },
+    5: { unlocked: t5Missing.length === 0, missing: t5Missing },
   };
 }
 
 // Compute the user's currently-exercised tier from their state.
-// Returns 1..4. The highest tier the user is currently SITTING on,
+// Returns 1..5. The highest tier the user is currently SITTING on,
 // not the highest they could in principle reach.
 export function currentTierOf({
-  totalAllocated,    // dollars staked in insurance markets
-  hasOpenLap,        // boolean — any active LAP position open
+  totalAllocated,        // dollars staked in insurance markets
+  hasOpenLap,            // boolean — any active LAP position open
   floatsPrincipal,       // dollars committed to FLOAT threads
+  hasActiveCommitment,   // boolean — any ACTIVE_LOCK commitment
 }) {
+  if (hasActiveCommitment) return 5;
   if ((floatsPrincipal ?? 0) > 0) return 4;
   if (hasOpenLap) return 3;
   if ((totalAllocated ?? 0) > 0) return 2;

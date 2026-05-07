@@ -1626,30 +1626,48 @@ export default function App() {
                   events={activePS?.events ?? []}
                   currentEpoch={activePS?.epochIndex ?? 0}
                 />
-                <div className="grid grid-cols-2 gap-2 font-mono text-xs">
-                  <div className="rounded border border-gray-800 bg-gray-900 p-2">
-                    <div className="text-[10px] text-gray-500 mb-1">Auction Stats</div>
-                    <div>Matches: {activePS?.auctionResult?.totalMatched ?? 0}</div>
-                    <div>Avg Lev: {(activePS?.auctionResult?.avgLev ?? 0).toFixed(2)}×</div>
-                    <div>
-                      Imbalance:{" "}
+                {/* Auction stats — compact one-row summary; recent
+                    matches list collapses behind a disclosure. */}
+                <div className="rounded border border-gray-800 bg-gray-900 p-2 font-mono text-xs">
+                  <div className="flex items-baseline justify-between flex-wrap gap-x-3 gap-y-0.5">
+                    <span>
+                      <span className="text-gray-500">matches</span>{" "}
+                      {activePS?.auctionResult?.totalMatched ?? 0}
+                    </span>
+                    <span>
+                      <span className="text-gray-500">avg lev</span>{" "}
+                      {(activePS?.auctionResult?.avgLev ?? 0).toFixed(2)}×
+                    </span>
+                    <span>
+                      <span className="text-gray-500">imbalance</span>{" "}
                       {((activePS?.auctionResult?.imbalanceRatio ?? 0) * 100).toFixed(1)}%
-                    </div>
-                    <div>Soft Close: {activePS?.auctionResult?.softClose ? "YES" : "no"}</div>
-                    <div>Alpha: {(activePS?.alpha ?? 0.5).toFixed(3)}</div>
+                    </span>
+                    <span>
+                      <span className="text-gray-500">α</span>{" "}
+                      {(activePS?.alpha ?? 0.5).toFixed(3)}
+                    </span>
+                    {activePS?.auctionResult?.softClose && (
+                      <span className="text-amber-400">soft-close</span>
+                    )}
                   </div>
-                  <div className="rounded border border-gray-800 bg-gray-900 p-2">
-                    <div className="text-[10px] text-gray-500 mb-1">Recent Matches</div>
-                    {(activePS?.auctionResult?.matched ?? []).slice(0, 6).map((m, i) => (
-                      <div key={i} className="flex gap-2 text-[10px]">
-                        <span className="text-emerald-400 truncate max-w-16">{m.longId}</span>
-                        <span className="text-gray-600">↔</span>
-                        <span className="text-red-400 truncate max-w-16">{m.shortId}</span>
-                        <span className="text-gray-400">{m.leverage.toFixed(1)}×</span>
-                        <span className="text-indigo-400">${m.margin}</span>
+                  {(activePS?.auctionResult?.matched ?? []).length > 0 && (
+                    <details className="mt-1 border-t border-gray-800 pt-1">
+                      <summary className="cursor-pointer text-[10px] text-gray-500 hover:text-gray-300 select-none">
+                        recent matches ({(activePS?.auctionResult?.matched ?? []).length})
+                      </summary>
+                      <div className="mt-1 flex flex-col gap-0.5">
+                        {(activePS?.auctionResult?.matched ?? []).slice(0, 8).map((m, i) => (
+                          <div key={i} className="flex gap-2 text-[10px]">
+                            <span className="text-emerald-400 truncate max-w-20">{m.longId}</span>
+                            <span className="text-gray-600">↔</span>
+                            <span className="text-red-400 truncate max-w-20">{m.shortId}</span>
+                            <span className="text-gray-400">{m.leverage.toFixed(1)}×</span>
+                            <span className="text-indigo-400">${m.margin}</span>
+                          </div>
+                        ))}
                       </div>
-                    ))}
-                  </div>
+                    </details>
+                  )}
                 </div>
                 <LeverageCurve
                   longCurve={activePS?.auctionResult?.longCurve ?? []}
@@ -1677,23 +1695,25 @@ export default function App() {
                   rentalsByPair={rentalsByPair}
                 />
                 {openPositions.length > 0 && (
-                  <div className="flex flex-col gap-2">
-                    <span className="text-[10px] font-mono text-gray-500 uppercase">
-                      Position payoff curves
-                    </span>
-                    {openPositions.slice(0, 4).map((pos, idx) => (
-                      <LapPayoffCurve
-                        key={pos.id ?? idx}
-                        position={pos}
-                        currentPrice={pairStates[pos.pairKey]?.prices?.slice(-1)[0]}
-                        label={
-                          pos.type === "bbook"
-                            ? `${pos.pairKey} ${pos.side} (B-book)`
-                            : null
-                        }
-                      />
-                    ))}
-                  </div>
+                  <details className="rounded border border-gray-800 bg-gray-950/40">
+                    <summary className="cursor-pointer text-[10px] font-mono text-gray-400 uppercase px-2 py-1.5 hover:text-gray-200 hover:bg-gray-900 select-none">
+                      Position payoff curves ({Math.min(openPositions.length, 4)})
+                    </summary>
+                    <div className="flex flex-col gap-2 p-2 border-t border-gray-800">
+                      {openPositions.slice(0, 4).map((pos, idx) => (
+                        <LapPayoffCurve
+                          key={pos.id ?? idx}
+                          position={pos}
+                          currentPrice={pairStates[pos.pairKey]?.prices?.slice(-1)[0]}
+                          label={
+                            pos.type === "bbook"
+                              ? `${pos.pairKey} ${pos.side} (B-book)`
+                              : null
+                          }
+                        />
+                      ))}
+                    </div>
+                  </details>
                 )}
                 {routerSuggestions.length > 0 && (
                   <div className="rounded border border-gray-800 bg-gray-900 p-2">

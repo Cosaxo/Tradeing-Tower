@@ -1441,10 +1441,12 @@ export default function App() {
             WalletStrip below the header (UI roadmap Phase 2). The strip
             shows the same information plus a richer per-role breakdown
             (threaded / pool LP / position / FLOAT / locked). */}
-        <div className="ml-auto flex items-center gap-3">
+        <div className="ml-auto flex items-center gap-2 flex-wrap justify-end">
           {/* Three-mode disclosure (UI roadmap Phase 4). Each mode is a
               superset of the previous; users can step up as they
-              understand more. */}
+              understand more. flex-wrap (Phase 7) so on narrow phones
+              this group wraps cleanly under the brand/mode rather than
+              overflowing horizontally. */}
           <div className="flex rounded border border-gray-700 overflow-hidden">
             {[
               { id: "easy", title: "Tier ladder + mint/redeem only" },
@@ -1521,12 +1523,10 @@ export default function App() {
           >
             room · {peerCount === 0 ? "solo" : `${peerCount} peer${peerCount === 1 ? "" : "s"}`}
           </span>
-          <span className="text-[10px] font-mono text-gray-600">
-            σ={((activePS?.realizedSigma ?? 0.02) * 100).toFixed(2)}%
-          </span>
-          <span className="text-[9px] font-mono text-gray-700 hidden lg:inline">
-            space=run · 1-5=tab · i=internals · +/-=speed · r=reset
-          </span>
+          {/* The keyboard-hint text and σ readout that lived here were
+              removed in UI roadmap Phase 5. Keyboard shortcuts are now
+              documented in each control's tooltip; realised volatility
+              is implicit in the price chart and exposed in Internals. */}
         </div>
       </header>
 
@@ -1605,8 +1605,31 @@ export default function App() {
           ) : (
           <>
           <div className="flex gap-1 px-3 py-1 border-b border-gray-800 flex-wrap">
+            {/* Tier-colour coding (UI roadmap Phase 9) — each tab uses
+                the colour of the tier it serves, matching TierLadder
+                and WalletStrip. Trade is auxiliary, so it gets a
+                neutral indigo. */}
             {TABS.map((t) => {
               const isActive = safeActiveTab === t;
+              const tierColour =
+                t === "Trade"
+                  ? "indigo"
+                  : t === "Insurance"
+                  ? "sky"
+                  : t === "Layer 3"
+                  ? "amber"
+                  : t === "FLOAT"
+                  ? "violet"
+                  : t === "Wallet-share"
+                  ? "fuchsia"
+                  : "indigo";
+              const activeCls = {
+                indigo: "bg-indigo-900 text-indigo-200",
+                sky: "bg-sky-900 text-sky-200",
+                amber: "bg-amber-900 text-amber-200",
+                violet: "bg-violet-900 text-violet-200",
+                fuchsia: "bg-fuchsia-900 text-fuchsia-200",
+              }[tierColour];
               return (
                 <button
                   key={t}
@@ -1615,7 +1638,7 @@ export default function App() {
                   className={cx(
                     "text-xs font-mono px-3 py-1 rounded transition-colors",
                     isActive
-                      ? "bg-indigo-900 text-indigo-200"
+                      ? activeCls
                       : "text-gray-400 hover:text-gray-100 hover:bg-gray-800"
                   )}
                 >

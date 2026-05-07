@@ -38,7 +38,14 @@ import { BASE_PREMIUM_RATE } from "../lib/insuranceMarket.js";
 function projectAnnualYield({ atTier }) {
   const tbillAnnual = TBILL_RATE; // already annual
   const insuranceAnnual = BASE_PREMIUM_RATE * 365 * 0.5; // per-tick → annual
+  // Tier-3 income is now split between two passive pools per Path A.
+  // Calibrated against lapPoolYieldHarness STEADY_IMBALANCE / B-book
+  // historical: ~3% LAP-pool yield × 80% allocation + ~4% B-book × 20% =
+  // ~3.2% blended layer-3 yield. Conservative — harness shows higher in
+  // favourable conditions.
+  const lapPoolAnnual = 0.03;
   const bbookAnnual = 0.04;
+  const layer3Blended = lapPoolAnnual * 0.8 + bbookAnnual * 0.2;
   const stressDrag = 0.005; // empirical placeholder; refine with Monte Carlo
 
   if (atTier === 1) return Math.max(0, tbillAnnual - stressDrag * 0.25);
@@ -47,7 +54,7 @@ function projectAnnualYield({ atTier }) {
     return Math.max(0, tbillAnnual + insuranceAnnual - stressDrag);
   }
   // tier 4 — full thread, all four roles compounding on the same $.
-  return Math.max(0, tbillAnnual + insuranceAnnual + bbookAnnual - stressDrag);
+  return Math.max(0, tbillAnnual + insuranceAnnual + layer3Blended - stressDrag);
 }
 
 export function EasyMode({
@@ -281,13 +288,14 @@ export function EasyMode({
       {/* ----- Footer note ----- */}
       <p className="text-[10px] font-mono text-gray-500 leading-relaxed">
         Easy mode auto-allocates evenly across diversified event markets,
-        auto-buys reinsurance to cover the insurer-side exposure, deposits
-        principal into the B-book pool as passive underwriter stake, and
-        mints FLOAT 1:1 against your dollar. Damage in any layer shrinks all
-        four atomically — but the four sources are deliberately
-        uncorrelated, so the joint distribution stays positive in the
-        vast majority of stress scenarios. Switch to advanced mode to
-        configure each layer manually.
+        auto-buys reinsurance to cover the insurer-side exposure, splits
+        layer-3 stake 80% into the LAP pool (passive — earns auction-
+        imbalance rebates) and 20% into the B-book pool (passive — earns
+        retail flow tips), and mints FLOAT 1:1 against your dollar.
+        Damage in any layer shrinks all four atomically — but the four
+        sources are deliberately uncorrelated, so the joint distribution
+        stays positive in the vast majority of stress scenarios. Switch
+        to advanced mode to configure each layer manually.
       </p>
     </div>
   );

@@ -44,6 +44,8 @@ import {
 import {
   initLapPoolState,
   adjustThreadDerived as adjustLapPoolThreadDerived,
+  depositUnderwriter as depositLapPoolUnderwriter,
+  withdrawUnderwriter as withdrawLapPoolUnderwriter,
 } from "./lib/lapPool.js";
 import { MINT_LAP_POOL_SHARE_DEFAULT } from "./constants/system.js";
 import {
@@ -84,6 +86,7 @@ import { PeersPanel } from "./components/PeersPanel.jsx";
 import { FloatsDesk } from "./components/FloatsDesk.jsx";
 import { InsuranceDesk } from "./components/InsuranceDesk.jsx";
 import { BBookDesk } from "./components/BBookDesk.jsx";
+import { LapPoolDesk } from "./components/LapPoolDesk.jsx";
 import { LapPayoffCurve } from "./components/LapPayoffCurve.jsx";
 import { GettingStarted } from "./components/GettingStarted.jsx";
 import { TradeHistory } from "./components/TradeHistory.jsx";
@@ -142,7 +145,7 @@ const INITIAL_PLAYER = {
   tags: initTags(), // §10.1 — capital accumulates roles via tags, not transfers
 };
 
-const TABS = ["Chart", "Auction", "Insurance", "Credit", "B-book", "Spend", "Stress", "Markets", "History", "Log"];
+const TABS = ["Chart", "Auction", "Insurance", "Credit", "LAP Pool", "B-book", "Spend", "Stress", "Markets", "History", "Log"];
 
 export default function App() {
   // pairStates is persisted so epoch counters, price history, and
@@ -904,7 +907,7 @@ export default function App() {
   //
   // No LTV gate, no coefficient — gate is purely "can you afford to
   // deploy `amount` of free margin?"
-  function handleMintFloats(amount) {
+  function handleMintFloats(amount, lapShareOverride = null) {
     if (!Number.isFinite(amount) || amount <= 0) {
       addToast("Mint amount must be positive", "warning");
       return;
@@ -982,7 +985,10 @@ export default function App() {
     //    default is 80/20 in favor of the LAP pool. Both are gated by
     //    thread redemption mechanics (10% cycle cap or express penalty),
     //    not by a fixed lockup on the thread-derived portion.
-    const lapShare = MINT_LAP_POOL_SHARE_DEFAULT;
+    const lapShare =
+      lapShareOverride != null && Number.isFinite(lapShareOverride)
+        ? Math.max(0, Math.min(1, lapShareOverride))
+        : MINT_LAP_POOL_SHARE_DEFAULT;
     const lapAmount = amount * lapShare;
     const bbookAmount = amount - lapAmount;
     const adjustedLap = adjustLapPoolThreadDerived({
@@ -1137,6 +1143,68 @@ export default function App() {
       tags: untag(p.tags ?? {}, "bBookStake", amount),
     }));
     addToast(`Withdrew $${amount.toFixed(0)} from B-book pool`, "info");
+  }
+
+  // --- LAP-pool LP handlers ----------------------------------------------
+  function handleLapPoolDeposit(amount) {
+    if (!Number.isFinite(amount) || amount <= 0) {
+      addToast("Deposit must be positive", "warning");
+      return;
+    }
+    const free = freeMargin(player.margin, player.tags);
+    if (amount > free + 1e-6) {
+      addToast(
+        `Not enough free margin: $${free.toFixed(0)} available, need $${amount.toFixed(0)}`,
+        "warning"
+      );
+      return;
+    }
+    const newTags = tryTag(player.margin, player.tags, "lapPoolStake", amount);
+    if (!newTags) {
+      addToast("Insufficient free margin (tag check)", "warning");
+      return;
+    }
+    const epoch = activePS?.epochIndex ?? 0;
+    const r = depositLapPoolUnderwriter({
+      state: lapPoolState,
+      uid: player.id,
+      amount,
+      currentEpoch: epoch,
+    });
+    if (!r.ok) {
+      addToast(`Deposit failed: ${r.reason}`, "warning");
+      return;
+    }
+    setLapPoolState(r.state);
+    setPlayer((p) => ({ ...p, tags: newTags }));
+    addToast(
+      `Staked $${amount.toFixed(0)} as LAP-pool LP (passive — earn imbalance rebate)`,
+      "info"
+    );
+  }
+
+  function handleLapPoolWithdraw(amount) {
+    if (!Number.isFinite(amount) || amount <= 0) {
+      addToast("Withdraw must be positive", "warning");
+      return;
+    }
+    const epoch = activePS?.epochIndex ?? 0;
+    const r = withdrawLapPoolUnderwriter({
+      state: lapPoolState,
+      uid: player.id,
+      amount,
+      currentEpoch: epoch,
+    });
+    if (!r.ok) {
+      addToast(`Withdraw failed: ${r.reason}`, "warning");
+      return;
+    }
+    setLapPoolState(r.state);
+    setPlayer((p) => ({
+      ...p,
+      tags: untag(p.tags ?? {}, "lapPoolStake", amount),
+    }));
+    addToast(`Withdrew $${amount.toFixed(0)} from LAP pool`, "info");
   }
 
   // -------------------------------------------------------------------------
@@ -1341,11 +1409,11 @@ export default function App() {
     "2": () => setActiveTab("Auction"),
     "3": () => setActiveTab("Insurance"),
     "4": () => setActiveTab("Credit"),
-    "5": () => setActiveTab("B-book"),
-    "6": () => setActiveTab("Spend"),
-    "7": () => setActiveTab("Stress"),
-    "8": () => setActiveTab("Markets"),
-    "9": () => setActiveTab("History"),
+    "5": () => setActiveTab("LAP Pool"),
+    "6": () => setActiveTab("B-book"),
+    "7": () => setActiveTab("Spend"),
+    "8": () => setActiveTab("Stress"),
+    "9": () => setActiveTab("Markets"),
     "0": () => setActiveTab("Log"),
     "+": () => setSpeed((s) => Math.min(5, s * 2)),
     "-": () => setSpeed((s) => Math.max(0.5, s / 2)),
@@ -1731,6 +1799,17 @@ export default function App() {
                   </div>
                 )}
               </>
+            )}
+
+            {activeTab === "LAP Pool" && (
+              <LapPoolDesk
+                lapPoolState={lapPoolState}
+                playerId={player.id}
+                freeMargin={freeMargin(player.margin, player.tags)}
+                currentEpoch={activePS?.epochIndex ?? 0}
+                onDeposit={handleLapPoolDeposit}
+                onWithdraw={handleLapPoolWithdraw}
+              />
             )}
 
             {activeTab === "B-book" && (

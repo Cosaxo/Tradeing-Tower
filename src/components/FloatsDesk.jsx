@@ -27,6 +27,7 @@ import {
   STANDARD_REDEMPTION_CAP_PCT,
   EXPRESS_PENALTY_RATE,
   REDEMPTION_EVERY,
+  MINT_LAP_POOL_SHARE_DEFAULT,
 } from "../constants/system.js";
 
 export function FloatsDesk({
@@ -43,6 +44,12 @@ export function FloatsDesk({
   const [sendAmount, setSendAmount] = useState(50);
   const [redeemAmount, setRedeemAmount] = useState(50);
   const [express, setExpress] = useState(false);
+  // Tier-3 split: how much of the layer-3 stake routes to the LAP pool
+  // (passive LP, default) vs the B-book pool (passive bookie). Stored
+  // as a 0-100 integer percent for slider ergonomics.
+  const [lapSharePct, setLapSharePct] = useState(
+    Math.round(MINT_LAP_POOL_SHARE_DEFAULT * 100)
+  );
 
   const balance = floatsState?.balances?.[playerId] ?? 0;
   const debt = floatsState?.debtByUser?.[playerId] ?? 0;
@@ -135,15 +142,45 @@ export function FloatsDesk({
             ${mintAmount}
           </span>
           <button
-            onClick={() => onMint?.(mintAmount)}
+            onClick={() => onMint?.(mintAmount, lapSharePct / 100)}
             disabled={mintMax < 10 || mintAmount > mintMax}
             className="text-[10px] font-mono px-3 py-1 rounded border border-emerald-700 bg-emerald-950 text-emerald-300 hover:bg-emerald-900 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
             Open thread
           </button>
         </div>
-        <div className="text-[9px] font-mono text-gray-600">
-          Deploys ${mintAmount} as: T-bill + insurance fill + neutral paired LAP + ${mintAmount} FLOAT.
+
+        {/* Tier-3 split slider: LAP pool vs B-book pool */}
+        <div className="flex flex-col gap-1 mt-1 border-t border-gray-800 pt-1">
+          <div className="flex items-center justify-between text-[9px] font-mono text-gray-500">
+            <span className="flex items-center">
+              Layer-3 split
+              <HelpHint
+                width={320}
+                text="Tier-3 stake splits between two passive pools. LAP pool absorbs auction imbalance and earns the entropy-rebate stream funded by stability fees. B-book pool counterparties retail flow flagged as B-classifier-routed. Default 80% LAP / 20% B-book — tilt left for safer (lower yield, lower risk), right for more directional B-book exposure."
+              />
+            </span>
+            <span>
+              <span className="text-cyan-300">{lapSharePct}% LAP</span>
+              <span className="text-gray-600 mx-1">·</span>
+              <span className="text-pink-300">{100 - lapSharePct}% B-book</span>
+            </span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={5}
+            value={lapSharePct}
+            onChange={(e) => setLapSharePct(parseInt(e.target.value))}
+            className="w-full accent-cyan-500"
+          />
+        </div>
+
+        <div className="text-[9px] font-mono text-gray-600 mt-1">
+          Deploys ${mintAmount} as: T-bill + insurance fill + LAP pool ($
+          {Math.round(mintAmount * (lapSharePct / 100))}) + B-book pool ($
+          {Math.round(mintAmount * (1 - lapSharePct / 100))}) + ${mintAmount} FLOAT.
         </div>
       </div>
 

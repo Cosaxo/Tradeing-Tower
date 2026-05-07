@@ -117,6 +117,14 @@ export const MINT_LAP_POOL_SHARE_DEFAULT = 0.8;
 // minutes at default speed; tunable.
 export const LAP_POOL_HOLD_EPOCHS = 20;
 
+// Lockup on opt-in voluntary deposits to the LAP pool. Shorter than the
+// B-book pool's lockup because the LAP pool's role is retail-facing
+// passive LP — the average user expects to redeem on a sane horizon —
+// and because directional risk is bounded by LAP_POOL_HOLD_EPOCHS,
+// not by an unbounded user-driven contract lifecycle. Thread-derived
+// stake bypasses this entirely (gated by thread redemption mechanics).
+export const LAP_POOL_LOCKUP_EPOCHS = 30;
+
 // Fraction of stability-fee revenue the pool is allowed to draw on per
 // tick to fund rebate income. The rest stays with the protocol fee
 // ledger. Capping at < 1 keeps a residual fee stream for the protocol

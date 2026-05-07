@@ -788,8 +788,20 @@ yield source:
 | :--: | :-- | :-- |
 | 1 | T-bill principal | none |
 | 2 | Insurance-seller stake across event markets | none |
-| 3 | LAP active-trade access | ≥3 markets allocated; max 50% in any one; reinsurance bought |
-| 4 | FLOAT mint (full thread) | layer-3 role is *passive* B-book stake, not active LAP |
+| 3 | **LAP-pool LP** (passive — auction-imbalance rebate) + B-book LP | ≥3 markets allocated; max 50% in any one; reinsurance bought |
+| 4 | FLOAT mint (full thread) | layer-3 role is *passive* pool stake, not active LAP |
+
+**Path A (Tier 3 default).** Layer-3 stake routes 80% to the LAP
+pool and 20% to the B-book pool. The LAP pool is the safer
+passive role — it absorbs the surplus side of imbalanced auction
+flow and earns the entropy-rebate tip rate; rebate income is
+funded from the protocol's per-tick stability-fee revenue (capped
+at `LAP_POOL_REBATE_FEE_SHARE = 70%` per tick, leaving residual
+fee for the protocol). The B-book pool retains its retail-flow
+counterparty role for users who opt in to that exposure. Active
+LAP trading remains available but is opt-in rather than the default
+Tier-3 role. The split is user-tunable per mint via the
+FloatsDesk slider.
 
 Tier 3 enforces *diversified, hedged* allocation as a hard gate
 (`evaluateTier3Gate` in `lib/ltv.js`). Tier 4 is per-thread
@@ -862,6 +874,43 @@ are force-classed to A regardless of score.
 The classifier is *fully visible*: every user sees their score,
 components, current class, and the precise gap to A. There is no
 hidden routing.
+
+### 5.4 LAP pool — passive imbalance counterparty
+
+After sort-and-align matching produces matched pairs, surplus
+flow on one side has no counterparty. The **LAP pool** absorbs
+that surplus as a synthetic opposite-side position, sized by its
+underwriter stake (capacity gate `notional ≤ 1.5 × stake`). For
+each absorbed contract the pool earns the entropy-weighted tip
+rate the matched flow already pays.
+
+**Conservation.** Pool rebate income is funded from the per-pair
+stability-fee revenue. Each tick the protocol allocates up to
+`LAP_POOL_REBATE_FEE_SHARE = 70%` of `stabilityFeeCollected` as
+the pool's rebate budget; the function `absorbImbalance` stops
+absorbing once the budget is exhausted. The funded rebate is
+debited from the fee that flows on to the protocol fee ledger.
+Every dollar of pool-stake growth has a matching debit. Tips
+never materialise from nothing.
+
+**Self-clearing.** Each medium tick a maintenance pass closes any
+absorbed contract aged past `LAP_POOL_HOLD_EPOCHS = 20`. Realised
+P&L distributes pro-rata to underwriters; thread-derived shares
+ripple through `damageThread` / `growThread` so the four-layer
+thread invariant holds. Without this pass, absorbed contracts
+would accumulate forever — capacity would saturate and
+directional risk would compound. With it, pool exposure is
+bounded by a known time window even in markets where opposite-side
+flow never returns.
+
+**Calibration.** Empirically, the LAP-pool yield harness
+(`lib/lapPoolYieldHarness.js`) reports ~28-32% annualised at the
+10k-stake regime under the steady-imbalance scenarios, dominated
+by rebate income. At larger stake (when capacity dwarfs typical
+flow) the rate decays as the pool absorbs a smaller fraction of
+its capacity per tick. These numbers are sensitive to assumed
+imbalance frequency and bid sizing; the harness exposes
+parameters so calibration can be tuned against real flow data.
 
 ---
 

@@ -63,12 +63,12 @@ describe("depositUnderwriter / withdrawUnderwriter", () => {
   it("respects lockup until release epoch", () => {
     let s = initLapPoolState();
     s = depositUnderwriter({ state: s, uid: "A", amount: 500, currentEpoch: 10 }).state;
-    // BBOOK_LOCKUP_EPOCHS is 100 ticks; release at 110.
+    // Release at deposit + LAP_POOL_LOCKUP_EPOCHS. Probe one tick before.
     const blocked = withdrawUnderwriter({
       state: s,
       uid: "A",
       amount: 100,
-      currentEpoch: 50,
+      currentEpoch: 10 + 1,
     });
     expect(blocked.ok).toBe(false);
     expect(blocked.reason).toMatch(/locked/);

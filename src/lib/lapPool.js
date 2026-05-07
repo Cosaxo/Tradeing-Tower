@@ -38,9 +38,10 @@
 // thread-derived stake, P&L distribution pro-rata, lockup mechanics).
 
 import {
-  BBOOK_LOCKUP_EPOCHS,    // we reuse the same lockup discipline
-  BBOOK_MAX_NOTIONAL_RATIO, // and the same capacity gate
+  LAP_POOL_LOCKUP_EPOCHS,
+  BBOOK_MAX_NOTIONAL_RATIO, // we reuse the same capacity gate as B-book
 } from "../constants/system.js";
+import { getEntropyMultForUser } from "./auction.js";
 
 // ---------------------------------------------------------------------------
 // IDs
@@ -120,7 +121,7 @@ export function depositUnderwriter({ state, uid, amount, currentEpoch = 0 }) {
   }
   if (!uid) return { ok: false, reason: "no uid" };
   const prev = state.underwriters?.[uid];
-  const release = (currentEpoch ?? 0) + BBOOK_LOCKUP_EPOCHS;
+  const release = (currentEpoch ?? 0) + LAP_POOL_LOCKUP_EPOCHS;
   const nextEntry = {
     voluntaryStake: (prev?.voluntaryStake ?? 0) + amount,
     threadDerivedStake: prev?.threadDerivedStake ?? 0,
@@ -284,9 +285,10 @@ export function absorbImbalance({
       break;
     }
 
-    // Look up entropy multiplier for this bid's leverage. Safe default
-    // = 1 if weights aren't supplied.
-    const entMult = lookupEntropyMult(leverage, normWeights, bucketLevs);
+    // Look up entropy multiplier for this bid's leverage. Shared helper
+    // with the auction so the absorbed and matched paths price tips
+    // identically.
+    const entMult = getEntropyMultForUser(leverage, normWeights, bucketLevs);
     const tipRate = (bid.tip_tiers?.[0]?.tip ?? 0.02) * entMult;
     const tipForBid = margin * tipRate;
     rebateRequested += tipForBid;
@@ -525,21 +527,3 @@ export function closeAbsorbed({ state, contractId, currentPrice }) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-function lookupEntropyMult(userLeverage, normWeights, bucketLevs) {
-  if (!normWeights?.length || !bucketLevs?.length) return 1;
-  let closest = 0;
-  let minDist = Infinity;
-  for (let i = 0; i < bucketLevs.length; i++) {
-    const d = Math.abs(bucketLevs[i] - userLeverage);
-    if (d < minDist) {
-      minDist = d;
-      closest = i;
-    }
-  }
-  const avg = normWeights.reduce((s, w) => s + w, 0) / normWeights.length;
-  return avg > 0 ? normWeights[closest] / avg : 1;
-}

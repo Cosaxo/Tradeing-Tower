@@ -6,8 +6,8 @@
 //
 // Tier 1: T-bill principal               — automatic, always unlocked
 // Tier 2: Insurance-seller stake         — automatic
-// Tier 3: LAP active-trade access        — gate: ≥3 markets, max 50% any single, reinsurance bought
-// Tier 4: FLOAT mint (full thread)       — gate: layer-3 role is B-book stake (per-thread)
+// Tier 3: LAP-pool passive LP            — gate: ≥3 markets, max 50% any single, reinsurance bought
+// Tier 4: FLOAT mint (full thread)       — gate: layer-3 role is LAP-pool stake (per-thread)
 // Tier 5: Wallet-share commitment        — gate: have FLOAT to commit
 //
 // `principal` is the user's free + tagged margin total in dollars.
@@ -34,8 +34,8 @@ const TIER_INFO = [
   },
   {
     n: 3,
-    label: "LAP / Trade",
-    sub: "Active leveraged auction exposure",
+    label: "LAP-pool LP",
+    sub: "Passive imbalance-rebate income (active trading is opt-in)",
     color: "from-amber-700 to-amber-900",
     border: "border-amber-700",
     ring: "ring-amber-500",

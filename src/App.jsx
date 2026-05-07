@@ -157,7 +157,17 @@ export default function App() {
   // "Convert $ → FLOAT" button, the four-tier ladder, and a yield number.
   // Power users can switch to advanced (the multi-tab desk view) at
   // any time via the header toggle.
-  const [easyMode, setEasyMode] = usePersistentState("tt.easyMode", true);
+  // UI disclosure mode (UI roadmap Phase 4):
+  //   "easy"   — TierLadder + mint/redeem (current EasyMode page)
+  //   "normal" — 5 tabs; Trade tab read-only (chart + stats + curve)
+  //   "expert" — 5 tabs; Trade tab full (bid panel + position desk +
+  //              payoff curves)
+  // Each mode is a superset of the previous. New users default to easy.
+  const [uiMode, setUiMode] = usePersistentState("tt.uiMode", "easy");
+  // Convenience predicates used throughout the render.
+  const easyMode = uiMode === "easy";
+  const expertMode = uiMode === "expert";
+  const setEasyMode = (v) => setUiMode(v ? "easy" : "normal");
   const [mobileNav, setMobileNav] = useState(null); // 'left' | 'right' | null
   // Internals drawer (UI roadmap Phase 3) — power-user / debug
   // surfaces (Stress, Markets, History, Log, Performance, Peers) live
@@ -1432,22 +1442,36 @@ export default function App() {
             shows the same information plus a richer per-role breakdown
             (threaded / pool LP / position / FLOAT / locked). */}
         <div className="ml-auto flex items-center gap-3">
-          <button
-            onClick={() => setEasyMode((m) => !m)}
-            className={cx(
-              "text-xs font-mono px-2 py-1 rounded border transition-colors",
-              easyMode
-                ? "border-emerald-700 bg-emerald-950 text-emerald-300 hover:bg-emerald-900"
-                : "border-indigo-700 bg-indigo-950 text-indigo-300 hover:bg-indigo-900"
-            )}
-            title={
-              easyMode
-                ? "Switch to advanced mode — every desk exposed"
-                : "Switch to easy mode — one yield number, one button"
-            }
-          >
-            {easyMode ? "easy" : "advanced"}
-          </button>
+          {/* Three-mode disclosure (UI roadmap Phase 4). Each mode is a
+              superset of the previous; users can step up as they
+              understand more. */}
+          <div className="flex rounded border border-gray-700 overflow-hidden">
+            {[
+              { id: "easy", title: "Tier ladder + mint/redeem only" },
+              { id: "normal", title: "5 tabs; Trade tab is read-only context" },
+              { id: "expert", title: "5 tabs; Trade tab includes bid panel + position desk" },
+            ].map(({ id, title }, i, arr) => (
+              <button
+                key={id}
+                onClick={() => setUiMode(id)}
+                title={title}
+                aria-pressed={uiMode === id}
+                className={cx(
+                  "text-[11px] font-mono px-2 py-1 transition-colors",
+                  i < arr.length - 1 && "border-r border-gray-700",
+                  uiMode === id
+                    ? id === "easy"
+                      ? "bg-emerald-950 text-emerald-300"
+                      : id === "normal"
+                      ? "bg-sky-950 text-sky-300"
+                      : "bg-indigo-950 text-indigo-300"
+                    : "bg-gray-900 text-gray-400 hover:bg-gray-800 hover:text-gray-200"
+                )}
+              >
+                {id}
+              </button>
+            ))}
+          </div>
           <SpeedControl speed={speed} onSpeed={setSpeed} />
           <button
             onClick={() => setRunning((r) => !r)}
@@ -1575,7 +1599,7 @@ export default function App() {
                 equityHistory={equityHistory}
                 onConvertToFloats={(amount) => handleMintFloats(amount)}
                 onRedeem={(amount) => handleRedeem(amount, false)}
-                onJumpToAdvanced={() => setEasyMode(false)}
+                onJumpToAdvanced={() => setUiMode("normal")}
               />
             </div>
           ) : (
@@ -1674,27 +1698,50 @@ export default function App() {
                   shortCurve={activePS?.auctionResult?.shortCurve ?? []}
                   cap={cap}
                 />
-                <AuctionBidPanel
-                  player={player}
-                  onUpdate={handlePlayerUpdate}
-                  activePair={activePair}
-                  cap={cap}
-                  availablePoolCredit={availablePoolCredit}
-                  deployedPoolCredit={deployedPoolCredit}
-                  classifierStats={getClassifierStats(classifierState, player.id)}
-                />
-                <PortfolioStructurer
-                  openPositions={openPositions}
-                  creditEligibility={creditEligibility}
-                  onOpen={handleOpenPosition}
-                  onClose={handleClosePosition}
-                  poolLtv={poolLtvInfo}
-                  availablePoolCredit={availablePoolCredit}
-                  poolDepositAmount={poolDepositAmount}
-                  deployedPoolCredit={deployedPoolCredit}
-                  rentalsByPair={rentalsByPair}
-                />
-                {openPositions.length > 0 && (
+                {/* Active-trading surfaces — only in Expert mode (UI
+                    roadmap Phase 4). Normal mode keeps the chart +
+                    auction stats + leverage curve as read-only context;
+                    users who want to actively bid + open positions
+                    flip to Expert. */}
+                {expertMode && (
+                  <>
+                    <AuctionBidPanel
+                      player={player}
+                      onUpdate={handlePlayerUpdate}
+                      activePair={activePair}
+                      cap={cap}
+                      availablePoolCredit={availablePoolCredit}
+                      deployedPoolCredit={deployedPoolCredit}
+                      classifierStats={getClassifierStats(classifierState, player.id)}
+                    />
+                    <PortfolioStructurer
+                      openPositions={openPositions}
+                      creditEligibility={creditEligibility}
+                      onOpen={handleOpenPosition}
+                      onClose={handleClosePosition}
+                      poolLtv={poolLtvInfo}
+                      availablePoolCredit={availablePoolCredit}
+                      poolDepositAmount={poolDepositAmount}
+                      deployedPoolCredit={deployedPoolCredit}
+                      rentalsByPair={rentalsByPair}
+                    />
+                  </>
+                )}
+                {!expertMode && (
+                  <div className="text-[11px] font-mono text-gray-500 leading-relaxed border border-gray-800 bg-gray-950/40 rounded px-3 py-2">
+                    <span className="text-sky-300">Normal mode.</span> Active
+                    trading (auction bid configuration, single + paired LAP
+                    positions) is hidden. Switch to{" "}
+                    <button
+                      onClick={() => setUiMode("expert")}
+                      className="text-indigo-300 underline hover:text-indigo-200"
+                    >
+                      expert
+                    </button>{" "}
+                    to open positions and tune your bid.
+                  </div>
+                )}
+                {expertMode && openPositions.length > 0 && (
                   <details className="rounded border border-gray-800 bg-gray-950/40">
                     <summary className="cursor-pointer text-[10px] font-mono text-gray-400 uppercase px-2 py-1.5 hover:text-gray-200 hover:bg-gray-900 select-none">
                       Position payoff curves ({Math.min(openPositions.length, 4)})
@@ -1715,7 +1762,7 @@ export default function App() {
                     </div>
                   </details>
                 )}
-                {routerSuggestions.length > 0 && (
+                {expertMode && routerSuggestions.length > 0 && (
                   <div className="rounded border border-gray-800 bg-gray-900 p-2">
                     <div className="text-[10px] font-mono text-gray-500 mb-1">
                       Yield Router Suggestions (click to apply)

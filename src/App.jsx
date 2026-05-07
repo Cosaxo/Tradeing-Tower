@@ -95,7 +95,6 @@ import { SpeedControl } from "./components/SpeedControl.jsx";
 import { CorrelationHeatmap } from "./components/CorrelationHeatmap.jsx";
 import { RegimeTimeline } from "./components/RegimeTimeline.jsx";
 import { NotificationHistory } from "./components/NotificationHistory.jsx";
-import { Tutorial } from "./components/Tutorial.jsx";
 import { FeeFlow } from "./components/FeeFlow.jsx";
 import { RoleLedger } from "./components/RoleLedger.jsx";
 import { EasyMode } from "./components/EasyMode.jsx";
@@ -201,7 +200,6 @@ export default function App() {
     initSpendCommitmentState()
   );
   const { toasts, history, addToast, clearHistory } = useToast();
-  const [showTutorial, setShowTutorial] = useState(false);
   // Multi-user counter — re-rendered every few seconds so the header
   // chip reflects current peer count without prop-drilling the adapter.
   const [peerCount, setPeerCount] = useState(0);
@@ -1867,17 +1865,9 @@ export default function App() {
         ))}
       </div>
 
-      {/* Tutorial overlay (first run + manually reopened) */}
-      <Tutorial force={showTutorial} onClose={() => setShowTutorial(false)} />
-
-      {/* Re-open tutorial button (bottom-left) */}
-      <button
-        onClick={() => setShowTutorial(true)}
-        className="fixed bottom-4 left-4 z-40 text-[10px] font-mono px-3 py-1 rounded-full border border-gray-700 bg-gray-900 text-gray-400 hover:text-gray-100 hover:bg-gray-800 hover:border-indigo-500 transition-colors"
-        aria-label="Open tutorial"
-      >
-        ? tutorial
-      </button>
+      {/* Tutorial.jsx was retired in UI roadmap Phase 6. Conceptual
+          context now lives in HelpHint tooltips on each desk + the
+          whitepaper. GettingStarted is the only onboarding system. */}
     </div>
   );
 }

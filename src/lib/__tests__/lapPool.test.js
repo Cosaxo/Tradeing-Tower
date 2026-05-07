@@ -17,6 +17,7 @@ import {
   calcContractPoolPnl,
   markToMarket,
   closeAbsorbed,
+  maintainAbsorbed,
 } from "../lapPool.js";
 
 // ---------------------------------------------------------------------------
@@ -166,6 +167,7 @@ describe("absorbImbalance", () => {
       bucketLevs: [1, 2, 3],
       openPrice: 100,
       currentEpoch: 50,
+      rebateBudget: 1_000,
     });
     expect(r.absorbedContracts).toHaveLength(2);
     // Pool sides should all be SHORT (opposite of unmatched longs).
@@ -190,6 +192,7 @@ describe("absorbImbalance", () => {
       bucketLevs: [2],
       openPrice: 100,
       currentEpoch: 1,
+      rebateBudget: 1_000,
     });
     expect(r.absorbedContracts).toHaveLength(1);
     expect(r.absorbedContracts[0].side).toBe("LONG");
@@ -212,6 +215,7 @@ describe("absorbImbalance", () => {
       normWeights: [1],
       bucketLevs: [1],
       openPrice: 100,
+      rebateBudget: 1_000,
     });
     expect(r.absorbedContracts).toHaveLength(1);
     expect(r.absorbedContracts[0].absorbedUserId).toBe("U1");
@@ -254,6 +258,7 @@ describe("absorbImbalance", () => {
       normWeights: [1, 2, 1],
       bucketLevs: [1, 2, 3],
       openPrice: 100,
+      rebateBudget: 1_000,
     });
     // tip = 0.02 × 1.5 = 0.03 → rebate = 1000 × 0.03 = 30
     expect(r.totalRebate).toBeCloseTo(30, 1);
@@ -344,6 +349,7 @@ describe("markToMarket", () => {
       ],
       unmatchedShorts: [],
       openPrice: 100,
+      rebateBudget: 1_000,
     }).state;
     // Both pool positions are SHORT. Price drops → both pool positions gain.
     const r = markToMarket({ state: s, pricesByPair: { BTCUSD: 95 } });
@@ -364,6 +370,7 @@ describe("closeAbsorbed", () => {
       ],
       unmatchedShorts: [],
       openPrice: 100,
+      rebateBudget: 1_000,
     }).state;
     const contractId = s.activeAbsorbed[0].id;
     // Pool side is SHORT. Close at 95 (favourable) → poolPnl > 0.
@@ -399,6 +406,7 @@ describe("conservation across rebate + close", () => {
       ],
       unmatchedShorts: [],
       openPrice: 100,
+      rebateBudget: 1_000,
     });
     s = absorb.state;
     const rebate = absorb.totalRebate;
@@ -415,5 +423,148 @@ describe("conservation across rebate + close", () => {
     expect(closed.ok).toBe(true);
     // At open price → pnl = 0; only rebate ended up flowing.
     expect(closed.poolPnl).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Rebate budget cap — conservation gate
+// ---------------------------------------------------------------------------
+
+describe("absorbImbalance rebate budget", () => {
+  function setup() {
+    let s = initLapPoolState();
+    s = adjustThreadDerived({ state: s, uid: "POOL_LP", delta: 10000 }).state;
+    return s;
+  }
+
+  it("absorbs nothing when rebateBudget is zero", () => {
+    const r = absorbImbalance({
+      state: setup(),
+      unmatchedLongs: [
+        { id: "U1", base_margin: 1000, max_lev: 1, tip_tiers: [{ tip: 0.02 }] },
+      ],
+      unmatchedShorts: [],
+      openPrice: 100,
+      rebateBudget: 0,
+    });
+    expect(r.absorbedContracts).toHaveLength(0);
+    expect(r.totalRebate).toBe(0);
+  });
+
+  it("stops absorbing once accumulated tip would exceed the budget", () => {
+    // Each bid earns $20 tip ($1000 × 0.02). Budget $25 → only first bid
+    // absorbed, second skipped.
+    const r = absorbImbalance({
+      state: setup(),
+      unmatchedLongs: [
+        { id: "U1", base_margin: 1000, max_lev: 1, tip_tiers: [{ tip: 0.02 }] },
+        { id: "U2", base_margin: 1000, max_lev: 1, tip_tiers: [{ tip: 0.02 }] },
+      ],
+      unmatchedShorts: [],
+      openPrice: 100,
+      rebateBudget: 25,
+    });
+    expect(r.absorbedContracts).toHaveLength(1);
+    expect(r.totalRebate).toBeCloseTo(20);
+  });
+
+  it("rebateRequested reflects what would have been earned with infinite budget", () => {
+    const r = absorbImbalance({
+      state: setup(),
+      unmatchedLongs: [
+        { id: "U1", base_margin: 1000, max_lev: 1, tip_tiers: [{ tip: 0.02 }] },
+        { id: "U2", base_margin: 1000, max_lev: 1, tip_tiers: [{ tip: 0.02 }] },
+      ],
+      unmatchedShorts: [],
+      openPrice: 100,
+      rebateBudget: 25,
+    });
+    // Funded only $20; would-have-been $40.
+    expect(r.totalRebate).toBeCloseTo(20);
+    expect(r.rebateRequested).toBeCloseTo(40);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// maintainAbsorbed — per-tick aged-contract close pass
+// ---------------------------------------------------------------------------
+
+describe("maintainAbsorbed", () => {
+  function withAbsorbed({ openedAtEpoch = 0 } = {}) {
+    let s = initLapPoolState();
+    s = adjustThreadDerived({ state: s, uid: "LP", delta: 10000 }).state;
+    s = absorbImbalance({
+      state: s,
+      unmatchedLongs: [
+        { id: "U1", base_margin: 1000, max_lev: 1, tip_tiers: [{ tip: 0.02 }], activePair: "BTCUSD" },
+      ],
+      unmatchedShorts: [],
+      openPrice: 100,
+      currentEpoch: openedAtEpoch,
+      rebateBudget: 1_000,
+    }).state;
+    return s;
+  }
+
+  it("is a no-op when no contracts are aged", () => {
+    const s = withAbsorbed({ openedAtEpoch: 0 });
+    const r = maintainAbsorbed({
+      state: s,
+      pricesByPair: { BTCUSD: 100 },
+      currentEpoch: 5, // < holdEpochs
+      maxHoldEpochs: 10,
+    });
+    expect(r.closed).toHaveLength(0);
+    expect(r.state).toBe(s);
+  });
+
+  it("closes contracts past the hold window and returns underwriter shares", () => {
+    const s = withAbsorbed({ openedAtEpoch: 0 });
+    const r = maintainAbsorbed({
+      state: s,
+      pricesByPair: { BTCUSD: 100 },
+      currentEpoch: 20,
+      maxHoldEpochs: 10,
+    });
+    expect(r.closed).toHaveLength(1);
+    expect(r.closed[0].reason).toBe("aged");
+    expect(r.closed[0].underwriterShares).toBeDefined();
+    expect(r.state.activeAbsorbed).toHaveLength(0);
+  });
+
+  it("skips contracts whose pair has no current price", () => {
+    const s = withAbsorbed({ openedAtEpoch: 0 });
+    const r = maintainAbsorbed({
+      state: s,
+      pricesByPair: {}, // no BTCUSD price
+      currentEpoch: 20,
+      maxHoldEpochs: 10,
+    });
+    expect(r.closed).toHaveLength(0);
+    expect(r.state.activeAbsorbed).toHaveLength(1);
+  });
+
+  it("aggregates realised P&L across multiple aged contracts", () => {
+    let s = withAbsorbed({ openedAtEpoch: 0 });
+    s = absorbImbalance({
+      state: s,
+      unmatchedLongs: [
+        { id: "U2", base_margin: 1000, max_lev: 1, tip_tiers: [{ tip: 0.02 }], activePair: "BTCUSD" },
+      ],
+      unmatchedShorts: [],
+      openPrice: 100,
+      currentEpoch: 0,
+      rebateBudget: 1_000,
+    }).state;
+    // Close at OPEN price → pnl = 0 for both. Sanity: both close, sum is 0.
+    const r = maintainAbsorbed({
+      state: s,
+      pricesByPair: { BTCUSD: 100 },
+      currentEpoch: 20,
+      maxHoldEpochs: 10,
+    });
+    expect(r.closed).toHaveLength(2);
+    expect(r.totalRealizedPnl).toBeCloseTo(0);
+    expect(r.state.activeAbsorbed).toHaveLength(0);
   });
 });

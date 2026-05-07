@@ -106,3 +106,19 @@ export const BBOOK_LOCKUP_EPOCHS = 100;
 // the ratio with the slider in the FloatsDesk.
 // -----------------------------------------------------------------------
 export const MINT_LAP_POOL_SHARE_DEFAULT = 0.8;
+
+// LAP pool — passive market-maker for auction imbalance.
+// -----------------------------------------------------------------------
+
+// Maximum medium ticks an absorbed contract sits on the pool before the
+// per-tick maintenance pass closes it at the current price. Bounds
+// directional exposure: even if opposite-side flow never returns, the
+// pool unwinds within a known window. 20 medium ticks ≈ a couple of
+// minutes at default speed; tunable.
+export const LAP_POOL_HOLD_EPOCHS = 20;
+
+// Fraction of stability-fee revenue the pool is allowed to draw on per
+// tick to fund rebate income. The rest stays with the protocol fee
+// ledger. Capping at < 1 keeps a residual fee stream for the protocol
+// even when the pool is fully utilised.
+export const LAP_POOL_REBATE_FEE_SHARE = 0.7;

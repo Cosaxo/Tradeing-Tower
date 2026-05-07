@@ -23,7 +23,11 @@ import {
   submitRedemption as submitFloatsRedemption,
 } from "../lib/floats.js";
 import { adjustThreadDerived } from "../lib/bBookPool.js";
-import { absorbImbalance, distributeRebate } from "../lib/lapPool.js";
+import { absorbImbalance, distributeRebate, maintainAbsorbed } from "../lib/lapPool.js";
+import {
+  LAP_POOL_HOLD_EPOCHS,
+  LAP_POOL_REBATE_FEE_SHARE,
+} from "../constants/system.js";
 import { detectTriggeredEvents } from "../lib/insuranceEvents.js";
 import { settleMarketTick, withdrawInsurer, postInsurer } from "../lib/insuranceMarket.js";
 import { settleReinsuranceTick } from "../lib/reinsurance.js";
@@ -180,6 +184,10 @@ export function useEpochLoop({
       // Aggregate rebate-share to player's voluntary stake — flushed to
       // wallet margin at apply phase so users see the income immediately.
       let lapRebateToPlayerWallet = 0;
+      // Per-pair latest price for the end-of-tick LAP-pool maintenance
+      // pass (closes aged absorbed contracts). Populated as each pair's
+      // settlement runs.
+      const lapPoolPricesByPair = {};
       // Aggregated insurer-stake adds resulting from thread growth this
       // tick. Applied to insuranceState before the global insurance
       // settlement runs so premium streams account for the new size.
@@ -276,46 +284,6 @@ export function useEpochLoop({
           metaParams
         );
 
-        // LAP pool absorbs the auction's imbalance (Path A — the
-        // default Tier-3 economic role). Absorbed flow earns the
-        // entropy-rebate tip; the rebate is distributed pro-rata to
-        // LP stakes immediately. Directional positions accumulate as
-        // active contracts on the pool; they're mark-to-market and
-        // closed elsewhere (or remain open across ticks).
-        if (workingLapPool && (workingLapPool.totalStake ?? 0) > 0) {
-          const priceNew = prices[prices.length - 1];
-          const absorb = absorbImbalance({
-            state: workingLapPool,
-            unmatchedLongs: auctionResult.unmatchedLongs,
-            unmatchedShorts: auctionResult.unmatchedShorts,
-            normWeights: auctionResult.normWeights,
-            bucketLevs: auctionResult.bucketLevs,
-            openPrice: priceNew,
-            currentEpoch: epochIndex,
-          });
-          workingLapPool = absorb.state;
-          if (absorb.totalRebate > 0) {
-            const dist = distributeRebate({
-              state: workingLapPool,
-              totalRebate: absorb.totalRebate,
-            });
-            workingLapPool = dist.state;
-            // Voluntary share for the local player flushes to wallet
-            // margin (visible income); thread-derived share already
-            // compounded into the user's threadDerivedStake by the
-            // distributeRebate stake-mutation logic.
-            const playerShare = dist.lpShares?.[player?.id];
-            if (playerShare?.voluntary > 0) {
-              lapRebateToPlayerWallet += playerShare.voluntary;
-            }
-          }
-          if (absorb.absorbedContracts.length > 0) {
-            logs.push(
-              `[LAP-POOL] absorbed ${absorb.absorbedContracts.length} unmatched bid(s) on ${pk} · rebate $${absorb.totalRebate.toFixed(2)}`
-            );
-          }
-        }
-
         // Settle dominant pool.
         const longMargin = auctionResult.matched
           .filter((m) => m.longId)
@@ -336,9 +304,68 @@ export function useEpochLoop({
         // settlement (explicit-only model fixed the double-exposure
         // bug; player exposure flows through positions, not bids).
         const preSettlementSnapshot = flow.snapshot ?? [];
-        const { users: settledUsers, stabilityFeeCollected, logs: poolLogs } =
+        const { users: settledUsers, stabilityFeeCollected: rawStabilityFee, logs: poolLogs } =
           settleDominantPool(validPoolUsers, priceOld, priceNew, effectiveSigma, corrMap);
         poolLogs.forEach((l) => logs.push(l));
+
+        // LAP pool absorbs the auction's imbalance (Path A — the
+        // default Tier-3 economic role). The rebate income is FUNDED
+        // FROM the per-pair stability-fee revenue: the imbalanced
+        // flow that produced the unmatched orders is the same flow
+        // paying the stability fee, so rebating a portion to the LPs
+        // who absorb the imbalance is conservation-clean. We cap the
+        // pool's draw at LAP_POOL_REBATE_FEE_SHARE so the protocol
+        // keeps a residual fee stream.
+        let stabilityFeeCollected = rawStabilityFee;
+        const lapPoolPriceForPair = prices[prices.length - 1];
+        // Track per-pair latest price for the end-of-tick maintenance
+        // pass that closes aged absorbed contracts.
+        if (Number.isFinite(lapPoolPriceForPair) && lapPoolPriceForPair > 0) {
+          lapPoolPricesByPair[pk] = lapPoolPriceForPair;
+        }
+        if (
+          workingLapPool &&
+          (workingLapPool.totalStake ?? 0) > 0 &&
+          rawStabilityFee > 0
+        ) {
+          const rebateBudget = rawStabilityFee * LAP_POOL_REBATE_FEE_SHARE;
+          const absorb = absorbImbalance({
+            state: workingLapPool,
+            unmatchedLongs: auctionResult.unmatchedLongs,
+            unmatchedShorts: auctionResult.unmatchedShorts,
+            normWeights: auctionResult.normWeights,
+            bucketLevs: auctionResult.bucketLevs,
+            openPrice: lapPoolPriceForPair,
+            currentEpoch: epochIndex,
+            rebateBudget,
+          });
+          workingLapPool = absorb.state;
+          // Subtract actually-funded rebate from the stability fee that
+          // flows on to the protocol fee ledger. Conservation: every
+          // dollar of pool-stake growth has a matching dollar deducted
+          // here.
+          stabilityFeeCollected = Math.max(0, rawStabilityFee - absorb.totalRebate);
+          if (absorb.totalRebate > 0) {
+            const dist = distributeRebate({
+              state: workingLapPool,
+              totalRebate: absorb.totalRebate,
+            });
+            workingLapPool = dist.state;
+            // Voluntary share for the local player flushes to wallet
+            // margin; thread-derived share already compounded into the
+            // user's threadDerivedStake by the distributeRebate
+            // stake-mutation logic.
+            const playerShare = dist.lpShares?.[player?.id];
+            if (playerShare?.voluntary > 0) {
+              lapRebateToPlayerWallet += playerShare.voluntary;
+            }
+          }
+          if (absorb.absorbedContracts.length > 0) {
+            logs.push(
+              `[LAP-POOL] absorbed ${absorb.absorbedContracts.length} bid(s) on ${pk} · rebate $${absorb.totalRebate.toFixed(2)} / requested $${absorb.rebateRequested.toFixed(2)}`
+            );
+          }
+        }
 
         // Hand settlement results back to the adapter (NPCs update
         // their margin / restock state). For replay/broker adapters
@@ -519,6 +546,78 @@ export function useEpochLoop({
           sideEffects.roleEntries.push(playerRoleEntry);
         }
       });
+
+      // -----------------------------------------------------------------
+      // LAP-pool maintenance pass — close any absorbed contracts that
+      // have aged past LAP_POOL_HOLD_EPOCHS. Runs ONCE per medium tick
+      // after every pair has populated lapPoolPricesByPair, so we can
+      // settle each contract at its pair's current price.
+      //
+      // Damage propagation: when a thread-derived underwriter takes a
+      // P&L delta on the pool, the same delta has to ripple through the
+      // thread (T-bill principal + insurance layer + FLOAT face) so the
+      // 4-layer invariant holds. Same handshake the App.jsx B-book
+      // close handler uses, applied here for the loop-driven path.
+      // -----------------------------------------------------------------
+      if (workingLapPool && (workingLapPool.activeAbsorbed?.length ?? 0) > 0) {
+        const tickEpoch = epochOfFirstPair(next);
+        const maintain = maintainAbsorbed({
+          state: workingLapPool,
+          pricesByPair: lapPoolPricesByPair,
+          currentEpoch: tickEpoch,
+          maxHoldEpochs: LAP_POOL_HOLD_EPOCHS,
+        });
+        workingLapPool = maintain.state;
+        if (maintain.closed.length > 0) {
+          logs.push(
+            `[LAP-POOL] aged-out ${maintain.closed.length} contract(s) · realised $${maintain.totalRealizedPnl.toFixed(2)}`
+          );
+          for (const closure of maintain.closed) {
+            for (const [uid, shares] of Object.entries(closure.underwriterShares ?? {})) {
+              const td = shares?.threadDerived ?? 0;
+              if (Math.abs(td) <= 1e-9) continue;
+              // Find the user's open threads to spread the delta over.
+              const userThreads = (workingTtRunning.threads ?? []).filter(
+                (t) => !t.closed && t.ownerId === uid && t.principal > 1e-9
+              );
+              if (userThreads.length === 0) continue;
+              const totalPrincipal = userThreads.reduce((s, t) => s + t.principal, 0);
+              if (totalPrincipal <= 0) continue;
+              for (const t of userThreads) {
+                const portion = td * (t.principal / totalPrincipal);
+                if (Math.abs(portion) <= 1e-9) continue;
+                if (portion > 0) {
+                  const grown = growThread({
+                    floatsState: workingTtRunning,
+                    threadId: t.id,
+                    gain: portion,
+                  });
+                  workingTtRunning = grown.floatsState;
+                  for (const [eventId, add] of Object.entries(grown.insuranceLayerAdds ?? {})) {
+                    if (Math.abs(add) <= 1e-9) continue;
+                    if (!insurerAddsByMarket[eventId]) insurerAddsByMarket[eventId] = {};
+                    insurerAddsByMarket[eventId][uid] =
+                      (insurerAddsByMarket[eventId][uid] ?? 0) + add;
+                  }
+                } else {
+                  const dmg = damageThread({
+                    floatsState: workingTtRunning,
+                    threadId: t.id,
+                    delta: -portion,
+                  });
+                  workingTtRunning = dmg.floatsState;
+                  for (const [eventId, cut] of Object.entries(dmg.insuranceLayerDeltas ?? {})) {
+                    if (Math.abs(cut) <= 1e-9) continue;
+                    if (!insurerAddsByMarket[eventId]) insurerAddsByMarket[eventId] = {};
+                    insurerAddsByMarket[eventId][uid] =
+                      (insurerAddsByMarket[eventId][uid] ?? 0) - cut;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
 
       // -----------------------------------------------------------------
       // Apply thread-side insurer stake adjustments to the insurance

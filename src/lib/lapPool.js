@@ -223,18 +223,22 @@ export function adjustThreadDerived({ state, uid, delta }) {
 //                             same auction tick
 //   openPrice     — current price (used as the absorbed-contract's open)
 //   currentEpoch
+//   rebateBudget  — REQUIRED real-money funding cap. The caller (the
+//                   epoch loop) decides how much of the per-tick stability
+//                   fee the pool may draw on; absorption stops once the
+//                   accumulated tip income would exceed this budget. This
+//                   is the conservation discipline — no rebate without a
+//                   matching debit on the protocol fee ledger.
 //
 // Capacity gate: total active notional after absorption stays ≤
 // poolStake × BBOOK_MAX_NOTIONAL_RATIO. If a particular bid would
 // breach, it's skipped and stays unmatched.
 //
-// Per absorbed contract, the pool earns the entropy-bonus tip:
-//   tipReceived = bid.tip_tiers[0].tip × entMult(fillLev) × bid.base_margin
-// This is added to cumulativeRebateIncome and distributed pro-rata to
-// LP stakes in the apply phase (the loop calls distributeRebate).
-//
 // Returns:
-//   { state, absorbedContracts, totalRebate }
+//   { state, absorbedContracts, totalRebate, rebateRequested }
+//   - totalRebate   = funded rebate (≤ rebateBudget)
+//   - rebateRequested = what would have been earned with infinite budget
+//                       (useful telemetry for tuning the budget)
 export function absorbImbalance({
   state,
   unmatchedLongs = [],
@@ -243,18 +247,19 @@ export function absorbImbalance({
   bucketLevs = [],
   openPrice,
   currentEpoch = 0,
+  rebateBudget = 0,
 }) {
   if (
     (unmatchedLongs.length === 0 && unmatchedShorts.length === 0) ||
     !Number.isFinite(openPrice) ||
     openPrice <= 0
   ) {
-    return { state, absorbedContracts: [], totalRebate: 0 };
+    return { state, absorbedContracts: [], totalRebate: 0, rebateRequested: 0 };
   }
 
   const stake = poolStake(state);
   if (stake <= 0) {
-    return { state, absorbedContracts: [], totalRebate: 0 };
+    return { state, absorbedContracts: [], totalRebate: 0, rebateRequested: 0 };
   }
 
   // The pool takes the OPPOSITE side of the surplus.
@@ -264,6 +269,8 @@ export function absorbImbalance({
   let workingState = state;
   const absorbedContracts = [];
   let totalRebate = 0;
+  let rebateRequested = 0;
+  const budget = Number.isFinite(rebateBudget) && rebateBudget > 0 ? rebateBudget : 0;
 
   for (const bid of surplusBids) {
     const margin = bid.base_margin ?? bid.margin ?? 0;
@@ -281,8 +288,17 @@ export function absorbImbalance({
     // = 1 if weights aren't supplied.
     const entMult = lookupEntropyMult(leverage, normWeights, bucketLevs);
     const tipRate = (bid.tip_tiers?.[0]?.tip ?? 0.02) * entMult;
-    const tipReceived = margin * tipRate;
-    totalRebate += tipReceived;
+    const tipForBid = margin * tipRate;
+    rebateRequested += tipForBid;
+
+    // Funding gate. Without budget the pool would synthesize income
+    // out of nothing; with budget exhausted we stop absorbing rather
+    // than absorb-without-rebate (the rebate is the whole reason to
+    // take the position).
+    if (totalRebate + tipForBid > budget + 1e-9) {
+      break;
+    }
+    totalRebate += tipForBid;
 
     const contract = {
       id: _uid("LAP-ABS"),
@@ -293,19 +309,19 @@ export function absorbImbalance({
       margin,
       openPrice,
       openedAtEpoch: currentEpoch,
-      tipReceived,
+      tipReceived: tipForBid,
     };
 
     workingState = {
       ...workingState,
       activeAbsorbed: [...(workingState.activeAbsorbed ?? []), contract],
       contractCount: (workingState.contractCount ?? 0) + 1,
-      cumulativeRebateIncome: (workingState.cumulativeRebateIncome ?? 0) + tipReceived,
+      cumulativeRebateIncome: (workingState.cumulativeRebateIncome ?? 0) + tipForBid,
     };
     absorbedContracts.push(contract);
   }
 
-  return { state: workingState, absorbedContracts, totalRebate };
+  return { state: workingState, absorbedContracts, totalRebate, rebateRequested };
 }
 
 // Distribute a tip-rebate income to LPs pro-rata to their total stake.
@@ -388,6 +404,66 @@ export function markToMarket({ state, pricesByPair }) {
     out.totalUnrealizedPoolPnl += poolPnl;
   }
   return out;
+}
+
+// Per-tick maintenance pass. Closes any absorbed contract that has
+// aged past `maxHoldEpochs` at the current per-pair price. Bounds
+// directional exposure: even if opposite-side flow never returns, the
+// pool's positions unwind within a known window.
+//
+// Returns:
+//   { state, closed: [{ contract, poolPnl, underwriterShares, reason }],
+//     totalRealizedPnl }
+//
+// Each entry's `underwriterShares` mirrors `closeAbsorbed`'s shape so
+// the caller can run damageThread / growThread for thread-derived
+// portions in lockstep with the rest of the protocol.
+export function maintainAbsorbed({
+  state,
+  pricesByPair = {},
+  currentEpoch = 0,
+  maxHoldEpochs,
+}) {
+  const contracts = state?.activeAbsorbed ?? [];
+  if (contracts.length === 0) {
+    return { state, closed: [], totalRealizedPnl: 0 };
+  }
+
+  const hold = Number.isFinite(maxHoldEpochs) && maxHoldEpochs > 0 ? maxHoldEpochs : Infinity;
+
+  let workingState = state;
+  const closed = [];
+  let totalRealizedPnl = 0;
+
+  // Iterate over a snapshot so closeAbsorbed can mutate workingState's
+  // activeAbsorbed array without invalidating the loop.
+  const snapshot = contracts.map((c) => ({
+    id: c.id,
+    pairKey: c.pairKey,
+    age: currentEpoch - (c.openedAtEpoch ?? currentEpoch),
+  }));
+
+  for (const { id, pairKey, age } of snapshot) {
+    if (age < hold) continue;
+
+    const price = pricesByPair?.[pairKey];
+    if (!Number.isFinite(price) || price <= 0) continue;
+
+    const original = contracts.find((c) => c.id === id);
+    const r = closeAbsorbed({ state: workingState, contractId: id, currentPrice: price });
+    if (!r.ok) continue;
+
+    workingState = r.state;
+    totalRealizedPnl += r.poolPnl;
+    closed.push({
+      contract: original,
+      poolPnl: r.poolPnl,
+      underwriterShares: r.underwriterShares ?? {},
+      reason: "aged",
+    });
+  }
+
+  return { state: workingState, closed, totalRealizedPnl };
 }
 
 // Close an absorbed contract — distribute realised P&L to LPs.

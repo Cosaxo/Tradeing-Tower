@@ -85,8 +85,8 @@ import { MetricsPanel } from "./components/MetricsPanel.jsx";
 import { PeersPanel } from "./components/PeersPanel.jsx";
 import { FloatsDesk } from "./components/FloatsDesk.jsx";
 import { InsuranceDesk } from "./components/InsuranceDesk.jsx";
-import { BBookDesk } from "./components/BBookDesk.jsx";
-import { LapPoolDesk } from "./components/LapPoolDesk.jsx";
+import { Tier3Desk } from "./components/Tier3Desk.jsx";
+import { InternalsTab } from "./components/InternalsTab.jsx";
 import { LapPayoffCurve } from "./components/LapPayoffCurve.jsx";
 import { GettingStarted } from "./components/GettingStarted.jsx";
 import { TradeHistory } from "./components/TradeHistory.jsx";
@@ -145,7 +145,12 @@ const INITIAL_PLAYER = {
   tags: initTags(), // §10.1 — capital accumulates roles via tags, not transfers
 };
 
-const TABS = ["Chart", "Auction", "Insurance", "Credit", "LAP Pool", "B-book", "Spend", "Stress", "Markets", "History", "Log"];
+// Tab list — restructured around the protocol's 5-tier ladder (UI
+// roadmap Phase 1). Each tab is one tier or one auxiliary surface;
+// debug / power-user content lives in "Internals". Stale persisted
+// values from the previous tab list (e.g. "Chart", "B-book", "Log")
+// fall back to TABS[0] on load — see `safeActiveTab` below.
+const TABS = ["Trade", "Insurance", "Layer 3", "FLOAT", "Wallet-share", "Internals"];
 
 export default function App() {
   // pairStates is persisted so epoch counters, price history, and
@@ -160,7 +165,12 @@ export default function App() {
   const [logs, setLogs] = useState([]);
   const [running, setRunning] = useState(false);
   const [speed, setSpeed] = usePersistentState("tt.speed", 1);
-  const [activeTab, setActiveTab] = useState("Chart");
+  // activeTab default = first new tab. If a stale value from the
+  // previous (11-tab) layout ever lands here via remembered state,
+  // the safeActiveTab helper below normalises it.
+  const [activeTab, setActiveTabRaw] = useState(TABS[0]);
+  const safeActiveTab = TABS.includes(activeTab) ? activeTab : TABS[0];
+  const setActiveTab = (t) => setActiveTabRaw(TABS.includes(t) ? t : TABS[0]);
   // Easy mode is the default for new users — single screen with one
   // "Convert $ → FLOAT" button, the four-tier ladder, and a yield number.
   // Power users can switch to advanced (the multi-tab desk view) at
@@ -1406,16 +1416,12 @@ export default function App() {
 
   useKeyboardShortcuts({
     Space: () => setRunning((r) => !r),
-    "1": () => setActiveTab("Chart"),
-    "2": () => setActiveTab("Auction"),
-    "3": () => setActiveTab("Insurance"),
-    "4": () => setActiveTab("Credit"),
-    "5": () => setActiveTab("LAP Pool"),
-    "6": () => setActiveTab("B-book"),
-    "7": () => setActiveTab("Spend"),
-    "8": () => setActiveTab("Stress"),
-    "9": () => setActiveTab("Markets"),
-    "0": () => setActiveTab("Log"),
+    "1": () => setActiveTab("Trade"),
+    "2": () => setActiveTab("Insurance"),
+    "3": () => setActiveTab("Layer 3"),
+    "4": () => setActiveTab("FLOAT"),
+    "5": () => setActiveTab("Wallet-share"),
+    "6": () => setActiveTab("Internals"),
     "+": () => setSpeed((s) => Math.min(5, s * 2)),
     "-": () => setSpeed((s) => Math.max(0.5, s / 2)),
     r: () => handleResetSession(),
@@ -1463,7 +1469,7 @@ export default function App() {
                 : "text-gray-400 border-gray-800 bg-gray-900"
             }
             title="Allocation diversification → mint capacity factor."
-            onClick={() => setActiveTab("Credit")}
+            onClick={() => setActiveTab("FLOAT")}
           />
           <HeaderChip
             label="Positions"
@@ -1474,7 +1480,7 @@ export default function App() {
                 : "text-gray-500 border-gray-800 bg-gray-900"
             }
             title="Open LAPs (single + paired)."
-            onClick={() => setActiveTab("Credit")}
+            onClick={() => setActiveTab("Trade")}
           />
           <HeaderChip
             label="FLOAT"
@@ -1485,7 +1491,7 @@ export default function App() {
                 : "text-gray-500 border-gray-800 bg-gray-900"
             }
             title={`Float wallet · outstanding mint $${(floatsState?.threads ?? []).filter((t) => !t.closed && t.ownerId === player.id).reduce((s, t) => s + t.floatFace, 0).toFixed(0)} · queue ${(floatsState?.redemptionQueue ?? []).filter((q) => q.userId === player.id).length}`}
-            onClick={() => setActiveTab("Insurance")}
+            onClick={() => setActiveTab("FLOAT")}
           />
         </div>
         <div className="ml-auto flex items-center gap-3">
@@ -1624,7 +1630,7 @@ export default function App() {
           <>
           <div className="flex gap-1 px-3 py-1 border-b border-gray-800 flex-wrap">
             {TABS.map((t) => {
-              const isActive = activeTab === t;
+              const isActive = safeActiveTab === t;
               return (
                 <button
                   key={t}
@@ -1644,18 +1650,21 @@ export default function App() {
           </div>
 
           <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-3">
-            {(activeTab === "Insurance" || activeTab === "Credit" || activeTab === "Chart") && (
+            {(safeActiveTab === "Trade" || safeActiveTab === "Insurance" || safeActiveTab === "FLOAT") && (
               <GettingStarted
                 hasAllocation={poolDepositAmount > 0}
                 hasPosition={openPositions.length > 0}
                 hasMinted={totalThreadPrincipal(floatsState, player.id) > 0}
                 hasMerchantSent={(floatsState?.merchantBalance ?? 0) > 0}
-                activeTab={activeTab}
+                activeTab={safeActiveTab}
                 onJump={(t) => setActiveTab(t)}
               />
             )}
 
-            {activeTab === "Chart" && (
+            {/* Trade — auction context + active position management. The
+                old "Chart" and "Auction" tabs collapse into one view here,
+                joined by the position desk that used to live under "Credit". */}
+            {safeActiveTab === "Trade" && (
               <>
                 <PriceChart
                   prices={activePS?.prices ?? []}
@@ -1665,41 +1674,7 @@ export default function App() {
                   events={activePS?.events ?? []}
                   currentEpoch={activePS?.epochIndex ?? 0}
                 />
-                <MetricsPanel equityHistory={equityHistory} />
-                <RoleLedger ledger={roleLedger} playerMargin={player.margin ?? 0} />
-                <LeverageCurve
-                  longCurve={activePS?.auctionResult?.longCurve ?? []}
-                  shortCurve={activePS?.auctionResult?.shortCurve ?? []}
-                  cap={cap}
-                />
-                {routerSuggestions.length > 0 && (
-                  <div className="rounded border border-gray-800 bg-gray-900 p-2">
-                    <div className="text-[10px] font-mono text-gray-500 mb-1">
-                      Yield Router Suggestions (click to apply)
-                    </div>
-                    <div className="flex flex-col gap-1">
-                      {routerSuggestions.slice(0, 4).map((s, i) => (
-                        <button
-                          key={i}
-                          onClick={() => applyRouterSuggestion(s)}
-                          className="flex items-center justify-between text-[10px] font-mono rounded px-2 py-1 hover:bg-indigo-950 border border-transparent hover:border-indigo-700 transition-colors text-left"
-                        >
-                          <span className="text-gray-300">{s.pairKey}</span>
-                          <span className="text-indigo-400">{s.action}</span>
-                          <span className="text-gray-500 truncate max-w-48">
-                            {s.reason}
-                          </span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </>
-            )}
-
-            {activeTab === "Auction" && (
-              <div className="flex flex-col gap-2 font-mono text-xs">
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-2 gap-2 font-mono text-xs">
                   <div className="rounded border border-gray-800 bg-gray-900 p-2">
                     <div className="text-[10px] text-gray-500 mb-1">Auction Stats</div>
                     <div>Matches: {activePS?.auctionResult?.totalMatched ?? 0}</div>
@@ -1712,11 +1687,16 @@ export default function App() {
                     <div>Alpha: {(activePS?.alpha ?? 0.5).toFixed(3)}</div>
                   </div>
                   <div className="rounded border border-gray-800 bg-gray-900 p-2">
-                    <div className="text-[10px] text-gray-500 mb-1">Insurance Allocation</div>
-                    <div>Total stake: ${allocStats.totalStake.toFixed(0)}</div>
-                    <div>Markets: {allocStats.numMarkets}</div>
-                    <div>HHI: {allocStats.hhi.toFixed(2)}</div>
-                    <div>Max weight: {(allocStats.maxWeight * 100).toFixed(0)}%</div>
+                    <div className="text-[10px] text-gray-500 mb-1">Recent Matches</div>
+                    {(activePS?.auctionResult?.matched ?? []).slice(0, 6).map((m, i) => (
+                      <div key={i} className="flex gap-2 text-[10px]">
+                        <span className="text-emerald-400 truncate max-w-16">{m.longId}</span>
+                        <span className="text-gray-600">↔</span>
+                        <span className="text-red-400 truncate max-w-16">{m.shortId}</span>
+                        <span className="text-gray-400">{m.leverage.toFixed(1)}×</span>
+                        <span className="text-indigo-400">${m.margin}</span>
+                      </div>
+                    ))}
                   </div>
                 </div>
                 <LeverageCurve
@@ -1724,51 +1704,6 @@ export default function App() {
                   shortCurve={activePS?.auctionResult?.shortCurve ?? []}
                   cap={cap}
                 />
-                <PeersPanel
-                  peers={flowAdapterRef.current?.getSnapshot?.() ?? []}
-                  peerCount={peerCount}
-                  roomId={flowAdapterRef.current?.getRoomId?.() ?? "default"}
-                />
-                <div className="rounded border border-gray-800 bg-gray-900 p-2">
-                  <div className="text-[10px] text-gray-500 mb-1">Recent Matches</div>
-                  {(activePS?.auctionResult?.matched ?? []).slice(0, 8).map((m, i) => (
-                    <div key={i} className="flex gap-3 text-[10px]">
-                      <span className="text-emerald-400">{m.longId}</span>
-                      <span className="text-gray-600">↔</span>
-                      <span className="text-red-400">{m.shortId}</span>
-                      <span className="text-gray-400">{m.leverage.toFixed(2)}×</span>
-                      <span className="text-indigo-400">${m.margin}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {activeTab === "Insurance" && (
-              <>
-                <InsuranceDesk
-                  insuranceState={insuranceState}
-                  playerId={player.id}
-                  freeMarginToAllocate={freeMargin(player.margin, player.tags)}
-                  poolLtv={poolLtvInfo}
-                  onSetAllocation={handleSetAllocation}
-                />
-                <FloatsDesk
-                  floatsState={floatsState}
-                  playerId={player.id}
-                  freeMargin={freeMargin(player.margin, player.tags)}
-                  threadPrincipal={totalThreadPrincipal(floatsState, player.id)}
-                  onMint={handleMintFloats}
-                  onSendToMerchant={handleSendToMerchant}
-                  onRedeem={handleRedeem}
-                  onCancelRedemption={handleCancelRedemption}
-                />
-              </>
-            )}
-
-            {activeTab === "Credit" && (
-              <>
-                <CreditDesk poolLtv={poolLtvInfo} tier3Gate={tier3Gate} />
                 <PortfolioStructurer
                   openPositions={openPositions}
                   creditEligibility={creditEligibility}
@@ -1799,32 +1734,77 @@ export default function App() {
                     ))}
                   </div>
                 )}
+                {routerSuggestions.length > 0 && (
+                  <div className="rounded border border-gray-800 bg-gray-900 p-2">
+                    <div className="text-[10px] font-mono text-gray-500 mb-1">
+                      Yield Router Suggestions (click to apply)
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      {routerSuggestions.slice(0, 4).map((s, i) => (
+                        <button
+                          key={i}
+                          onClick={() => applyRouterSuggestion(s)}
+                          className="flex items-center justify-between text-[10px] font-mono rounded px-2 py-1 hover:bg-indigo-950 border border-transparent hover:border-indigo-700 transition-colors text-left"
+                        >
+                          <span className="text-gray-300">{s.pairKey}</span>
+                          <span className="text-indigo-400">{s.action}</span>
+                          <span className="text-gray-500 truncate max-w-48">
+                            {s.reason}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </>
             )}
 
-            {activeTab === "LAP Pool" && (
-              <LapPoolDesk
-                lapPoolState={lapPoolState}
+            {/* Insurance (Tier 2) — InsuranceDesk only. FloatsDesk no
+                longer lives here; it's on the FLOAT tab where it belongs. */}
+            {safeActiveTab === "Insurance" && (
+              <InsuranceDesk
+                insuranceState={insuranceState}
                 playerId={player.id}
-                freeMargin={freeMargin(player.margin, player.tags)}
-                currentEpoch={activePS?.epochIndex ?? 0}
-                onDeposit={handleLapPoolDeposit}
-                onWithdraw={handleLapPoolWithdraw}
+                freeMarginToAllocate={freeMargin(player.margin, player.tags)}
+                poolLtv={poolLtvInfo}
+                onSetAllocation={handleSetAllocation}
               />
             )}
 
-            {activeTab === "B-book" && (
-              <BBookDesk
+            {/* Layer 3 (Tier 3) — combined LAP pool + B-book pool view. */}
+            {safeActiveTab === "Layer 3" && (
+              <Tier3Desk
+                lapPoolState={lapPoolState}
                 bBookState={bBookState}
                 playerId={player.id}
                 freeMargin={freeMargin(player.margin, player.tags)}
                 currentEpoch={activePS?.epochIndex ?? 0}
-                onDeposit={handleBBookDeposit}
-                onWithdraw={handleBBookWithdraw}
+                onLapPoolDeposit={handleLapPoolDeposit}
+                onLapPoolWithdraw={handleLapPoolWithdraw}
+                onBBookDeposit={handleBBookDeposit}
+                onBBookWithdraw={handleBBookWithdraw}
               />
             )}
 
-            {activeTab === "Spend" && (
+            {/* FLOAT (Tier 4) — mint flow + credit/LTV context. */}
+            {safeActiveTab === "FLOAT" && (
+              <>
+                <CreditDesk poolLtv={poolLtvInfo} tier3Gate={tier3Gate} />
+                <FloatsDesk
+                  floatsState={floatsState}
+                  playerId={player.id}
+                  freeMargin={freeMargin(player.margin, player.tags)}
+                  threadPrincipal={totalThreadPrincipal(floatsState, player.id)}
+                  onMint={handleMintFloats}
+                  onSendToMerchant={handleSendToMerchant}
+                  onRedeem={handleRedeem}
+                  onCancelRedemption={handleCancelRedemption}
+                />
+              </>
+            )}
+
+            {/* Wallet-share (Tier 5) — spend-commitment auctions. */}
+            {safeActiveTab === "Wallet-share" && (
               <SpendCommitmentDesk
                 commitmentState={commitmentState}
                 userId={player.id}
@@ -1837,41 +1817,29 @@ export default function App() {
               />
             )}
 
-            {activeTab === "Stress" && (
-              <>
-                <StressPanel
-                  solvency={solvency}
-                  shockResults={shockResults}
-                  onRunShock={handleRunShock}
-                />
-                <StressHarnessPanel />
-              </>
-            )}
-
-            {activeTab === "Markets" && (
-              <>
-                <RegimeTimeline
-                  history={activePS?.regimeHistory ?? []}
-                  currentRegime={activePS?.regime}
-                  currentEpoch={activePS?.epochIndex ?? 0}
-                />
-                <FeeFlow ledger={activePS?.feeLedger} />
-                <CorrelationHeatmap
-                  corrMap={activePS?.correlationMap ?? {}}
-                  pairs={ACTIVE_PAIRS}
-                />
-              </>
-            )}
-
-            {activeTab === "History" && <TradeHistory trades={tradeLog} />}
-
-            {activeTab === "Log" && (
-              <div
-                className="rounded border border-gray-800 bg-gray-900 flex-1"
-                style={{ minHeight: "400px" }}
-              >
-                <LogicView logs={logs} />
-              </div>
+            {/* Internals — power-user / debug surfaces. Phase 3 of the
+                roadmap will turn this into a slide-out drawer; today
+                it's a single tab so the main bar shrinks immediately. */}
+            {safeActiveTab === "Internals" && (
+              <InternalsTab
+                solvency={solvency}
+                shockResults={shockResults}
+                onRunShock={handleRunShock}
+                regimeHistory={activePS?.regimeHistory ?? []}
+                currentRegime={activePS?.regime}
+                currentEpoch={activePS?.epochIndex ?? 0}
+                feeLedger={activePS?.feeLedger}
+                correlationMap={activePS?.correlationMap ?? {}}
+                pairs={ACTIVE_PAIRS}
+                trades={tradeLog}
+                logs={logs}
+                equityHistory={equityHistory}
+                roleLedger={roleLedger}
+                playerMargin={player.margin ?? 0}
+                peers={flowAdapterRef.current?.getSnapshot?.() ?? []}
+                peerCount={peerCount}
+                roomId={flowAdapterRef.current?.getRoomId?.() ?? "default"}
+              />
             )}
           </div>
           </>

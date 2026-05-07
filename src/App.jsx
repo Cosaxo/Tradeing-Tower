@@ -128,11 +128,12 @@ const INITIAL_PLAYER = {
 };
 
 // Tab list — restructured around the protocol's 5-tier ladder (UI
-// roadmap Phase 1). Each tab is one tier or one auxiliary surface;
-// debug / power-user content lives in "Internals". Stale persisted
-// values from the previous tab list (e.g. "Chart", "B-book", "Log")
-// fall back to TABS[0] on load — see `safeActiveTab` below.
-const TABS = ["Trade", "Insurance", "Layer 3", "FLOAT", "Wallet-share", "Internals"];
+// roadmap Phase 1). Each tab is one tier or one auxiliary surface.
+// Debug / power-user content lives in a slide-out drawer (UI roadmap
+// Phase 3) instead of taking a tab slot — see `internalsOpen` below.
+// Stale persisted values from previous tab lists (e.g. "Chart",
+// "B-book", "Internals") fall back to TABS[0] via `safeActiveTab`.
+const TABS = ["Trade", "Insurance", "Layer 3", "FLOAT", "Wallet-share"];
 
 export default function App() {
   // pairStates is persisted so epoch counters, price history, and
@@ -159,6 +160,11 @@ export default function App() {
   // any time via the header toggle.
   const [easyMode, setEasyMode] = usePersistentState("tt.easyMode", true);
   const [mobileNav, setMobileNav] = useState(null); // 'left' | 'right' | null
+  // Internals drawer (UI roadmap Phase 3) — power-user / debug
+  // surfaces (Stress, Markets, History, Log, Performance, Peers) live
+  // in a slide-out drawer instead of a tab. Default closed; toggled
+  // via the header button.
+  const [internalsOpen, setInternalsOpen] = useState(false);
   const [shockResults, setShockResults] = useState(null);
   const [openPositions, setOpenPositions, clearPositions] = usePersistentState("tt.positions", []);
   const [equityHistory, setEquityHistory, clearEquity] = usePersistentState(
@@ -1403,7 +1409,8 @@ export default function App() {
     "3": () => setActiveTab("Layer 3"),
     "4": () => setActiveTab("FLOAT"),
     "5": () => setActiveTab("Wallet-share"),
-    "6": () => setActiveTab("Internals"),
+    i: () => setInternalsOpen((v) => !v), // Phase 3: drawer toggle
+    Escape: () => setInternalsOpen(false), // Phase 3: close drawer on Esc
     "+": () => setSpeed((s) => Math.min(5, s * 2)),
     "-": () => setSpeed((s) => Math.max(0.5, s / 2)),
     r: () => handleResetSession(),
@@ -1457,6 +1464,19 @@ export default function App() {
           </button>
           <NotificationHistory history={history} onClear={clearHistory} />
           <button
+            onClick={() => setInternalsOpen((v) => !v)}
+            className={cx(
+              "text-xs font-mono px-2 py-1 rounded border transition-colors",
+              internalsOpen
+                ? "border-amber-700 bg-amber-950/60 text-amber-300 hover:bg-amber-900/60"
+                : "border-gray-700 bg-gray-800 text-gray-400 hover:text-gray-200 hover:bg-gray-700 hover:border-gray-500"
+            )}
+            title="Open internals drawer — Stress, Markets, History, Log, Performance, Peers (I)"
+            aria-label="Toggle internals drawer"
+          >
+            internals
+          </button>
+          <button
             onClick={handleResetSession}
             className="text-xs font-mono px-2 py-1 rounded border border-gray-700 bg-gray-800 text-gray-400 hover:text-gray-200 hover:bg-gray-700 hover:border-gray-500 transition-colors"
             title="Reset session (R)"
@@ -1483,7 +1503,7 @@ export default function App() {
             σ={((activePS?.realizedSigma ?? 0.02) * 100).toFixed(2)}%
           </span>
           <span className="text-[9px] font-mono text-gray-700 hidden lg:inline">
-            space=run · 1-9=tab · +/-=speed · r=reset
+            space=run · 1-5=tab · i=internals · +/-=speed · r=reset
           </span>
         </div>
       </header>
@@ -1760,10 +1780,50 @@ export default function App() {
               />
             )}
 
-            {/* Internals — power-user / debug surfaces. Phase 3 of the
-                roadmap will turn this into a slide-out drawer; today
-                it's a single tab so the main bar shrinks immediately. */}
-            {safeActiveTab === "Internals" && (
+            {/* Internals moved out of the tab list (UI roadmap Phase 3).
+                The slide-out drawer rendered below `</main>` shows the
+                same content, toggled via the header button or `i` key. */}
+          </div>
+          </>
+          )}
+        </main>
+
+        {/* The right sidebar (PlayerPanel) was retired in UI roadmap
+            Phase 2. Wallet info moved to the always-visible WalletStrip
+            at the top; auction bid configuration moved into the Trade
+            tab as AuctionBidPanel where it actually belongs. */}
+      </div>
+
+      {/* Internals drawer (UI roadmap Phase 3). Slides in from the right.
+          Backdrop click + Escape close. Holds the power-user / debug
+          surfaces previously scattered as peer-level tabs. */}
+      {internalsOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/60"
+          onClick={() => setInternalsOpen(false)}
+          role="dialog"
+          aria-label="Internals drawer"
+        >
+          <aside
+            className="absolute right-0 top-0 h-full w-full max-w-2xl bg-gray-950 border-l border-gray-800 overflow-y-auto flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="sticky top-0 z-10 flex items-center justify-between px-3 py-2 border-b border-gray-800 bg-gray-950">
+              <span className="text-xs font-mono text-amber-300 flex items-center gap-2">
+                <span>⚙</span>
+                Internals
+                <span className="text-gray-600">·</span>
+                <span className="text-gray-500">power-user diagnostics</span>
+              </span>
+              <button
+                onClick={() => setInternalsOpen(false)}
+                className="text-xs font-mono text-gray-500 hover:text-gray-200 px-2 py-0.5 rounded hover:bg-gray-800 transition-colors"
+                aria-label="Close internals drawer"
+              >
+                close ×
+              </button>
+            </div>
+            <div className="p-3">
               <InternalsTab
                 solvency={solvency}
                 shockResults={shockResults}
@@ -1783,17 +1843,10 @@ export default function App() {
                 peerCount={peerCount}
                 roomId={flowAdapterRef.current?.getRoomId?.() ?? "default"}
               />
-            )}
-          </div>
-          </>
-          )}
-        </main>
-
-        {/* The right sidebar (PlayerPanel) was retired in UI roadmap
-            Phase 2. Wallet info moved to the always-visible WalletStrip
-            at the top; auction bid configuration moved into the Trade
-            tab as AuctionBidPanel where it actually belongs. */}
-      </div>
+            </div>
+          </aside>
+        </div>
+      )}
 
       {/* Toasts */}
       <div className="fixed bottom-4 right-4 flex flex-col gap-1 z-50">

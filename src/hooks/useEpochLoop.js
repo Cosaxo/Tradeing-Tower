@@ -23,6 +23,7 @@ import {
   submitRedemption as submitFloatsRedemption,
 } from "../lib/floats.js";
 import { adjustThreadDerived } from "../lib/bBookPool.js";
+import { absorbImbalance, distributeRebate } from "../lib/lapPool.js";
 import { detectTriggeredEvents } from "../lib/insuranceEvents.js";
 import { settleMarketTick, withdrawInsurer, postInsurer } from "../lib/insuranceMarket.js";
 import { settleReinsuranceTick } from "../lib/reinsurance.js";
@@ -44,8 +45,10 @@ export function useEpochLoop({
   setFloatsState,       // React setter for FLOAT state
   insuranceState = null, // global insurance markets + reinsurance + allocations
   setInsuranceState,     // React setter for insuranceState
-  bBookState = null, // global B-book pool state
-  setBBookState,    // React setter for bBookState (thread layer-3 lives here)
+  bBookState = null, // global B-book pool state (Tier-3b — opt-in bookie)
+  setBBookState,    // React setter for bBookState
+  lapPoolState = null, // global LAP pool state (Tier-3a default — passive LP)
+  setLapPoolState,  // React setter for lapPoolState
   setLogs,          // (fn) => void
   addToast,         // (msg, type) => void
   running,          // boolean
@@ -77,6 +80,8 @@ export function useEpochLoop({
   insuranceStateRef.current = insuranceState;
   const bBookStateRef = useRef(bBookState);
   bBookStateRef.current = bBookState;
+  const lapPoolStateRef = useRef(lapPoolState);
+  lapPoolStateRef.current = lapPoolState;
 
   // Helper: pick a representative epoch from the pair-states object.
   // Used by the FLOAT redemption cycle which is global, not per-pair.
@@ -165,6 +170,16 @@ export function useEpochLoop({
       // the global blocks below also mutate it. We persist the final
       // version into sideEffects at the apply phase.
       let workingTtRunning = floatsStateRef.current;
+      // Working LAP pool state — accumulates absorbed contracts + rebate
+      // income across all pairs in this tick. The pool absorbs each
+      // pair's auction imbalance after runAuction; rebate flows to LPs
+      // pro-rata; absorbed positions are mark-to-market closed in the
+      // next tick (or held until manually closed). Persisted at the
+      // apply phase.
+      let workingLapPool = lapPoolStateRef.current;
+      // Aggregate rebate-share to player's voluntary stake — flushed to
+      // wallet margin at apply phase so users see the income immediately.
+      let lapRebateToPlayerWallet = 0;
       // Aggregated insurer-stake adds resulting from thread growth this
       // tick. Applied to insuranceState before the global insurance
       // settlement runs so premium streams account for the new size.
@@ -260,6 +275,46 @@ export function useEpochLoop({
           prevSmoothFills,
           metaParams
         );
+
+        // LAP pool absorbs the auction's imbalance (Path A — the
+        // default Tier-3 economic role). Absorbed flow earns the
+        // entropy-rebate tip; the rebate is distributed pro-rata to
+        // LP stakes immediately. Directional positions accumulate as
+        // active contracts on the pool; they're mark-to-market and
+        // closed elsewhere (or remain open across ticks).
+        if (workingLapPool && (workingLapPool.totalStake ?? 0) > 0) {
+          const priceNew = prices[prices.length - 1];
+          const absorb = absorbImbalance({
+            state: workingLapPool,
+            unmatchedLongs: auctionResult.unmatchedLongs,
+            unmatchedShorts: auctionResult.unmatchedShorts,
+            normWeights: auctionResult.normWeights,
+            bucketLevs: auctionResult.bucketLevs,
+            openPrice: priceNew,
+            currentEpoch: epochIndex,
+          });
+          workingLapPool = absorb.state;
+          if (absorb.totalRebate > 0) {
+            const dist = distributeRebate({
+              state: workingLapPool,
+              totalRebate: absorb.totalRebate,
+            });
+            workingLapPool = dist.state;
+            // Voluntary share for the local player flushes to wallet
+            // margin (visible income); thread-derived share already
+            // compounded into the user's threadDerivedStake by the
+            // distributeRebate stake-mutation logic.
+            const playerShare = dist.lpShares?.[player?.id];
+            if (playerShare?.voluntary > 0) {
+              lapRebateToPlayerWallet += playerShare.voluntary;
+            }
+          }
+          if (absorb.absorbedContracts.length > 0) {
+            logs.push(
+              `[LAP-POOL] absorbed ${absorb.absorbedContracts.length} unmatched bid(s) on ${pk} · rebate $${absorb.totalRebate.toFixed(2)}`
+            );
+          }
+        }
 
         // Settle dominant pool.
         const longMargin = auctionResult.matched
@@ -512,6 +567,15 @@ export function useEpochLoop({
       if (workingTtRunning !== floatsStateRef.current) {
         floatsStateRef.current = workingTtRunning;
         sideEffects.nextTtState = workingTtRunning;
+      }
+      // Persist the working LAP pool state and flush the player's
+      // voluntary-share rebate to wallet margin.
+      if (workingLapPool !== lapPoolStateRef.current) {
+        lapPoolStateRef.current = workingLapPool;
+        sideEffects.nextLapPoolState = workingLapPool;
+      }
+      if (lapRebateToPlayerWallet > 0) {
+        sideEffects.playerMarginDelta += lapRebateToPlayerWallet;
       }
 
       // -----------------------------------------------------------------
@@ -907,6 +971,10 @@ export function useEpochLoop({
         setBBookState(sideEffects.nextBBookState);
         bBookStateRef.current = sideEffects.nextBBookState;
       }
+      if (sideEffects.nextLapPoolState && setLapPoolState) {
+        setLapPoolState(sideEffects.nextLapPoolState);
+        lapPoolStateRef.current = sideEffects.nextLapPoolState;
+      }
 
       const overrides = sideEffects.playerOverrides;
       const delta = sideEffects.playerMarginDelta;
@@ -977,7 +1045,7 @@ export function useEpochLoop({
         setLogs((prev) => [...prev.slice(-300), ...sideEffects.logs]);
       }
     }
-  }, [setPairStates, player, setPlayer, setLogs, addToast, setRoleLedger, setFloatsState, setInsuranceState, setBBookState, setOpenPositions, flowAdapter]);
+  }, [setPairStates, player, setPlayer, setLogs, addToast, setRoleLedger, setFloatsState, setInsuranceState, setBBookState, setLapPoolState, setOpenPositions, flowAdapter]);
 
   // -------------------------------------------------------------------------
   // Interval management

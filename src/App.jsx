@@ -42,6 +42,11 @@ import {
   closeContract as closeBBookContract,
 } from "./lib/bBookPool.js";
 import {
+  initLapPoolState,
+  adjustThreadDerived as adjustLapPoolThreadDerived,
+} from "./lib/lapPool.js";
+import { MINT_LAP_POOL_SHARE_DEFAULT } from "./constants/system.js";
+import {
   initClassifierState,
   recordClose as recordClassifierClose,
   getUserStats as getClassifierStats,
@@ -182,6 +187,10 @@ export default function App() {
     "tt.bBook",
     initBBookState()
   );
+  const [lapPoolState, setLapPoolState, clearLapPool] = usePersistentState(
+    "tt.lapPool",
+    initLapPoolState()
+  );
   const [classifierState, setClassifierState, clearClassifier] = usePersistentState(
     "tt.classifier",
     initClassifierState()
@@ -264,6 +273,8 @@ export default function App() {
     setInsuranceState,
     bBookState,
     setBBookState,
+    lapPoolState,
+    setLapPoolState,
     setLogs,
     addToast,
     running,
@@ -965,13 +976,28 @@ export default function App() {
       return r.ok ? r.product : p;
     });
 
-    // 4. Layer 3: deposit the principal into the B-book pool as
-    //    thread-derived stake. No lockup — it's gated by the thread
-    //    redemption mechanics (10% cycle cap or express penalty).
+    // 4. Layer 3: split the Tier-3 stake between the LAP pool (passive
+    //    LP — default, safer, lower-yield) and the B-book pool (passive
+    //    bookie — opt-in, higher-yield-but-tail-exposed). Path A
+    //    default is 80/20 in favor of the LAP pool. Both are gated by
+    //    thread redemption mechanics (10% cycle cap or express penalty),
+    //    not by a fixed lockup on the thread-derived portion.
+    const lapShare = MINT_LAP_POOL_SHARE_DEFAULT;
+    const lapAmount = amount * lapShare;
+    const bbookAmount = amount - lapAmount;
+    const adjustedLap = adjustLapPoolThreadDerived({
+      state: lapPoolState,
+      uid: player.id,
+      delta: lapAmount,
+    });
+    if (!adjustedLap.ok) {
+      addToast(`Mint failed: ${adjustedLap.reason}`, "warning");
+      return;
+    }
     const adjusted = adjustThreadDerived({
       state: bBookState,
       uid: player.id,
-      delta: amount,
+      delta: bbookAmount,
     });
     if (!adjusted.ok) {
       addToast(`Mint failed: ${adjusted.reason}`, "warning");
@@ -999,9 +1025,10 @@ export default function App() {
       reinsurance: nextReinsurance,
     });
     setBBookState(adjusted.state);
+    setLapPoolState(adjustedLap.state);
     setPlayer((p) => ({ ...p, tags: newTags }));
     addToast(
-      `Thread opened: $${amount.toFixed(0)} → T-bill + insurance + B-book pool + FLOAT (1 dollar, 4 jobs) · ${(reinsuranceFacePerProduct * 3).toFixed(0)} reinsurance face`,
+      `Thread opened: $${amount.toFixed(0)} → T-bill + insurance + LAP pool ($${lapAmount.toFixed(0)}) + B-book pool ($${bbookAmount.toFixed(0)}) + FLOAT (1 dollar, 4+ jobs) · ${(reinsuranceFacePerProduct * 3).toFixed(0)} reinsurance face`,
       "info"
     );
   }
@@ -1280,6 +1307,7 @@ export default function App() {
     clearFloats();
     clearInsurance();
     clearBBook();
+    clearLapPool();
     clearClassifier();
     clearCommitment();
     clearPairStates();

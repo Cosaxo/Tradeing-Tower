@@ -92,3 +92,17 @@ export const BBOOK_MAX_NOTIONAL_RATIO = 1.5;
 // their deposit. Stops them from fleeing mid-loss. Mirrors the
 // reinsurance lockup design.
 export const BBOOK_LOCKUP_EPOCHS = 100;
+
+// -----------------------------------------------------------------------
+// Tier-3 stake split between LAP pool (passive LP) and B-book pool
+// (passive bookie). Path A default: 80 / 20.
+//
+// LAP pool is the safer, lower-yield passive role — it absorbs
+// auction imbalance and earns entropy-rebate tips. B-book pool is the
+// higher-yield-but-tail-exposed role — it takes the OPPOSITE side of
+// retail flow and earns the difference.
+//
+// Default biases retail toward the safer pool. Power users can tilt
+// the ratio with the slider in the FloatsDesk.
+// -----------------------------------------------------------------------
+export const MINT_LAP_POOL_SHARE_DEFAULT = 0.8;

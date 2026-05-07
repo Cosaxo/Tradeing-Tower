@@ -75,7 +75,7 @@ import { cx } from "./lib/math.js";
 import { InstrumentSelector } from "./components/InstrumentSelector.jsx";
 import { PriceChart } from "./components/PriceChart.jsx";
 import { LeverageCurve } from "./components/LeverageCurve.jsx";
-import { PlayerPanel } from "./components/PlayerPanel.jsx";
+import { AuctionBidPanel } from "./components/AuctionBidPanel.jsx";
 import { PortfolioStructurer } from "./components/PortfolioStructurer.jsx";
 import { CreditDesk } from "./components/CreditDesk.jsx";
 import { StressPanel } from "./components/StressPanel.jsx";
@@ -87,6 +87,7 @@ import { FloatsDesk } from "./components/FloatsDesk.jsx";
 import { InsuranceDesk } from "./components/InsuranceDesk.jsx";
 import { Tier3Desk } from "./components/Tier3Desk.jsx";
 import { InternalsTab } from "./components/InternalsTab.jsx";
+import { WalletStrip } from "./components/WalletStrip.jsx";
 import { LapPayoffCurve } from "./components/LapPayoffCurve.jsx";
 import { GettingStarted } from "./components/GettingStarted.jsx";
 import { TradeHistory } from "./components/TradeHistory.jsx";
@@ -111,25 +112,6 @@ function makeLapId() {
 const INITIAL_PAIR_STATES = Object.fromEntries(
   ACTIVE_PAIRS.map((pk) => [pk, initPairState(pk)])
 );
-
-// Small at-a-glance chip used in the header summary line. Clickable
-// when an `onClick` is supplied; otherwise it's just a static label.
-function HeaderChip({ label, value, color, title, onClick }) {
-  const cls = `text-[10px] font-mono px-2 py-0.5 rounded border ${color} ${onClick ? "cursor-pointer hover:brightness-110" : ""}`;
-  return (
-    <span
-      className={cls}
-      title={title}
-      role={onClick ? "button" : undefined}
-      tabIndex={onClick ? 0 : undefined}
-      onClick={onClick}
-      onKeyDown={onClick ? (e) => (e.key === "Enter" || e.key === " ") && onClick() : undefined}
-    >
-      <span className="text-gray-500 mr-1">{label}</span>
-      {value}
-    </span>
-  );
-}
 
 const INITIAL_PLAYER = {
   id: "You",
@@ -1440,60 +1422,10 @@ export default function App() {
         </button>
         <span className="font-syne text-lg text-indigo-400 tracking-tight">Hyperfloat</span>
 
-        {/* Compact at-a-glance summary: margin / allocated / FLOAT / positions.
-            Each chip is clickable where useful, and titles give detail on hover. */}
-        <div className="flex items-center gap-1 flex-wrap">
-          <HeaderChip
-            label="Margin"
-            value={`$${(player.margin ?? 0).toFixed(0)}`}
-            color="text-gray-200 border-gray-700 bg-gray-900"
-            title="Your free + tagged capital."
-          />
-          <HeaderChip
-            label="Allocated"
-            value={`$${poolDepositAmount.toFixed(0)}`}
-            color={
-              poolDepositAmount > 0
-                ? "text-amber-300 border-amber-900 bg-amber-950/60"
-                : "text-gray-500 border-gray-800 bg-gray-900"
-            }
-            title="Capital committed across insurance markets."
-            onClick={() => setActiveTab("Insurance")}
-          />
-          <HeaderChip
-            label="LTV"
-            value={(poolLtvInfo?.ltv ?? 0).toFixed(2)}
-            color={
-              (poolLtvInfo?.ltv ?? 0) >= 0.6
-                ? "text-emerald-300 border-emerald-900 bg-emerald-950/60"
-                : "text-gray-400 border-gray-800 bg-gray-900"
-            }
-            title="Allocation diversification → mint capacity factor."
-            onClick={() => setActiveTab("FLOAT")}
-          />
-          <HeaderChip
-            label="Positions"
-            value={`${openPositions.length}`}
-            color={
-              openPositions.length > 0
-                ? "text-indigo-300 border-indigo-900 bg-indigo-950/60"
-                : "text-gray-500 border-gray-800 bg-gray-900"
-            }
-            title="Open LAPs (single + paired)."
-            onClick={() => setActiveTab("Trade")}
-          />
-          <HeaderChip
-            label="FLOAT"
-            value={`$${(floatsState?.balances?.[player.id] ?? 0).toFixed(0)}`}
-            color={
-              (floatsState?.balances?.[player.id] ?? 0) > 0
-                ? "text-emerald-200 border-emerald-700 bg-emerald-950"
-                : "text-gray-500 border-gray-800 bg-gray-900"
-            }
-            title={`Float wallet · outstanding mint $${(floatsState?.threads ?? []).filter((t) => !t.closed && t.ownerId === player.id).reduce((s, t) => s + t.floatFace, 0).toFixed(0)} · queue ${(floatsState?.redemptionQueue ?? []).filter((q) => q.userId === player.id).length}`}
-            onClick={() => setActiveTab("FLOAT")}
-          />
-        </div>
+        {/* The 5 header chips that used to live here moved into the
+            WalletStrip below the header (UI roadmap Phase 2). The strip
+            shows the same information plus a richer per-role breakdown
+            (threaded / pool LP / position / FLOAT / locked). */}
         <div className="ml-auto flex items-center gap-3">
           <button
             onClick={() => setEasyMode((m) => !m)}
@@ -1524,13 +1456,6 @@ export default function App() {
             {running ? "PAUSE" : "START"}
           </button>
           <NotificationHistory history={history} onClear={clearHistory} />
-          <button
-            onClick={() => setMobileNav("right")}
-            className="md:hidden text-xs font-mono px-2 py-1 rounded border border-indigo-700 bg-indigo-950/60 text-indigo-300 hover:bg-indigo-900/60 transition-colors"
-            aria-label="Open position drawer"
-          >
-            pos
-          </button>
           <button
             onClick={handleResetSession}
             className="text-xs font-mono px-2 py-1 rounded border border-gray-700 bg-gray-800 text-gray-400 hover:text-gray-200 hover:bg-gray-700 hover:border-gray-500 transition-colors"
@@ -1607,6 +1532,15 @@ export default function App() {
 
         {/* Center: main view */}
         <main className="flex-1 flex flex-col overflow-hidden">
+          {/* Wallet strip — unified player-state surface for both
+              easy and advanced modes (UI roadmap Phase 2). Replaces
+              the 5 header chips and the right-sidebar stats grid. */}
+          <WalletStrip
+            player={player}
+            floatsState={floatsState}
+            commitmentState={commitmentState}
+            poolLtv={poolLtvInfo}
+          />
           {easyMode ? (
             <div className="flex-1 overflow-y-auto p-4 max-w-3xl mx-auto w-full">
               <EasyMode
@@ -1703,6 +1637,15 @@ export default function App() {
                   longCurve={activePS?.auctionResult?.longCurve ?? []}
                   shortCurve={activePS?.auctionResult?.shortCurve ?? []}
                   cap={cap}
+                />
+                <AuctionBidPanel
+                  player={player}
+                  onUpdate={handlePlayerUpdate}
+                  activePair={activePair}
+                  cap={cap}
+                  availablePoolCredit={availablePoolCredit}
+                  deployedPoolCredit={deployedPoolCredit}
+                  classifierStats={getClassifierStats(classifierState, player.id)}
                 />
                 <PortfolioStructurer
                   openPositions={openPositions}
@@ -1846,53 +1789,10 @@ export default function App() {
           )}
         </main>
 
-        {/* Right: player panel (desktop) */}
-        <aside className="w-56 border-l border-gray-800 p-2 flex flex-col gap-2 overflow-y-auto hidden md:flex">
-          <PlayerPanel
-            player={player}
-            onUpdate={handlePlayerUpdate}
-            activePair={activePair}
-            cap={cap}
-            poolLtv={poolLtvInfo}
-            availablePoolCredit={availablePoolCredit}
-            deployedPoolCredit={deployedPoolCredit}
-            classifierStats={getClassifierStats(classifierState, player.id)}
-          />
-        </aside>
-
-        {/* Mobile drawer: player panel */}
-        {mobileNav === "right" && (
-          <div
-            className="fixed inset-0 z-40 bg-black/60 md:hidden"
-            onClick={() => setMobileNav(null)}
-          >
-            <aside
-              className="absolute right-0 top-0 h-full w-72 bg-gray-950 border-l border-gray-800 p-2 overflow-y-auto flex flex-col gap-2"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-xs font-mono text-gray-300">Position</span>
-                <button
-                  onClick={() => setMobileNav(null)}
-                  className="text-xs font-mono text-gray-500 hover:text-gray-200 px-2 py-0.5 rounded hover:bg-gray-800 transition-colors"
-                  aria-label="Close position drawer"
-                >
-                  ×
-                </button>
-              </div>
-              <PlayerPanel
-                player={player}
-                onUpdate={handlePlayerUpdate}
-                activePair={activePair}
-                cap={cap}
-                poolLtv={poolLtvInfo}
-                availablePoolCredit={availablePoolCredit}
-                deployedPoolCredit={deployedPoolCredit}
-                classifierStats={getClassifierStats(classifierState, player.id)}
-              />
-            </aside>
-          </div>
-        )}
+        {/* The right sidebar (PlayerPanel) was retired in UI roadmap
+            Phase 2. Wallet info moved to the always-visible WalletStrip
+            at the top; auction bid configuration moved into the Trade
+            tab as AuctionBidPanel where it actually belongs. */}
       </div>
 
       {/* Toasts */}

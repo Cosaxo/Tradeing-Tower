@@ -1,8 +1,17 @@
-// Player position configuration and live P&L readout.
+// AuctionBidPanel — auction-bid configuration only.
+//
+// Replaces the right-sidebar PlayerPanel (UI roadmap Phase 2). Wallet-
+// state info (margin, P&L, LTV, capital breakdown) is now in the
+// always-visible WalletStrip at the top of the page; this panel keeps
+// only what's specific to active trading: the bid sliders + the
+// transparent A/B classifier badge.
+//
+// Renders inside the Trade tab (where active trading lives) rather
+// than as a globally-visible sidebar.
+
 import { PRESETS } from "../constants/presets.js";
 import { TipTierEditor } from "./TipTierEditor.jsx";
 import { shouldUnwindCredit } from "../lib/credit.js";
-import { CapitalBreakdown } from "./CapitalBreakdown.jsx";
 import { HelpHint } from "./Tooltip.jsx";
 
 const SIDES = ["LONG", "SHORT"];
@@ -50,12 +59,11 @@ function ClassBadge({ classifierStats }) {
   );
 }
 
-export function PlayerPanel({
+export function AuctionBidPanel({
   player,
   onUpdate,
   activePair,
   cap,
-  poolLtv = null,
   availablePoolCredit = 0,
   deployedPoolCredit = 0,
   classifierStats = null,
@@ -78,9 +86,6 @@ export function PlayerPanel({
     );
   }
 
-  const pnlColor = (player.pnl ?? 0) >= 0 ? "text-emerald-400" : "text-red-400";
-  const marginColor = player.margin >= 4000 ? "text-gray-200" : player.margin >= 2000 ? "text-yellow-400" : "text-red-400";
-
   return (
     <div className="flex flex-col gap-3 p-3 rounded border border-gray-700 bg-gray-900">
       <div className="flex items-center justify-between">
@@ -88,7 +93,7 @@ export function PlayerPanel({
           Your Auction Bid
           <HelpHint
             width={340}
-            text="Side / leverage / margin define your auction bid — they earn tip income when matched and drive A/B routing for explicit positions, but DON'T generate directional P&L on their own. Open a position in the Credit tab to take actual exposure (LAP, paired LAP, or thread)."
+            text="Side / leverage / margin define your auction bid — they earn tip income when matched and drive A/B routing for explicit positions, but DON'T generate directional P&L on their own. Open a position via the Trade desk below to take actual exposure (LAP, paired LAP, or thread)."
           />
         </span>
         {activePair && (
@@ -109,37 +114,16 @@ export function PlayerPanel({
         ))}
       </div>
 
-      {/* Stats */}
-      <div className="grid grid-cols-3 gap-2 text-center">
-        <div>
-          <div className="text-[10px] text-gray-500">Margin</div>
-          <div className={`text-sm font-mono ${marginColor}`}>${(player.margin ?? 5000).toFixed(0)}</div>
-        </div>
-        <div>
-          <div className="text-[10px] text-gray-500">P&L</div>
-          <div className={`text-sm font-mono ${pnlColor}`}>
-            {(player.pnl ?? 0) >= 0 ? "+" : ""}${(player.pnl ?? 0).toFixed(2)}
-          </div>
-        </div>
-        <div>
-          <div className="text-[10px] text-gray-500">LTV</div>
-          <div className="text-sm font-mono text-indigo-400">
-            {(poolLtv?.ltv ?? 0).toFixed(2)}
-          </div>
-        </div>
-      </div>
-
       {/* Routing class — A/B classification with transparent score. */}
       <ClassBadge classifierStats={classifierStats} />
 
-      {/* Capital breakdown — tags sharing the same margin (§10.1). */}
-      <CapitalBreakdown margin={player.margin ?? 0} tags={player.tags ?? {}} />
-
-      {/* Leverage — always ESMA-capped. Credit expands capital, not leverage (§10.5). */}
-      {field("leverage", player.leverage ?? 1, 0.5, cap ?? 2, 0.25)}
-
-      {/* Margin slider */}
-      {field("margin", player.margin ?? 5000, 500, 50000, 500)}
+      {/* Two columns on wide screens to keep the panel compact. */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {/* Leverage — always ESMA-capped. */}
+        {field("leverage", player.leverage ?? 1, 0.5, cap ?? 2, 0.25)}
+        {/* Margin slider */}
+        {field("margin", player.margin ?? 5000, 500, 50000, 500)}
+      </div>
 
       {/* Side select */}
       <div className="flex gap-1">
@@ -161,22 +145,23 @@ export function PlayerPanel({
         ))}
       </div>
 
-      {/* Strategy select */}
-      <div className="flex flex-col gap-0.5">
-        <label className="text-[10px] text-gray-500 font-mono uppercase">Strategy</label>
-        <select
-          value={player.strategy ?? "FIXED_LONG"}
-          onChange={(e) => onUpdate({ strategy: e.target.value })}
-          className="text-xs font-mono rounded border border-gray-700 bg-gray-800 text-gray-200 px-2 py-1"
-        >
-          {STRATEGIES.map((s) => (
-            <option key={s} value={s}>{s.replace("_", " ")}</option>
-          ))}
-        </select>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {/* Strategy select */}
+        <div className="flex flex-col gap-0.5">
+          <label className="text-[10px] text-gray-500 font-mono uppercase">Strategy</label>
+          <select
+            value={player.strategy ?? "FIXED_LONG"}
+            onChange={(e) => onUpdate({ strategy: e.target.value })}
+            className="text-xs font-mono rounded border border-gray-700 bg-gray-800 text-gray-200 px-2 py-1"
+          >
+            {STRATEGIES.map((s) => (
+              <option key={s} value={s}>{s.replace("_", " ")}</option>
+            ))}
+          </select>
+        </div>
+        {/* Min yield */}
+        {field("minYield", player.minYield ?? 0, 0, 1, 0.05)}
       </div>
-
-      {/* Min yield */}
-      {field("minYield", player.minYield ?? 0, 0, 1, 0.05)}
 
       {/* Tip tier editor */}
       <TipTierEditor
@@ -187,8 +172,8 @@ export function PlayerPanel({
 
       <div className="text-[10px] font-mono text-gray-500 leading-tight border-t border-gray-800 pt-2">
         These controls set your auction bid — tips flow when matched, but
-        directional exposure only comes from positions you open in the
-        Credit tab.
+        directional exposure only comes from positions you open via the
+        Trade desk below.
       </div>
 
       {(deployedPoolCredit > 0 || availablePoolCredit > 0) && (() => {

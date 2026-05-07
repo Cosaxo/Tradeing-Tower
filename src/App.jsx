@@ -278,6 +278,7 @@ export default function App() {
     setBBookState,
     lapPoolState,
     setLapPoolState,
+    classifierState,
     setLogs,
     addToast,
     running,

@@ -39,9 +39,41 @@
 
 import {
   LAP_POOL_LOCKUP_EPOCHS,
+  LAP_POOL_VOLUNTARY_YIELD_BONUS,
   BBOOK_MAX_NOTIONAL_RATIO, // we reuse the same capacity gate as B-book
 } from "../constants/system.js";
 import { getEntropyMultForUser } from "./auction.js";
+import { routeFor } from "./userClassifier.js";
+
+// ---------------------------------------------------------------------------
+// Adaptive capacity sizing
+// ---------------------------------------------------------------------------
+
+// Reference per-tick sigma for the capacity-ratio calibration. Markets
+// realising this sigma get the full base cap; sigma higher than this
+// scales the cap down inversely; sigma lower scales up but is clamped.
+const REFERENCE_SIGMA = 0.005;
+
+// Clamp the adaptive multiplier so it can't go below this fraction of
+// the base cap even in extreme vol — keeps the pool useful, just on a
+// tighter leash.
+const ADAPTIVE_FLOOR = 0.4;
+
+// Scale the static notional cap down when realised volatility is high.
+//
+// effective = base × clamp(REFERENCE_SIGMA / realizedSigma, ADAPTIVE_FLOOR, 1.0)
+//
+// At REFERENCE_SIGMA the multiplier is 1.0 (full base cap). At 2×
+// REFERENCE_SIGMA the multiplier is 0.5 → half cap. The upper clamp at
+// 1.0 means low-vol regimes don't *expand* the cap above the static
+// value (the static value is already a safety boundary; vol calm is no
+// reason to loosen it).
+export function effectiveNotionalRatio(realizedSigma, baseRatio = BBOOK_MAX_NOTIONAL_RATIO) {
+  if (!Number.isFinite(realizedSigma) || realizedSigma <= 0) return baseRatio;
+  const factor = REFERENCE_SIGMA / realizedSigma;
+  const clamped = Math.min(1.0, Math.max(ADAPTIVE_FLOOR, factor));
+  return baseRatio * clamped;
+}
 
 // ---------------------------------------------------------------------------
 // IDs
@@ -249,6 +281,8 @@ export function absorbImbalance({
   openPrice,
   currentEpoch = 0,
   rebateBudget = 0,
+  maxNotionalRatio = BBOOK_MAX_NOTIONAL_RATIO,
+  classifierState = null,
 }) {
   if (
     (unmatchedLongs.length === 0 && unmatchedShorts.length === 0) ||
@@ -264,8 +298,54 @@ export function absorbImbalance({
   }
 
   // The pool takes the OPPOSITE side of the surplus.
-  const surplusBids = unmatchedLongs.length > 0 ? unmatchedLongs : unmatchedShorts;
+  const rawSurplusBids = unmatchedLongs.length > 0 ? unmatchedLongs : unmatchedShorts;
   const poolSide = unmatchedLongs.length > 0 ? "SHORT" : "LONG";
+
+  // Adverse-selection filter: A-classified (skilled) bids on the
+  // minority side are *informed* flow, not just structurally
+  // imbalanced. Absorbing them systematically loses for the pool —
+  // they're the same flow the B-book classifier protects against on
+  // the active-trader path. We exclude them here so they remain
+  // unmatched (forced to find a peer counterparty in the next tick or
+  // via the rental market). B-classified and unknown-default users
+  // continue to be absorbed.
+  //
+  // If no classifierState is supplied, no filtering happens — the
+  // pool absorbs everything as before. This preserves backward
+  // compatibility for callers that don't have the classifier wired in
+  // (the harness, NPC adapters in raw form).
+  const surplusBids = classifierState
+    ? rawSurplusBids.filter((bid) => {
+        const route = routeFor({
+          state: classifierState,
+          userId: bid.id,
+          positionMargin: bid.base_margin ?? bid.margin ?? 0,
+        });
+        return route !== "A";
+      })
+    : rawSurplusBids;
+
+  // Sort bids by expected rebate income (descending) before iterating.
+  // Without this, the function processes bids in their adapter-arrival
+  // order, which means an adversary flooding the order book with
+  // low-tip / poorly-priced bids early in the tick can consume the
+  // pool's capacity before higher-quality bids are seen.
+  //
+  // By sorting first, capacity-constrained absorption picks the
+  // best-paying bids first regardless of arrival order. Conservation
+  // is unchanged (the same budget gates apply); throughput per dollar
+  // of risk is improved.
+  const ranked = [];
+  for (const bid of surplusBids) {
+    const margin = bid.base_margin ?? bid.margin ?? 0;
+    const leverage = bid.max_lev ?? bid.leverage ?? 1;
+    if (margin <= 0 || leverage < 0.5) continue;
+    const entMult = getEntropyMultForUser(leverage, normWeights, bucketLevs);
+    const tipRate = (bid.tip_tiers?.[0]?.tip ?? 0.02) * entMult;
+    const tipForBid = margin * tipRate;
+    ranked.push({ bid, margin, leverage, tipForBid });
+  }
+  ranked.sort((a, b) => b.tipForBid - a.tipForBid);
 
   let workingState = state;
   const absorbedContracts = [];
@@ -273,24 +353,17 @@ export function absorbImbalance({
   let rebateRequested = 0;
   const budget = Number.isFinite(rebateBudget) && rebateBudget > 0 ? rebateBudget : 0;
 
-  for (const bid of surplusBids) {
-    const margin = bid.base_margin ?? bid.margin ?? 0;
-    const leverage = bid.max_lev ?? bid.leverage ?? 1;
-    if (margin <= 0 || leverage < 0.5) continue;
-
-    // Capacity check.
+  for (const { bid, margin, leverage, tipForBid } of ranked) {
+    // Capacity check. The cap is parameterised so callers can supply
+    // a vol-adaptive value (effectiveNotionalRatio); defaults to the
+    // static BBOOK_MAX_NOTIONAL_RATIO.
     const newNotional = totalActiveNotional(workingState) + margin * leverage;
-    if (newNotional > stake * BBOOK_MAX_NOTIONAL_RATIO + 1e-9) {
-      // Pool is full. Skip remaining bids; they stay unmatched.
-      break;
+    if (newNotional > stake * maxNotionalRatio + 1e-9) {
+      // This bid doesn't fit; remaining (smaller-notional) bids in the
+      // ranked list might still — keep going rather than break.
+      continue;
     }
 
-    // Look up entropy multiplier for this bid's leverage. Shared helper
-    // with the auction so the absorbed and matched paths price tips
-    // identically.
-    const entMult = getEntropyMultForUser(leverage, normWeights, bucketLevs);
-    const tipRate = (bid.tip_tiers?.[0]?.tip ?? 0.02) * entMult;
-    const tipForBid = margin * tipRate;
     rebateRequested += tipForBid;
 
     // Funding gate. Without budget the pool would synthesize income
@@ -298,7 +371,7 @@ export function absorbImbalance({
     // than absorb-without-rebate (the rebate is the whole reason to
     // take the position).
     if (totalRebate + tipForBid > budget + 1e-9) {
-      break;
+      continue;
     }
     totalRebate += tipForBid;
 
@@ -326,7 +399,33 @@ export function absorbImbalance({
   return { state: workingState, absorbedContracts, totalRebate, rebateRequested };
 }
 
-// Distribute a tip-rebate income to LPs pro-rata to their total stake.
+// Compute the weighted total for the junior/senior distribution. The
+// "weight" of a stake is what determines its share when income is
+// distributed; voluntary stake gets the LAP_POOL_VOLUNTARY_YIELD_BONUS
+// multiplier above thread-derived.
+//
+// Returns:
+//   { weightedPool, perUser: { [uid]: { weightedV, weightedT, weightedTotal } } }
+function computeWeightedShares(state) {
+  const perUser = {};
+  let weightedPool = 0;
+  for (const [uid, u] of Object.entries(state?.underwriters ?? {})) {
+    const v = u.voluntaryStake ?? 0;
+    const t = u.threadDerivedStake ?? 0;
+    if (v + t <= 0) continue;
+    const wV = v * LAP_POOL_VOLUNTARY_YIELD_BONUS;
+    const wT = t;
+    perUser[uid] = { weightedV: wV, weightedT: wT, weightedTotal: wV + wT };
+    weightedPool += wV + wT;
+  }
+  return { weightedPool, perUser };
+}
+
+// Distribute a positive cashflow (rebate income or positive close P&L)
+// to LPs using the weighted distribution. Voluntary stake earns at a
+// yield bonus over thread-derived, compensating voluntary LPs for the
+// junior-tranche loss exposure.
+//
 // Voluntary share goes to wallet (caller flushes to margin); thread-
 // derived share compounds back into the thread (caller propagates via
 // growThread).
@@ -336,28 +435,30 @@ export function distributeRebate({ state, totalRebate }) {
   if (!Number.isFinite(totalRebate) || totalRebate <= 0) {
     return { state, lpShares: {} };
   }
-  const stake = poolStake(state);
-  if (stake <= 0) return { state, lpShares: {} };
+  if (poolStake(state) <= 0) return { state, lpShares: {} };
+
+  const { weightedPool, perUser } = computeWeightedShares(state);
+  if (weightedPool <= 0) return { state, lpShares: {} };
 
   const lpShares = {};
-  let nextUnderwriters = { ...state.underwriters };
+  const nextUnderwriters = { ...state.underwriters };
   for (const [uid, u] of Object.entries(state.underwriters ?? {})) {
-    const userTotal = (u.voluntaryStake ?? 0) + (u.threadDerivedStake ?? 0);
-    if (userTotal <= 0) continue;
-    const share = userTotal / stake;
-    const delta = totalRebate * share;
-    const vFrac = userTotal > 0 ? (u.voluntaryStake ?? 0) / userTotal : 0;
-    const tFrac = 1 - vFrac;
+    const w = perUser[uid];
+    if (!w) continue;
+    // Within-user split: voluntary gets its weighted-V share of the
+    // user's total, thread-derived gets weighted-T share.
+    const userTotalDelta = totalRebate * (w.weightedTotal / weightedPool);
+    const dV = userTotalDelta * (w.weightedV / w.weightedTotal);
+    const dT = userTotalDelta - dV;
     lpShares[uid] = {
-      total: delta,
-      voluntary: delta * vFrac,
-      threadDerived: delta * tFrac,
+      total: userTotalDelta,
+      voluntary: dV,
+      threadDerived: dT,
     };
-    // Stake amounts grow by the rebate proportionally.
     nextUnderwriters[uid] = {
       ...u,
-      voluntaryStake: (u.voluntaryStake ?? 0) + delta * vFrac,
-      threadDerivedStake: (u.threadDerivedStake ?? 0) + delta * tFrac,
+      voluntaryStake: (u.voluntaryStake ?? 0) + dV,
+      threadDerivedStake: (u.threadDerivedStake ?? 0) + dT,
     };
   }
   const newTotalStake = Math.max(
@@ -408,10 +509,18 @@ export function markToMarket({ state, pricesByPair }) {
   return out;
 }
 
-// Per-tick maintenance pass. Closes any absorbed contract that has
-// aged past `maxHoldEpochs` at the current per-pair price. Bounds
-// directional exposure: even if opposite-side flow never returns, the
-// pool's positions unwind within a known window.
+// Per-tick maintenance pass. Two phases run in order:
+//
+// 1. Aged-out closes — any contract whose age ≥ maxHoldEpochs is
+//    closed at the current pair price. Bounds directional exposure to
+//    a known window.
+//
+// 2. Emergency unwind on capacity breach — if after the aged closes
+//    the pool's utilisation is still over BBOOK_MAX_NOTIONAL_RATIO
+//    (e.g., because thread-derived stake was redeemed faster than
+//    aged closes freed notional — the thundering-herd scenario),
+//    close the oldest remaining contracts until utilisation is back
+//    under cap. Each forced close has reason="capacityBreach".
 //
 // Returns:
 //   { state, closed: [{ contract, poolPnl, underwriterShares, reason }],
@@ -425,9 +534,10 @@ export function maintainAbsorbed({
   pricesByPair = {},
   currentEpoch = 0,
   maxHoldEpochs,
+  maxNotionalRatio = BBOOK_MAX_NOTIONAL_RATIO,
 }) {
-  const contracts = state?.activeAbsorbed ?? [];
-  if (contracts.length === 0) {
+  const initialContracts = state?.activeAbsorbed ?? [];
+  if (initialContracts.length === 0) {
     return { state, closed: [], totalRealizedPnl: 0 };
   }
 
@@ -437,39 +547,70 @@ export function maintainAbsorbed({
   const closed = [];
   let totalRealizedPnl = 0;
 
-  // Iterate over a snapshot so closeAbsorbed can mutate workingState's
-  // activeAbsorbed array without invalidating the loop.
-  const snapshot = contracts.map((c) => ({
-    id: c.id,
-    pairKey: c.pairKey,
-    age: currentEpoch - (c.openedAtEpoch ?? currentEpoch),
-  }));
-
-  for (const { id, pairKey, age } of snapshot) {
-    if (age < hold) continue;
-
+  const closeOne = (id, pairKey, reason) => {
     const price = pricesByPair?.[pairKey];
-    if (!Number.isFinite(price) || price <= 0) continue;
-
-    const original = contracts.find((c) => c.id === id);
+    if (!Number.isFinite(price) || price <= 0) return false;
+    const original = (workingState.activeAbsorbed ?? []).find((c) => c.id === id);
     const r = closeAbsorbed({ state: workingState, contractId: id, currentPrice: price });
-    if (!r.ok) continue;
-
+    if (!r.ok) return false;
     workingState = r.state;
     totalRealizedPnl += r.poolPnl;
     closed.push({
       contract: original,
       poolPnl: r.poolPnl,
       underwriterShares: r.underwriterShares ?? {},
-      reason: "aged",
+      reason,
     });
+    return true;
+  };
+
+  // Phase 1: aged closes. Iterate over a snapshot so closeAbsorbed can
+  // mutate workingState.activeAbsorbed without invalidating the loop.
+  const aged = initialContracts
+    .map((c) => ({
+      id: c.id,
+      pairKey: c.pairKey,
+      age: currentEpoch - (c.openedAtEpoch ?? currentEpoch),
+    }))
+    .filter((c) => c.age >= hold);
+  for (const { id, pairKey } of aged) {
+    closeOne(id, pairKey, "aged");
+  }
+
+  // Phase 2: emergency unwind on capacity breach. If utilisation is
+  // still over the cap, close oldest remaining contracts until it isn't.
+  // Sorted by openedAtEpoch ascending so oldest go first (FIFO unwind).
+  const capacityCap = (workingState.totalStake ?? 0) * maxNotionalRatio;
+  if (totalActiveNotional(workingState) > capacityCap + 1e-9) {
+    const remaining = [...(workingState.activeAbsorbed ?? [])].sort(
+      (a, b) => (a.openedAtEpoch ?? 0) - (b.openedAtEpoch ?? 0)
+    );
+    for (const c of remaining) {
+      if (totalActiveNotional(workingState) <= (workingState.totalStake ?? 0) * maxNotionalRatio + 1e-9) {
+        break;
+      }
+      closeOne(c.id, c.pairKey, "capacityBreach");
+    }
   }
 
   return { state: workingState, closed, totalRealizedPnl };
 }
 
-// Close an absorbed contract — distribute realised P&L to LPs.
-// Same shape as bBookPool.closeContract.
+// Close an absorbed contract — distribute realised P&L to LPs with
+// junior/senior tranching:
+//
+//   - Gains (poolPnl > 0): weighted distribution favouring voluntary
+//     (yield bonus = LAP_POOL_VOLUNTARY_YIELD_BONUS).
+//   - Losses (poolPnl < 0): voluntary stake absorbs first as a class.
+//     If the total loss exceeds total voluntary stake, the residual
+//     spreads to thread-derived stake. Within each tranche,
+//     distribution is pro-rata.
+//
+// This makes voluntary the junior tranche (higher yield, first-loss)
+// and thread-derived the senior tranche (lower yield, loss-protected).
+// Without it, users who minted FLOAT for the stablecoin face the same
+// downside as users who explicitly opted in as LAP-pool LPs — an
+// asymmetry the deep-dive review flagged as a real PR/legal risk.
 export function closeAbsorbed({ state, contractId, currentPrice }) {
   const idx = (state.activeAbsorbed ?? []).findIndex((c) => c.id === contractId);
   if (idx < 0) return { ok: false, reason: "absorbed contract not found" };
@@ -479,27 +620,60 @@ export function closeAbsorbed({ state, contractId, currentPrice }) {
   const stake = poolStake(state);
   const underwriterShares = {};
   let nextUnderwriters = state.underwriters;
+
   if (stake > 0 && Math.abs(poolPnl) > 1e-9) {
     nextUnderwriters = { ...state.underwriters };
-    for (const [uid, u] of Object.entries(state.underwriters ?? {})) {
-      const userTotal = (u.voluntaryStake ?? 0) + (u.threadDerivedStake ?? 0);
-      if (userTotal <= 0) continue;
-      const share = userTotal / stake;
-      const delta = poolPnl * share;
-      const vFrac = userTotal > 0 ? (u.voluntaryStake ?? 0) / userTotal : 0;
-      const tFrac = 1 - vFrac;
-      const dV = delta * vFrac;
-      const dT = delta * tFrac;
-      underwriterShares[uid] = {
-        total: delta,
-        voluntary: dV,
-        threadDerived: dT,
-      };
-      nextUnderwriters[uid] = {
-        ...u,
-        voluntaryStake: Math.max(0, (u.voluntaryStake ?? 0) + dV),
-        threadDerivedStake: Math.max(0, (u.threadDerivedStake ?? 0) + dT),
-      };
+
+    if (poolPnl > 0) {
+      // Gain — weighted distribution (voluntary gets the yield bonus).
+      const { weightedPool, perUser } = computeWeightedShares(state);
+      if (weightedPool > 0) {
+        for (const [uid, u] of Object.entries(state.underwriters ?? {})) {
+          const w = perUser[uid];
+          if (!w) continue;
+          const userTotalDelta = poolPnl * (w.weightedTotal / weightedPool);
+          const dV = userTotalDelta * (w.weightedV / w.weightedTotal);
+          const dT = userTotalDelta - dV;
+          underwriterShares[uid] = { total: userTotalDelta, voluntary: dV, threadDerived: dT };
+          nextUnderwriters[uid] = {
+            ...u,
+            voluntaryStake: Math.max(0, (u.voluntaryStake ?? 0) + dV),
+            threadDerivedStake: Math.max(0, (u.threadDerivedStake ?? 0) + dT),
+          };
+        }
+      }
+    } else {
+      // Loss — voluntary tranche absorbs first.
+      const totalLoss = -poolPnl; // positive
+      let totalVoluntary = 0;
+      let totalThreadDerived = 0;
+      for (const u of Object.values(state.underwriters ?? {})) {
+        totalVoluntary += u?.voluntaryStake ?? 0;
+        totalThreadDerived += u?.threadDerivedStake ?? 0;
+      }
+      const lossToVoluntary = Math.min(totalLoss, totalVoluntary);
+      const lossToThreadDerived = Math.max(0, totalLoss - totalVoluntary);
+
+      for (const [uid, u] of Object.entries(state.underwriters ?? {})) {
+        const v = u.voluntaryStake ?? 0;
+        const t = u.threadDerivedStake ?? 0;
+        if (v + t <= 0) continue;
+        const dV =
+          totalVoluntary > 0 && lossToVoluntary > 0
+            ? -(v / totalVoluntary) * lossToVoluntary
+            : 0;
+        const dT =
+          totalThreadDerived > 0 && lossToThreadDerived > 0
+            ? -(t / totalThreadDerived) * lossToThreadDerived
+            : 0;
+        if (dV === 0 && dT === 0) continue;
+        underwriterShares[uid] = { total: dV + dT, voluntary: dV, threadDerived: dT };
+        nextUnderwriters[uid] = {
+          ...u,
+          voluntaryStake: Math.max(0, v + dV),
+          threadDerivedStake: Math.max(0, t + dT),
+        };
+      }
     }
   }
   const newTotalStake = Math.max(

@@ -23,7 +23,12 @@ import {
   submitRedemption as submitFloatsRedemption,
 } from "../lib/floats.js";
 import { adjustThreadDerived } from "../lib/bBookPool.js";
-import { absorbImbalance, distributeRebate, maintainAbsorbed } from "../lib/lapPool.js";
+import {
+  absorbImbalance,
+  distributeRebate,
+  maintainAbsorbed,
+  effectiveNotionalRatio,
+} from "../lib/lapPool.js";
 import {
   LAP_POOL_HOLD_EPOCHS,
   LAP_POOL_REBATE_FEE_SHARE,
@@ -53,6 +58,7 @@ export function useEpochLoop({
   setBBookState,    // React setter for bBookState
   lapPoolState = null, // global LAP pool state (Tier-3a default — passive LP)
   setLapPoolState,  // React setter for lapPoolState
+  classifierState = null, // for adverse-selection filtering on pool absorption
   setLogs,          // (fn) => void
   addToast,         // (msg, type) => void
   running,          // boolean
@@ -86,6 +92,8 @@ export function useEpochLoop({
   bBookStateRef.current = bBookState;
   const lapPoolStateRef = useRef(lapPoolState);
   lapPoolStateRef.current = lapPoolState;
+  const classifierStateRef = useRef(classifierState);
+  classifierStateRef.current = classifierState;
 
   // Helper: pick a representative epoch from the pair-states object.
   // Used by the FLOAT redemption cycle which is global, not per-pair.
@@ -188,6 +196,11 @@ export function useEpochLoop({
       // pass (closes aged absorbed contracts). Populated as each pair's
       // settlement runs.
       const lapPoolPricesByPair = {};
+      // Tightest adaptive notional ratio observed across pairs this
+      // tick — used by the maintenance pass to detect aggregate
+      // capacity breach. Starts at the static cap (no tightening) and
+      // only ratchets down as high-vol pairs are seen.
+      let maxAdaptiveCapThisTick = Infinity;
       // Aggregated insurer-stake adds resulting from thread growth this
       // tick. Applied to insuranceState before the global insurance
       // settlement runs so premium streams account for the new size.
@@ -329,6 +342,11 @@ export function useEpochLoop({
           rawStabilityFee > 0
         ) {
           const rebateBudget = rawStabilityFee * LAP_POOL_REBATE_FEE_SHARE;
+          // Adaptive cap: in high-vol regimes, the pool is allowed less
+          // total exposure per dollar of stake. Tightens the leash
+          // exactly when directional risk is highest.
+          const adaptiveCap = effectiveNotionalRatio(realizedSigma);
+          maxAdaptiveCapThisTick = Math.min(maxAdaptiveCapThisTick, adaptiveCap);
           const absorb = absorbImbalance({
             state: workingLapPool,
             unmatchedLongs: auctionResult.unmatchedLongs,
@@ -338,12 +356,23 @@ export function useEpochLoop({
             openPrice: lapPoolPriceForPair,
             currentEpoch: epochIndex,
             rebateBudget,
+            maxNotionalRatio: adaptiveCap,
+            classifierState: classifierStateRef.current,
           });
           workingLapPool = absorb.state;
-          // Subtract actually-funded rebate from the stability fee that
-          // flows on to the protocol fee ledger. Conservation: every
-          // dollar of pool-stake growth has a matching dollar deducted
-          // here.
+          // Conservation handshake. The protocol's fee ledger sees only
+          // the residual after funded rebate is deducted:
+          //
+          //   funded         = absorb.totalRebate                (≤ budget)
+          //   leftToProtocol = rawStabilityFee - funded
+          //                  = (rawStabilityFee - budget)        ← always to protocol (30% floor)
+          //                  + (budget - funded)                 ← unused budget rolls back to protocol
+          //
+          // Both terms are explicit. There's no leakage: every dollar
+          // either funds a pool absorption (and corresponds to a
+          // contract on the pool's books) or stays with the protocol.
+          // Unused budget does NOT carry over to the next tick — each
+          // tick stands alone for budget accounting.
           stabilityFeeCollected = Math.max(0, rawStabilityFee - absorb.totalRebate);
           if (absorb.totalRebate > 0) {
             const dist = distributeRebate({
@@ -561,11 +590,15 @@ export function useEpochLoop({
       // -----------------------------------------------------------------
       if (workingLapPool && (workingLapPool.activeAbsorbed?.length ?? 0) > 0) {
         const tickEpoch = epochOfFirstPair(next);
+        const capForMaintenance = Number.isFinite(maxAdaptiveCapThisTick)
+          ? maxAdaptiveCapThisTick
+          : undefined; // fall through to lapPool's default
         const maintain = maintainAbsorbed({
           state: workingLapPool,
           pricesByPair: lapPoolPricesByPair,
           currentEpoch: tickEpoch,
           maxHoldEpochs: LAP_POOL_HOLD_EPOCHS,
+          maxNotionalRatio: capForMaintenance,
         });
         workingLapPool = maintain.state;
         if (maintain.closed.length > 0) {

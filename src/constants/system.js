@@ -125,6 +125,24 @@ export const LAP_POOL_HOLD_EPOCHS = 20;
 // stake bypasses this entirely (gated by thread redemption mechanics).
 export const LAP_POOL_LOCKUP_EPOCHS = 30;
 
+// Voluntary / thread-derived loss tranching.
+//
+// Voluntary stake is the JUNIOR tranche: explicitly opted-in users who
+// know the role. They absorb losses first and earn at a yield bonus to
+// compensate for the higher risk.
+//
+// Thread-derived stake is the SENIOR tranche: users who minted FLOAT
+// and got 80% of their layer-3 stake routed here as a default. They
+// absorb losses ONLY after voluntary stake has been wiped out, and
+// they earn at the base rate.
+//
+// LAP_POOL_VOLUNTARY_YIELD_BONUS is the multiplier on the voluntary
+// share when distributing rebate income and positive close P&L. 1.4×
+// means voluntary LPs earn 40% more per dollar of stake than
+// thread-derived LPs. Calibration parameter — should be tuned against
+// realised loss frequencies in production.
+export const LAP_POOL_VOLUNTARY_YIELD_BONUS = 1.4;
+
 // Fraction of stability-fee revenue the pool is allowed to draw on per
 // tick to fund rebate income. The rest stays with the protocol fee
 // ledger. Capping at < 1 keeps a residual fee stream for the protocol

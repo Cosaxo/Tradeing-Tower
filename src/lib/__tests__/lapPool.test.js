@@ -18,6 +18,7 @@ import {
   markToMarket,
   closeAbsorbed,
   maintainAbsorbed,
+  effectiveNotionalRatio,
 } from "../lapPool.js";
 
 // ---------------------------------------------------------------------------
@@ -270,19 +271,21 @@ describe("absorbImbalance", () => {
 // ---------------------------------------------------------------------------
 
 describe("distributeRebate", () => {
-  it("distributes pro-rata to LP stakes and increases stake balances", () => {
+  it("weighted-distributes to LPs (voluntary earns yield bonus)", () => {
     let s = initLapPoolState();
     // A has $600 voluntary; B has $400 thread-derived. Total $1000.
+    // Weighted: A = 1.4 × 600 = 840, B = 1.0 × 400 = 400. Sum = 1240.
+    // A's share = 840/1240 = 67.74%; B's share = 400/1240 = 32.26%.
     s = depositUnderwriter({ state: s, uid: "A", amount: 600, currentEpoch: 0 }).state;
     s = adjustThreadDerived({ state: s, uid: "B", delta: 400 }).state;
     const r = distributeRebate({ state: s, totalRebate: 100 });
-    expect(r.lpShares.A.total).toBeCloseTo(60);
-    expect(r.lpShares.A.voluntary).toBeCloseTo(60);
+    expect(r.lpShares.A.total).toBeCloseTo(67.74, 1);
+    expect(r.lpShares.A.voluntary).toBeCloseTo(67.74, 1); // all voluntary
     expect(r.lpShares.A.threadDerived).toBeCloseTo(0);
-    expect(r.lpShares.B.total).toBeCloseTo(40);
+    expect(r.lpShares.B.total).toBeCloseTo(32.26, 1);
     expect(r.lpShares.B.voluntary).toBeCloseTo(0);
-    expect(r.lpShares.B.threadDerived).toBeCloseTo(40);
-    // Total stake grew by the rebate.
+    expect(r.lpShares.B.threadDerived).toBeCloseTo(32.26, 1);
+    // Total stake grew by the full rebate (sum of both shares).
     expect(r.state.totalStake).toBeCloseTo(1100);
   });
 
@@ -359,8 +362,11 @@ describe("markToMarket", () => {
 });
 
 describe("closeAbsorbed", () => {
-  it("realises P&L and distributes pro-rata", () => {
+  it("realises gain and distributes weighted (voluntary > thread-derived)", () => {
     let s = initLapPoolState();
+    // A: $3000 voluntary; B: $2000 thread-derived.
+    // Weighted: A = 4200, B = 2000, sum 6200.
+    // A's gain share = 4200/6200 ≈ 67.74%; B's share = 32.26%.
     s = depositUnderwriter({ state: s, uid: "A", amount: 3000, currentEpoch: 0 }).state;
     s = adjustThreadDerived({ state: s, uid: "B", delta: 2000 }).state;
     s = absorbImbalance({
@@ -377,11 +383,67 @@ describe("closeAbsorbed", () => {
     const r = closeAbsorbed({ state: s, contractId, currentPrice: 95 });
     expect(r.ok).toBe(true);
     expect(r.poolPnl).toBeGreaterThan(0);
-    // 60% to A, 40% to B.
-    expect(r.underwriterShares.A.total).toBeCloseTo(r.poolPnl * 0.6);
-    expect(r.underwriterShares.B.total).toBeCloseTo(r.poolPnl * 0.4);
+    expect(r.underwriterShares.A.total).toBeCloseTo(r.poolPnl * 4200 / 6200, 4);
+    expect(r.underwriterShares.B.total).toBeCloseTo(r.poolPnl * 2000 / 6200, 4);
     expect(r.state.activeAbsorbed).toHaveLength(0);
     expect(r.state.cumulativePoolPnl).toBeCloseTo(r.poolPnl);
+  });
+
+  it("realises a loss and tranches it: voluntary first, then thread-derived", () => {
+    let s = initLapPoolState();
+    // A: $200 voluntary. B: $1000 thread-derived. Pool stake $1200.
+    s = depositUnderwriter({ state: s, uid: "A", amount: 200, currentEpoch: 0 }).state;
+    s = adjustThreadDerived({ state: s, uid: "B", delta: 1000 }).state;
+    s = absorbImbalance({
+      state: s,
+      unmatchedLongs: [
+        { id: "U1", base_margin: 100, max_lev: 5, tip_tiers: [{ tip: 0.02 }], activePair: "BTCUSD" },
+      ],
+      unmatchedShorts: [],
+      openPrice: 100,
+      rebateBudget: 1_000,
+    }).state;
+    const contractId = s.activeAbsorbed[0].id;
+    // Pool is SHORT. Close at 110 (adverse for short) → poolPnl < 0.
+    const r = closeAbsorbed({ state: s, contractId, currentPrice: 110 });
+    expect(r.ok).toBe(true);
+    expect(r.poolPnl).toBeLessThan(0);
+    const totalLoss = -r.poolPnl;
+    // If totalLoss < voluntaryStake: ALL of A's tranche eats it.
+    if (totalLoss <= 200 + 1e-9) {
+      expect(r.underwriterShares.A.voluntary).toBeCloseTo(-totalLoss);
+      expect(r.underwriterShares.A.threadDerived ?? 0).toBe(0);
+      expect(r.underwriterShares.B?.total ?? 0).toBe(0); // B untouched
+    } else {
+      // Voluntary exhausted ($200), residual hits B's thread-derived.
+      expect(r.underwriterShares.A.voluntary).toBeCloseTo(-200);
+      expect(r.underwriterShares.B.threadDerived).toBeCloseTo(-(totalLoss - 200));
+    }
+  });
+
+  it("loss exhausts voluntary tranche entirely on a big adverse move", () => {
+    let s = initLapPoolState();
+    // Tiny voluntary buffer + bigger thread-derived.
+    s = depositUnderwriter({ state: s, uid: "A", amount: 50, currentEpoch: 0 }).state;
+    s = adjustThreadDerived({ state: s, uid: "B", delta: 2000 }).state;
+    s = absorbImbalance({
+      state: s,
+      unmatchedLongs: [
+        { id: "U1", base_margin: 200, max_lev: 5, tip_tiers: [{ tip: 0.02 }], activePair: "BTCUSD" },
+      ],
+      unmatchedShorts: [],
+      openPrice: 100,
+      rebateBudget: 1_000,
+    }).state;
+    const contractId = s.activeAbsorbed[0].id;
+    // Big adverse move — pool SHORT, price up 30% → big loss.
+    const r = closeAbsorbed({ state: s, contractId, currentPrice: 130 });
+    expect(r.ok).toBe(true);
+    expect(r.poolPnl).toBeLessThan(-50); // loss exceeds voluntary buffer
+    // A's voluntary is fully wiped.
+    expect(r.state.underwriters.A?.voluntaryStake ?? 0).toBeCloseTo(0);
+    // B took the residual.
+    expect(r.state.underwriters.B.threadDerivedStake).toBeLessThan(2000);
   });
 
   it("rejects close on a non-existent contract", () => {
@@ -486,6 +548,214 @@ describe("absorbImbalance rebate budget", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Adaptive notional ratio — vol-aware capacity sizing
+// ---------------------------------------------------------------------------
+
+describe("effectiveNotionalRatio", () => {
+  it("returns the base ratio at the reference sigma", () => {
+    expect(effectiveNotionalRatio(0.005)).toBeCloseTo(1.5);
+  });
+
+  it("scales the cap down inversely as sigma grows", () => {
+    expect(effectiveNotionalRatio(0.01)).toBeLessThan(1.5);
+    expect(effectiveNotionalRatio(0.02)).toBeLessThan(effectiveNotionalRatio(0.01));
+  });
+
+  it("clamps to a floor in extreme volatility", () => {
+    // At very high sigma the cap should never fall below 0.4 × base.
+    expect(effectiveNotionalRatio(1.0)).toBeGreaterThanOrEqual(1.5 * 0.4 - 1e-9);
+  });
+
+  it("does not loosen the cap above base in low volatility", () => {
+    // At very low sigma, factor would be > 1, but we clamp upper at 1.0.
+    expect(effectiveNotionalRatio(0.001)).toBeCloseTo(1.5);
+  });
+
+  it("returns base on invalid sigma (no NaN propagation)", () => {
+    expect(effectiveNotionalRatio(0)).toBe(1.5);
+    expect(effectiveNotionalRatio(NaN)).toBe(1.5);
+    expect(effectiveNotionalRatio(-0.01)).toBe(1.5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bid-order independence — sort by expected tip income
+// ---------------------------------------------------------------------------
+
+describe("absorbImbalance bid sorting", () => {
+  it("absorbs the highest-tip bid first when capacity is constrained", () => {
+    // Tiny pool, two bids of equal margin but very different tip rates.
+    // Capacity allows only one. The high-tip bid must win regardless of
+    // order in the input list.
+    let s = initLapPoolState();
+    s = adjustThreadDerived({ state: s, uid: "LP", delta: 700 }).state;
+
+    const lowTipBid = {
+      id: "U_LOW",
+      base_margin: 1000,
+      max_lev: 1,
+      tip_tiers: [{ tip: 0.005 }], // 0.5%
+    };
+    const highTipBid = {
+      id: "U_HIGH",
+      base_margin: 1000,
+      max_lev: 1,
+      tip_tiers: [{ tip: 0.05 }], // 5%
+    };
+
+    // Pass low-tip FIRST in the input list. With order-of-arrival
+    // semantics (the original bug), low-tip would be absorbed first
+    // and consume the capacity. With sorting, high-tip wins.
+    const r = absorbImbalance({
+      state: s,
+      unmatchedLongs: [lowTipBid, highTipBid],
+      unmatchedShorts: [],
+      openPrice: 100,
+      rebateBudget: 1_000,
+    });
+
+    expect(r.absorbedContracts).toHaveLength(1);
+    expect(r.absorbedContracts[0].absorbedUserId).toBe("U_HIGH");
+  });
+
+  it("falls back to a smaller bid when the highest-tip one doesn't fit capacity", () => {
+    // Highest-tip bid is too big for capacity, but a smaller bid still
+    // fits. With `continue` (not `break`) on capacity, we keep trying.
+    let s = initLapPoolState();
+    s = adjustThreadDerived({ state: s, uid: "LP", delta: 1000 }).state;
+    // Capacity = 1.5 × 1000 = 1500.
+
+    const huge = {
+      id: "U_HUGE",
+      base_margin: 5000, // 5000 × 1× = 5000 notional, exceeds 1500 cap
+      max_lev: 1,
+      tip_tiers: [{ tip: 0.05 }], // 5% — huge tipForBid
+    };
+    const small = {
+      id: "U_SMALL",
+      base_margin: 800, // fits
+      max_lev: 1,
+      tip_tiers: [{ tip: 0.02 }], // 2%
+    };
+
+    const r = absorbImbalance({
+      state: s,
+      unmatchedLongs: [huge, small],
+      unmatchedShorts: [],
+      openPrice: 100,
+      rebateBudget: 1_000,
+    });
+
+    expect(r.absorbedContracts).toHaveLength(1);
+    expect(r.absorbedContracts[0].absorbedUserId).toBe("U_SMALL");
+  });
+
+  it("falls back to a cheaper bid when the highest-tip one breaks the budget", () => {
+    let s = initLapPoolState();
+    s = adjustThreadDerived({ state: s, uid: "LP", delta: 10_000 }).state;
+
+    const expensive = {
+      id: "U_EXP",
+      base_margin: 1000,
+      max_lev: 1,
+      tip_tiers: [{ tip: 0.05 }], // 50 tip
+    };
+    const cheap = {
+      id: "U_CHEAP",
+      base_margin: 1000,
+      max_lev: 1,
+      tip_tiers: [{ tip: 0.01 }], // 10 tip
+    };
+
+    // Budget = 30. Expensive ($50 tip) breaks budget; cheap ($10 tip) fits.
+    const r = absorbImbalance({
+      state: s,
+      unmatchedLongs: [expensive, cheap],
+      unmatchedShorts: [],
+      openPrice: 100,
+      rebateBudget: 30,
+    });
+
+    expect(r.absorbedContracts).toHaveLength(1);
+    expect(r.absorbedContracts[0].absorbedUserId).toBe("U_CHEAP");
+    expect(r.totalRebate).toBeCloseTo(10);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Adverse-selection filter — classifier-aware absorption
+// ---------------------------------------------------------------------------
+
+describe("absorbImbalance classifier filter", () => {
+  function poolWithStake() {
+    let s = initLapPoolState();
+    s = adjustThreadDerived({ state: s, uid: "LP", delta: 10_000 }).state;
+    return s;
+  }
+
+  it("absorbs all bids when no classifierState is supplied (backward compat)", () => {
+    const r = absorbImbalance({
+      state: poolWithStake(),
+      unmatchedLongs: [
+        { id: "WHALE", base_margin: 1000, max_lev: 1, tip_tiers: [{ tip: 0.02 }] },
+        { id: "RETAIL", base_margin: 1000, max_lev: 1, tip_tiers: [{ tip: 0.02 }] },
+      ],
+      unmatchedShorts: [],
+      openPrice: 100,
+      rebateBudget: 1_000,
+    });
+    expect(r.absorbedContracts).toHaveLength(2);
+  });
+
+  it("excludes A-classified bids when classifierState is supplied", () => {
+    // Build a classifier state where WHALE is class A, RETAIL is class B.
+    const classifierState = {
+      byUser: {
+        WHALE: {
+          closedPositions: new Array(20).fill({}),
+          currentClass: "A",
+          avgMargin: 500,
+        },
+        RETAIL: {
+          closedPositions: new Array(20).fill({}),
+          currentClass: "B",
+          avgMargin: 500,
+        },
+      },
+    };
+    const r = absorbImbalance({
+      state: poolWithStake(),
+      unmatchedLongs: [
+        { id: "WHALE", base_margin: 1000, max_lev: 1, tip_tiers: [{ tip: 0.02 }] },
+        { id: "RETAIL", base_margin: 1000, max_lev: 1, tip_tiers: [{ tip: 0.02 }] },
+      ],
+      unmatchedShorts: [],
+      openPrice: 100,
+      rebateBudget: 1_000,
+      classifierState,
+    });
+    expect(r.absorbedContracts).toHaveLength(1);
+    expect(r.absorbedContracts[0].absorbedUserId).toBe("RETAIL");
+  });
+
+  it("treats unknown users as B (absorbs them)", () => {
+    // No record in classifier → routeFor returns "B" by default.
+    const classifierState = { byUser: {} };
+    const r = absorbImbalance({
+      state: poolWithStake(),
+      unmatchedLongs: [
+        { id: "STRANGER", base_margin: 1000, max_lev: 1, tip_tiers: [{ tip: 0.02 }] },
+      ],
+      unmatchedShorts: [],
+      openPrice: 100,
+      rebateBudget: 1_000,
+      classifierState,
+    });
+    expect(r.absorbedContracts).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // maintainAbsorbed — per-tick aged-contract close pass
 // ---------------------------------------------------------------------------
 
@@ -542,6 +812,53 @@ describe("maintainAbsorbed", () => {
     });
     expect(r.closed).toHaveLength(0);
     expect(r.state.activeAbsorbed).toHaveLength(1);
+  });
+
+  it("emergency-unwinds oldest contracts when capacity is breached", () => {
+    // Simulate the thundering-herd scenario:
+    // 1. Pool has $1000 stake, capacity cap $1500 notional.
+    // 2. Pool absorbs three $500 × 1× = $500 notional contracts → $1500 active.
+    //    Utilisation = 1.0 of cap (right at the edge).
+    // 3. Stake gets reduced to $500 (e.g., via FLOAT redemption draining
+    //    threadDerived). Cap drops to $750. Active stays at $1500 →
+    //    utilisation = 2.0 of cap. Maintain pass MUST emergency-unwind.
+    let s = initLapPoolState();
+    s = adjustThreadDerived({ state: s, uid: "LP", delta: 1000 }).state;
+    for (let i = 0; i < 3; i++) {
+      s = absorbImbalance({
+        state: s,
+        unmatchedLongs: [
+          { id: `U${i}`, base_margin: 500, max_lev: 1, tip_tiers: [{ tip: 0.02 }], activePair: "BTCUSD" },
+        ],
+        unmatchedShorts: [],
+        openPrice: 100,
+        currentEpoch: i,
+        rebateBudget: 1_000,
+      }).state;
+    }
+    expect(s.activeAbsorbed).toHaveLength(3);
+    // Drain the LP's stake to half — simulating redemption pressure.
+    s = adjustThreadDerived({ state: s, uid: "LP", delta: -500 }).state;
+
+    // Maintenance pass within the hold window — should still
+    // emergency-unwind because utilisation exceeds 1.5×.
+    const r = maintainAbsorbed({
+      state: s,
+      pricesByPair: { BTCUSD: 100 },
+      currentEpoch: 5, // inside hold window (none aged)
+      maxHoldEpochs: 20,
+    });
+    expect(r.closed.length).toBeGreaterThan(0);
+    expect(r.closed.every((c) => c.reason === "capacityBreach")).toBe(true);
+    // Oldest first (U0 before U1, etc).
+    expect(r.closed[0].contract.absorbedUserId).toBe("U0");
+    // After unwind, utilisation must be back at or below the cap.
+    const stake = r.state.totalStake;
+    const notional = (r.state.activeAbsorbed ?? []).reduce(
+      (s, c) => s + (c.margin ?? 0) * (c.leverage ?? 1),
+      0
+    );
+    expect(notional).toBeLessThanOrEqual(stake * 1.5 + 1e-6);
   });
 
   it("aggregates realised P&L across multiple aged contracts", () => {

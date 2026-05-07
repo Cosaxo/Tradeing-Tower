@@ -40,6 +40,8 @@
 import {
   LAP_POOL_LOCKUP_EPOCHS,
   LAP_POOL_VOLUNTARY_YIELD_BONUS,
+  LAP_POOL_REBATE_FEE_SHARE_MAX,
+  LAP_POOL_REBATE_FEE_SHARE_MIN,
   BBOOK_MAX_NOTIONAL_RATIO, // we reuse the same capacity gate as B-book
 } from "../constants/system.js";
 import { getEntropyMultForUser } from "./auction.js";
@@ -73,6 +75,40 @@ export function effectiveNotionalRatio(realizedSigma, baseRatio = BBOOK_MAX_NOTI
   const factor = REFERENCE_SIGMA / realizedSigma;
   const clamped = Math.min(1.0, Math.max(ADAPTIVE_FLOOR, factor));
   return baseRatio * clamped;
+}
+
+// Dynamic rebate-fee share: scales the pool's draw on stability fees
+// from MAX (empty pool — fresh LPs need bigger incentive to deposit)
+// down to MIN (full pool — existing LPs are already earning fully and
+// the protocol can keep more of the fee).
+//
+// Utilisation is normalised so 0 = empty pool, 1 = at the capacity cap.
+// Linear interpolation. Above the cap (rare; means an unwind is
+// imminent) we hold at MIN.
+//
+// share(0) = MAX, share(1) = MIN.
+//
+// The reviewer flagged hardcoding 70/30 as a governance liability; this
+// makes the parameter self-calibrating around the static midpoint.
+export function dynamicRebateFeeShare({
+  utilization,
+  min = LAP_POOL_REBATE_FEE_SHARE_MIN,
+  max = LAP_POOL_REBATE_FEE_SHARE_MAX,
+}) {
+  if (!Number.isFinite(utilization) || utilization <= 0) return max;
+  const u = Math.min(1, utilization);
+  return max + (min - max) * u; // u=0 → max, u=1 → min
+}
+
+// Convenience: compute utilisation as a 0–1 fraction of the cap.
+// Returns 0 for empty pools (no stake → no utilisation defined; we
+// treat this as "needs LPs" → triggers max share via the interpolator).
+export function poolUtilizationFraction(state, maxNotionalRatio = BBOOK_MAX_NOTIONAL_RATIO) {
+  const stake = poolStake(state);
+  if (stake <= 0) return 0;
+  const cap = stake * maxNotionalRatio;
+  if (cap <= 0) return 0;
+  return totalActiveNotional(state) / cap;
 }
 
 // ---------------------------------------------------------------------------

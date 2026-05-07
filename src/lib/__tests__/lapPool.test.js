@@ -19,6 +19,8 @@ import {
   closeAbsorbed,
   maintainAbsorbed,
   effectiveNotionalRatio,
+  dynamicRebateFeeShare,
+  poolUtilizationFraction,
 } from "../lapPool.js";
 
 // ---------------------------------------------------------------------------
@@ -575,6 +577,62 @@ describe("effectiveNotionalRatio", () => {
     expect(effectiveNotionalRatio(0)).toBe(1.5);
     expect(effectiveNotionalRatio(NaN)).toBe(1.5);
     expect(effectiveNotionalRatio(-0.01)).toBe(1.5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dynamic rebate-fee share
+// ---------------------------------------------------------------------------
+
+describe("dynamicRebateFeeShare", () => {
+  it("returns max share at zero utilisation (empty pool — attract LPs)", () => {
+    expect(dynamicRebateFeeShare({ utilization: 0 })).toBeCloseTo(0.9);
+  });
+
+  it("returns min share at full utilisation (saturated — protocol takes more)", () => {
+    expect(dynamicRebateFeeShare({ utilization: 1 })).toBeCloseTo(0.4);
+  });
+
+  it("interpolates linearly between min and max", () => {
+    expect(dynamicRebateFeeShare({ utilization: 0.5 })).toBeCloseTo(0.65, 2);
+  });
+
+  it("clamps utilisation above 1.0 to the min share", () => {
+    expect(dynamicRebateFeeShare({ utilization: 2 })).toBeCloseTo(0.4);
+  });
+
+  it("returns max on invalid utilisation (no NaN propagation)", () => {
+    expect(dynamicRebateFeeShare({ utilization: NaN })).toBeCloseTo(0.9);
+    expect(dynamicRebateFeeShare({ utilization: -1 })).toBeCloseTo(0.9);
+  });
+
+  it("respects custom min/max overrides", () => {
+    expect(dynamicRebateFeeShare({ utilization: 0, min: 0.2, max: 0.8 })).toBeCloseTo(0.8);
+    expect(dynamicRebateFeeShare({ utilization: 1, min: 0.2, max: 0.8 })).toBeCloseTo(0.2);
+  });
+});
+
+describe("poolUtilizationFraction", () => {
+  it("returns 0 for empty pools", () => {
+    expect(poolUtilizationFraction(initLapPoolState())).toBe(0);
+  });
+
+  it("returns ratio of active notional to (stake × cap)", () => {
+    let s = initLapPoolState();
+    s = adjustThreadDerived({ state: s, uid: "LP", delta: 1000 }).state;
+    // No absorption yet → 0 utilisation.
+    expect(poolUtilizationFraction(s)).toBe(0);
+    // Absorb $750 notional (stake=$1000 × cap=1.5 = $1500 → 50% utilised).
+    s = absorbImbalance({
+      state: s,
+      unmatchedLongs: [
+        { id: "U", base_margin: 750, max_lev: 1, tip_tiers: [{ tip: 0.02 }] },
+      ],
+      unmatchedShorts: [],
+      openPrice: 100,
+      rebateBudget: 1_000,
+    }).state;
+    expect(poolUtilizationFraction(s)).toBeCloseTo(0.5, 2);
   });
 });
 

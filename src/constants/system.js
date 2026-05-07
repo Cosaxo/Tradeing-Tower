@@ -147,4 +147,18 @@ export const LAP_POOL_VOLUNTARY_YIELD_BONUS = 1.4;
 // tick to fund rebate income. The rest stays with the protocol fee
 // ledger. Capping at < 1 keeps a residual fee stream for the protocol
 // even when the pool is fully utilised.
+//
+// The constant is the FALLBACK / midpoint. The hook computes a
+// utilisation-aware share via dynamicRebateFeeShare(), which interpolates
+// between LAP_POOL_REBATE_FEE_SHARE_MAX (when the pool is empty and
+// needs LPs) and LAP_POOL_REBATE_FEE_SHARE_MIN (when the pool is
+// saturated and LPs are already fully earning). The constant value is
+// preserved for backward compatibility with callers that don't pass a
+// utilisation signal.
 export const LAP_POOL_REBATE_FEE_SHARE = 0.7;
+
+// Dynamic-share clamps. Higher MAX = more attractive to fresh LPs when
+// the pool is empty; lower MIN = better protocol revenue when the pool
+// is full and LPs are already getting compensated by their position.
+export const LAP_POOL_REBATE_FEE_SHARE_MAX = 0.9;
+export const LAP_POOL_REBATE_FEE_SHARE_MIN = 0.4;

@@ -134,6 +134,19 @@ export const LAP_POOL_SCENARIOS = {
     sigmaPerTick: 0.015,
     ticks: 200,
   },
+  INFORMED_FLOW: {
+    id: "INFORMED_FLOW",
+    name: "Informed minority-side flow",
+    description:
+      "Half the per-tick bids come from INFORMED traders with k-tick price foresight: they pick the side that will profit from the upcoming move, and the unmatched flow lands on that winning side. WITHOUT the classifier filter, the pool absorbs them and bleeds (it's structurally on the losing side). WITH the filter (A-classified bids excluded), the pool only takes uninformed retail flow and stays close to neutral. Empirical validation of the filter's value.",
+    bidsPerTick: 4,
+    imbalanceSide: "INFORMED",       // dynamic per tick — picks the winning side
+    feeRateOnBidMargin: 0.04,
+    sigmaPerTick: 0.008,             // a bit higher so look-ahead bidders find real moves
+    informedBidsPerTick: 2,          // 2 of the 4 are informed (50%)
+    informedLookahead: 5,            // peek 5 ticks ahead
+    ticks: 200,
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -142,13 +155,16 @@ export const LAP_POOL_SCENARIOS = {
 
 const LEVERAGE_OPTIONS = [1, 2, 3, 5];
 
-function makeSyntheticBid({ rng, side, idx, tickIndex }) {
+function makeSyntheticBid({ rng, side, idx, tickIndex, prefix = null }) {
   // Lognormal margin: median ~$1000, std ~$500.
   const margin = Math.exp(6.7 + 0.5 * gaussian(rng));
   const leverage =
     LEVERAGE_OPTIONS[Math.min(LEVERAGE_OPTIONS.length - 1, Math.floor(rng() * LEVERAGE_OPTIONS.length))];
+  // Prefix lets the harness encode informed-vs-retail in the user id so
+  // the classifier filter can separate them downstream.
+  const idPrefix = prefix ?? side;
   return {
-    id: `${side}-${tickIndex}-${idx}`,
+    id: `${idPrefix}-${tickIndex}-${idx}`,
     base_margin: Math.max(50, margin), // floor at $50 so MIN_FILL_LEVERAGE doesn't rule everyone out
     max_lev: leverage,
     tip_tiers: [{ tip: 0.02 }],
@@ -164,9 +180,54 @@ export function runLapPoolYieldSession({
   scenario,
   seed = 1,
   initialDeposit = 10_000,
+  // INFORMED_FLOW only: when true, A-classified informed bidders are
+  // filtered out at absorbImbalance via classifierState. When false,
+  // the pool absorbs everyone — the baseline against which the filter
+  // is empirically validated.
+  useClassifierFilter = false,
 } = {}) {
   if (!scenario) throw new Error("scenario required");
-  const rng = mulberry32(seed);
+
+  const usingInformed = (scenario.informedBidsPerTick ?? 0) > 0;
+
+  // For informed-flow scenarios the price walk is precomputed up front
+  // so informed bidders can read it (foresight). RNG streams are
+  // separated: walk seed = `seed`, bid-generation seed = `seed + 17`.
+  // For other scenarios the original tick-by-tick walk is preserved
+  // (one combined RNG, unchanged from previous behavior).
+  let priceWalk = null;
+  let rng;
+  if (usingInformed) {
+    const walkRng = mulberry32(seed);
+    const length = scenario.ticks + (scenario.informedLookahead ?? 1) + 2;
+    priceWalk = [100];
+    for (let i = 0; i < length; i++) {
+      priceWalk.push(
+        priceWalk[priceWalk.length - 1] * Math.exp(scenario.sigmaPerTick * gaussian(walkRng))
+      );
+    }
+    rng = mulberry32(seed + 17);
+  } else {
+    rng = mulberry32(seed);
+  }
+
+  // Synthetic classifier state — only built when the filter is requested
+  // and the scenario has informed bidders. Marks `INFORMED-*` user ids
+  // as A-classified; everyone else (RETAIL-*, side-prefixed) defaults to
+  // B in routeFor.
+  let classifierState = null;
+  if (useClassifierFilter && usingInformed) {
+    classifierState = { byUser: {} };
+    for (let t = 1; t <= scenario.ticks; t++) {
+      for (let i = 0; i < (scenario.informedBidsPerTick ?? 0); i++) {
+        classifierState.byUser[`INFORMED-${t}-${i}`] = {
+          closedPositions: new Array(20).fill({}),
+          currentClass: "A",
+          avgMargin: 1000,
+        };
+      }
+    }
+  }
 
   const userId = "U";
   let state = initLapPoolState();
@@ -177,7 +238,7 @@ export function runLapPoolYieldSession({
     currentEpoch: 0,
   }).state;
 
-  let price = 100;
+  let price = priceWalk ? priceWalk[0] : 100;
   const metrics = {
     rebateFunded: 0,
     rebateRequested: 0,
@@ -185,21 +246,37 @@ export function runLapPoolYieldSession({
     contractsAbsorbed: 0,
     contractsClosed: 0,
     maxActiveAbsorbed: 0,
+    informedAbsorbed: 0, // count of INFORMED-* contracts that landed on the pool
+    retailAbsorbed: 0,
   };
 
   const flipBlock = 20;
 
   for (let t = 1; t <= scenario.ticks; t++) {
     // Side selection.
-    let side = scenario.imbalanceSide;
-    if (side === "ALTERNATING") {
+    let side;
+    if (scenario.imbalanceSide === "ALTERNATING") {
       side = Math.floor(t / flipBlock) % 2 === 0 ? "LONG" : "SHORT";
+    } else if (scenario.imbalanceSide === "INFORMED") {
+      // Informed flow: pick the side that profits from the next look-ahead window.
+      const priceNow = priceWalk[t];
+      const priceFuture = priceWalk[t + (scenario.informedLookahead ?? 1)];
+      side = priceFuture > priceNow ? "LONG" : "SHORT";
+    } else {
+      side = scenario.imbalanceSide;
     }
 
-    // Generate bids.
-    const bids = Array.from({ length: scenario.bidsPerTick }, (_, i) =>
-      makeSyntheticBid({ rng, side, idx: i, tickIndex: t })
-    );
+    // Generate bids — split between informed and retail when applicable.
+    const informedCount = scenario.informedBidsPerTick ?? 0;
+    const retailCount = Math.max(0, scenario.bidsPerTick - informedCount);
+    const bids = [];
+    for (let i = 0; i < informedCount; i++) {
+      bids.push(makeSyntheticBid({ rng, side, idx: i, tickIndex: t, prefix: "INFORMED" }));
+    }
+    for (let i = 0; i < retailCount; i++) {
+      bids.push(makeSyntheticBid({ rng, side, idx: i, tickIndex: t, prefix: "RETAIL" }));
+    }
+
     const totalMargin = bids.reduce((s, b) => s + b.base_margin, 0);
     const rebateBudget =
       totalMargin * scenario.feeRateOnBidMargin * LAP_POOL_REBATE_FEE_SHARE;
@@ -213,18 +290,28 @@ export function runLapPoolYieldSession({
       openPrice: price,
       currentEpoch: t,
       rebateBudget,
+      classifierState,
     });
     state = absorb.state;
     metrics.rebateFunded += absorb.totalRebate;
     metrics.rebateRequested += absorb.rebateRequested;
     metrics.contractsAbsorbed += absorb.absorbedContracts.length;
+    for (const c of absorb.absorbedContracts) {
+      if ((c.absorbedUserId ?? "").startsWith("INFORMED-")) metrics.informedAbsorbed += 1;
+      else metrics.retailAbsorbed += 1;
+    }
 
     if (absorb.totalRebate > 0) {
       state = distributeRebate({ state, totalRebate: absorb.totalRebate }).state;
     }
 
-    // Price walk.
-    price *= Math.exp(scenario.sigmaPerTick * gaussian(rng));
+    // Advance price. Informed scenarios read from the precomputed walk;
+    // others continue the original tick-by-tick random walk.
+    if (priceWalk) {
+      price = priceWalk[t];
+    } else {
+      price *= Math.exp(scenario.sigmaPerTick * gaussian(rng));
+    }
 
     // Per-tick maintenance: close aged contracts.
     const maint = maintainAbsorbed({
@@ -294,6 +381,7 @@ export function runLapPoolYieldBatch({
   n = 200,
   seedBase = 0,
   initialDeposit = 10_000,
+  useClassifierFilter = false,
 } = {}) {
   if (!scenario) throw new Error("scenario required");
   const results = [];
@@ -303,6 +391,7 @@ export function runLapPoolYieldBatch({
         scenario,
         seed: seedBase + i + 1,
         initialDeposit,
+        useClassifierFilter,
       })
     );
   }
@@ -350,6 +439,12 @@ export function runLapPoolYieldBatch({
         Math.max(1, n),
       maxActiveAbsorbed:
         results.reduce((s, r) => s + r.metrics.maxActiveAbsorbed, 0) /
+        Math.max(1, n),
+      informedAbsorbed:
+        results.reduce((s, r) => s + (r.metrics.informedAbsorbed ?? 0), 0) /
+        Math.max(1, n),
+      retailAbsorbed:
+        results.reduce((s, r) => s + (r.metrics.retailAbsorbed ?? 0), 0) /
         Math.max(1, n),
     },
     rawFractions: fractions,

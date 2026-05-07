@@ -28,11 +28,10 @@ import {
   distributeRebate,
   maintainAbsorbed,
   effectiveNotionalRatio,
+  dynamicRebateFeeShare,
+  poolUtilizationFraction,
 } from "../lib/lapPool.js";
-import {
-  LAP_POOL_HOLD_EPOCHS,
-  LAP_POOL_REBATE_FEE_SHARE,
-} from "../constants/system.js";
+import { LAP_POOL_HOLD_EPOCHS } from "../constants/system.js";
 import { detectTriggeredEvents } from "../lib/insuranceEvents.js";
 import { settleMarketTick, withdrawInsurer, postInsurer } from "../lib/insuranceMarket.js";
 import { settleReinsuranceTick } from "../lib/reinsurance.js";
@@ -341,12 +340,20 @@ export function useEpochLoop({
           (workingLapPool.totalStake ?? 0) > 0 &&
           rawStabilityFee > 0
         ) {
-          const rebateBudget = rawStabilityFee * LAP_POOL_REBATE_FEE_SHARE;
           // Adaptive cap: in high-vol regimes, the pool is allowed less
           // total exposure per dollar of stake. Tightens the leash
           // exactly when directional risk is highest.
           const adaptiveCap = effectiveNotionalRatio(realizedSigma);
           maxAdaptiveCapThisTick = Math.min(maxAdaptiveCapThisTick, adaptiveCap);
+          // Dynamic fee share: empty / under-utilised pool gets a
+          // bigger fraction of the stability fee as rebate (attract
+          // LPs); full pool gets a smaller fraction (LPs are already
+          // earning, residual stays with protocol). Computed against
+          // the adaptive cap so the share scales with the actual
+          // current capacity, not the static one.
+          const utilFraction = poolUtilizationFraction(workingLapPool, adaptiveCap);
+          const feeShare = dynamicRebateFeeShare({ utilization: utilFraction });
+          const rebateBudget = rawStabilityFee * feeShare;
           const absorb = absorbImbalance({
             state: workingLapPool,
             unmatchedLongs: auctionResult.unmatchedLongs,

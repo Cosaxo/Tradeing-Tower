@@ -66,6 +66,53 @@ describe("LAP pool yield harness", () => {
     expect(volSpread).toBeGreaterThan(steadySpread);
   });
 
+  it("INFORMED_FLOW: classifier filter excludes A-tagged bids cleanly", () => {
+    const sc = LAP_POOL_SCENARIOS.INFORMED_FLOW;
+    const off = runLapPoolYieldBatch({
+      scenario: sc,
+      n: 30,
+      initialDeposit: 100_000, // capacity not binding so the filter effect is visible
+      useClassifierFilter: false,
+    });
+    const on = runLapPoolYieldBatch({
+      scenario: sc,
+      n: 30,
+      initialDeposit: 100_000,
+      useClassifierFilter: true,
+    });
+    // Clean separation: with filter, NO informed bids are absorbed.
+    expect(on.metricsMean.informedAbsorbed).toBe(0);
+    // Without filter, informed bids ARE absorbed (substantial number).
+    expect(off.metricsMean.informedAbsorbed).toBeGreaterThan(50);
+  });
+
+  it("INFORMED_FLOW: filter materially reduces realised pool losses", () => {
+    // With informed flow gaming the pool, the realized P&L is the
+    // ground-truth measure of harm done. Filter should cut it.
+    const sc = LAP_POOL_SCENARIOS.INFORMED_FLOW;
+    const off = runLapPoolYieldBatch({
+      scenario: sc,
+      n: 60,
+      initialDeposit: 500_000, // capacity definitely loose at this size
+      useClassifierFilter: false,
+    });
+    const on = runLapPoolYieldBatch({
+      scenario: sc,
+      n: 60,
+      initialDeposit: 500_000,
+      useClassifierFilter: true,
+    });
+    // Both cases lose money to the directional move (informed bidders
+    // are right by construction). But the filter should leave the pool
+    // with a *less negative* realised P&L — empirical proof that the
+    // filter is doing protective work.
+    expect(on.metricsMean.realizedPnl).toBeGreaterThan(off.metricsMean.realizedPnl);
+    // And meaningfully so — at least 30% reduction in loss.
+    expect(Math.abs(on.metricsMean.realizedPnl)).toBeLessThan(
+      Math.abs(off.metricsMean.realizedPnl) * 0.7
+    );
+  });
+
   it("HIGH_IMBALANCE absorbs more contracts and earns more rebate than STEADY", () => {
     // Big initial deposit so the capacity gate (1.5× stake) doesn't
     // pinch HIGH's bid throughput; otherwise both scenarios saturate
